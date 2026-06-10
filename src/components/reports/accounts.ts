@@ -1,0 +1,94 @@
+// Real dealer accounts — generated from the CSM tracker sheet (Live + Churned only; In_Ob = onboarding).
+// Source: docs.google.com/spreadsheets/d/15BScfybsSmmvQefXQxN-TYA_-cCNkD8qLDui7EML3ss
+// Churn status is NOT surfaced in the UI — churned accounts still load their historical data.
+
+export type AccountStage = "Live" | "Churned" | "In_Ob";
+
+export interface Account {
+  teamId: string;
+  name: string;
+  agents: string[];
+  stage: AccountStage;
+}
+
+export const ACCOUNTS: Account[] = [
+  { teamId: "b75e784fa2", name: "Auto Depot of Navarre", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "1cfc2c415d", name: "Automax Atlanta", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "34ddfad075", name: "Autoplex", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "9a72db996f", name: "Beaver County Auto", agents: ["Sales Outbound","Sales Inbound","Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "a9e37101ea", name: "Bob King Mazda", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "f89ae024ba", name: "Bridge Auto Group", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "e4047018-c", name: "Bridgeton Auto Mall", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "6d828d314", name: "Bridgeton Auto Mall", agents: ["Service Inbound","Service Outbound"], stage: "Churned" },
+  { teamId: "5d2ffea9c0", name: "Brown Daub Kia", agents: ["Sales Inbound","Sales Outbound","Service Outbound","Service Inbound"], stage: "Live" },
+  { teamId: "9c9e3d1259", name: "Burns Hyundai", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "838e507a-e", name: "CallSource", agents: ["Service Inbound"], stage: "Churned" },
+  { teamId: "1a916c0965", name: "Carson Hyundai", agents: ["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"], stage: "Live" },
+  { teamId: "80dc6dcf0", name: "Chapman Chevrolet Buick gmc ltd.", agents: ["Sales Inbound","Service Inbound"], stage: "Live" },
+  { teamId: "3b8dee0632", name: "CornHusker Auto Center", agents: ["Sales Inbound","Sales Outbound","Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "37329f9976", name: "CornHusker Nissan", agents: ["Sales Inbound","Sales Outbound","Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "3f96401f8d", name: "Courtesy Ford", agents: ["Sales Inbound","Sales Outbound","Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "49a06313cf", name: "Covina Kia", agents: ["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"], stage: "Live" },
+  { teamId: "723708ae8f", name: "DeNooyer Chevrolet Kalamazoo", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "6730ea9132", name: "Dream Lawrence Nissan", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "7607d0e6f5", name: "Dream Nissan Kansas City", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "3d3deabc98", name: "Dream Nissan Midwest", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "e08ec18b4f", name: "Dutch Miller Kia Charlotte", agents: ["Sales Inbound","Sales Outbound","Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "5c99ab695a", name: "Eddie VW", agents: ["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"], stage: "Live" },
+  { teamId: "8559da8aef", name: "Edwards Chevrolet 280", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "4e24c50b58", name: "Edwards Chevrolet Downtown", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "d6947fc2e0", name: "Edwards Honda", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "e9401d52e5", name: "Feldman Chevrolet of Novi", agents: ["Sales Inbound"], stage: "Churned" },
+  { teamId: "09a20b81a4", name: "Feldman Kia of Novi", agents: ["Sales Inbound"], stage: "Churned" },
+  { teamId: "5480771b21", name: "Feldmann Imports, Inc.", agents: ["Sales Inbound","Service Inbound"], stage: "Live" },
+  { teamId: "33a108cec9", name: "Guam AutoSpot", agents: ["Sales Inbound","Service Inbound"], stage: "Live" },
+  { teamId: "03f8bdc40c", name: "Habberstad Kia", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "b7184697be", name: "Heiser Chevrolet of West Allis", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "9923577d07", name: "Honda DTLA", agents: ["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"], stage: "Live" },
+  { teamId: "2b110492b6", name: "Honda Reseda", agents: ["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"], stage: "Live" },
+  { teamId: "c885afdbe9", name: "Horne Mazda", agents: ["Sales Outbound","Service Outbound"], stage: "Live" },
+  { teamId: "a5c07ee7d2", name: "Hyundai of Canton", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "b4df3297f5", name: "I-40 Autos, LLC", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "a942066891", name: "James Martin Chevrolet Buick, Inc.", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "cb5d950847", name: "John Elway Harley-Davidson", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "0dcef03834", name: "John Hiester Chevrolet", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "9c1ad81386", name: "Jones CDJR", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "c18a7a6d8d", name: "Landers CDJR", agents: ["Sales Inbound","Service Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "b60b1bb221", name: "Lucki Mazda", agents: ["Service Inbound","Sales Inbound"], stage: "Live" },
+  { teamId: "bf524480-3", name: "McGrath Acura", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "987d7cb5f5", name: "McGrath Acura", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "8f59b8483b", name: "Mercedes Benz Foothill", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "f222a4f3ff", name: "Mercedes Laguna Niguel", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "341a56683a", name: "Mercedes-Benz of Arlington", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "a4bc5d1392", name: "Nissan of Ardmore", agents: ["Sales Outbound"], stage: "Churned" },
+  { teamId: "695a247be2", name: "Nissan of Boone", agents: ["Sales Inbound","Service Inbound"], stage: "Churned" },
+  { teamId: "5a4c21a96f", name: "PalmEasy Motors PA LLC", agents: ["Sales Inbound","Service Inbound"], stage: "Live" },
+  { teamId: "e9e19bca63", name: "Paragon Acura", agents: ["Service Outbound"], stage: "Live" },
+  { teamId: "5895de05b", name: "Paragon Honda", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "e8cf6f4867", name: "Pinnacle Peak Auto Sales", agents: ["Sales Inbound"], stage: "Churned" },
+  { teamId: "fdec030155", name: "Principle BMW MINI of San Antonio", agents: ["Sales Inbound","Service Inbound"], stage: "Live" },
+  { teamId: "526cc6bf64", name: "Rainbow Motor Sales", agents: ["Sales Inbound","Sales Outbound"], stage: "Churned" },
+  { teamId: "d4a682cb2a", name: "Rick Weaver Chevrolet", agents: ["Sales Inbound","Sales Outbound","Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "eee817b4cd", name: "Southey Ford", agents: ["Sales Inbound"], stage: "Live" },
+  { teamId: "5f6644c1f1", name: "Sport Durst Hyundai", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "27029bf75c", name: "Sport Durst Mazda", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "a862eefd2e", name: "Sport Durst Mazda of Goldsboro", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "cb9198f115", name: "Sport Durst Subaru", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "73ff62fd21", name: "Sport Durst VW of Goldsboro", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "5b65de92e5", name: "Sport Durst VW of Jacksonville", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "a0a4332434", name: "Subaru Wichita", agents: ["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"], stage: "Live" },
+  { teamId: "7fb99e6ee1", name: "Super Autos Miami", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "26fe9492b9", name: "Toronto Honda", agents: ["Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "e05e67affb", name: "Vatland Honda", agents: ["Sales Inbound","Sales Outbound"], stage: "Live" },
+  { teamId: "bf718528af", name: "Victory Toyota of Midtown", agents: ["Service Inbound"], stage: "Live" },
+  { teamId: "8d3117cf-b", name: "Warren Chrysler Dodge Jeep Ram", agents: ["Sales Inbound"], stage: "Churned" },
+  { teamId: "405beccbe9", name: "Wolfchase Honda", agents: ["Service Outbound","Sales Outbound","Sales Inbound"], stage: "Live" },
+  { teamId: "d14b8b8338", name: "Wolfchase Nissan", agents: ["Service Outbound","Sales Outbound","Sales Inbound"], stage: "Live" },
+  { teamId: "d2999d21-c", name: "World Car Kia San Antonio", agents: ["Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "cefa13f833", name: "World Car Kia South", agents: ["Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "d4c824c0-9", name: "World Car Mazda San Antonio", agents: ["Service Inbound","Service Outbound"], stage: "Live" },
+  { teamId: "f618492d10", name: "Zeigler Hyundai of Racine", agents: ["Sales Inbound","Sales Outbound","Service Inbound","Service Outbound"], stage: "Live" },
+];
+
+// Default selection — Honda DTLA has the richest live data.
+export const DEFAULT_ACCOUNT = ACCOUNTS.find((a) => a.teamId === "9923577d07") ?? ACCOUNTS[0];
