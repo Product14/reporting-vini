@@ -89,6 +89,3 @@ export const ACCOUNTS: Account[] = [
   { teamId: "d4c824c0-9", name: "World Car Mazda San Antonio", agents: ["Service Inbound","Service Outbound"], stage: "Live" },
   { teamId: "f618492d10", name: "Zeigler Hyundai of Racine", agents: ["Sales Inbound","Sales Outbound","Service Inbound","Service Outbound"], stage: "Live" },
 ];
-
-// Default selection — Honda DTLA has the richest live data.
-export const DEFAULT_ACCOUNT = ACCOUNTS.find((a) => a.teamId === "9923577d07") ?? ACCOUNTS[0];

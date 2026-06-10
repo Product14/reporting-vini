@@ -1,12 +1,17 @@
 "use client";
 
-import React, { createContext, useContext, useMemo, useState } from "react";
-import { ACCOUNTS, DEFAULT_ACCOUNT, type Account, type AccountStage } from "./accounts";
+import React, { createContext, useContext, useState } from "react";
+import { ACCOUNTS, type Account, type AccountStage } from "./accounts";
 
 /* ────────────────────────────────────────────────────────────────────────────
- * The reports surface is scoped to a real dealer account (from the CSM tracker).
- * The bottom "control center" is a real account picker: choosing a rooftop sets
- * the team_id the live data queries, and its stage drives the lifecycle UI.
+ * The reports surface is scoped to a single dealer rooftop, identified entirely
+ * by the ?team_id= URL param — the host (iframe parent) passes it in. There is no
+ * in-app rooftop switching: the team is whatever the host scoped us to.
+ *
+ * If that team_id is in the CSM tracker we use its metadata (display name, agent
+ * set, lifecycle stage); otherwise we synthesize a minimal live account so ANY
+ * team_id the host passes still renders a full report. The stage drives the
+ * lifecycle UI:
  *   In_Ob  → onboarding (importing, not live yet)
  *   Live   → live report
  *   Churned→ live report too (we never surface churn to the account)
@@ -43,107 +48,47 @@ export function scenarioView(s: Scenario): ScenarioView {
   }
 }
 
+// No team_id in the URL → empty sentinel. Pages key off teamId === "" to render the
+// "No rooftop selected" prompt instead of a report.
+const NO_ACCOUNT: Account = { teamId: "", name: "", agents: [], stage: "Live" };
+
+/* Resolve the rooftop for a given team_id. Known ids (in the CSM tracker) carry full metadata;
+ * an unknown id still gets a minimal live account so any team the host scopes us to renders a
+ * full report — agentsForAccount() falls back to showing all agents when agents is empty. */
+function resolveAccount(teamId: string | null | undefined): Account {
+  if (!teamId) return NO_ACCOUNT;
+  return ACCOUNTS.find((a) => a.teamId === teamId) ?? { teamId, name: "your rooftop", agents: [], stage: "Live" };
+}
+
 interface Ctx {
   account: Account;
-  setAccount: (a: Account) => void;
 }
 const ScenarioCtx = createContext<Ctx | null>(null);
 
 export function ScenarioProvider({ children }: { children: React.ReactNode }) {
-  // Initialize from ?team_id= so a shared / reloaded URL restores the rooftop (read once, on the client).
-  const [account, setAccountState] = useState<Account>(() => {
-    if (typeof window === "undefined") return DEFAULT_ACCOUNT;
-    const id = new URLSearchParams(window.location.search).get("team_id");
-    const found = id ? ACCOUNTS.find((a) => a.teamId === id) : undefined;
-    return found ?? DEFAULT_ACCOUNT;
+  // Scope is set entirely by the ?team_id= URL param the host passes in — read once on the client.
+  // No in-app switching, so the value never changes after mount (the iframe reloads to rescope).
+  const [account] = useState<Account>(() => {
+    if (typeof window === "undefined") return NO_ACCOUNT;
+    return resolveAccount(new URLSearchParams(window.location.search).get("team_id"));
   });
 
-  // Selecting a rooftop updates state AND reflects it in the URL (shareable, no navigation).
-  const setAccount = (a: Account) => {
-    setAccountState(a);
-    if (typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      url.searchParams.set("team_id", a.teamId);
-      window.history.replaceState(null, "", url.toString());
-    }
-  };
-
-  return <ScenarioCtx.Provider value={{ account, setAccount }}>{children}</ScenarioCtx.Provider>;
+  return <ScenarioCtx.Provider value={{ account }}>{children}</ScenarioCtx.Provider>;
 }
 
 export function useScenario(): {
   account: Account;
-  setAccount: (a: Account) => void;
   scenario: Scenario;
   teamId: string;
   view: ScenarioView;
 } {
   const c = useContext(ScenarioCtx);
-  const account = c?.account ?? DEFAULT_ACCOUNT;
+  const account = c?.account ?? NO_ACCOUNT;
   const scenario = scenarioForStage(account.stage);
   return {
     account,
-    setAccount: c?.setAccount ?? (() => {}),
     scenario,
     teamId: account.teamId,
     view: scenarioView(scenario),
   };
-}
-
-/* ── the bottom control center — a real account picker (CSM tracker, sheet-driven) ── */
-export function ScenarioControlCenter() {
-  const { account, setAccount } = useScenario();
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const filtered = useMemo(
-    () => (q ? ACCOUNTS.filter((a) => a.name.toLowerCase().includes(q.toLowerCase())) : ACCOUNTS),
-    [q],
-  );
-  return (
-    <div className="fixed bottom-5 left-[calc(50%+32px)] z-50 -translate-x-1/2 px-3">
-      {open && (
-        <div className="absolute bottom-full left-1/2 mb-2 w-[340px] -translate-x-1/2 overflow-hidden rounded-2xl border border-[#e5e7eb] bg-white shadow-[0_10px_40px_rgba(16,24,40,0.22)]">
-          <div className="border-b border-[#f0f0f0] p-2">
-            <input
-              autoFocus
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search rooftops…"
-              className="w-full rounded-lg bg-[#f3f4f6] px-3 py-2 text-[12.5px] text-[#111] outline-none placeholder:text-[#9ca3af] focus:bg-white focus:ring-2 focus:ring-[#d8caff]"
-            />
-          </div>
-          <div className="max-h-[320px] overflow-y-auto py-1">
-            {filtered.map((a) => {
-              const on = a.teamId === account.teamId;
-              return (
-                <button
-                  key={a.teamId}
-                  onClick={() => { setAccount(a); setOpen(false); setQ(""); }}
-                  className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-[#faf8ff] ${on ? "bg-[#f3eaff]" : ""}`}
-                >
-                  <span className="flex min-w-0 flex-col leading-tight">
-                    <span className={`truncate text-[12.5px] font-semibold ${on ? "text-[#813fed]" : "text-[#111]"}`}>{a.name}</span>
-                    <span className="truncate text-[10px] text-[#9ca3af]">{a.agents.join(" · ")}</span>
-                  </span>
-                  {a.stage === "In_Ob" && (
-                    <span className="flex-none rounded-full bg-[#fef3c7] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-[#92400e]">Onboarding</span>
-                  )}
-                </button>
-              );
-            })}
-            {filtered.length === 0 && <p className="px-3 py-5 text-center text-[12px] text-[#9ca3af]">No rooftop matches.</p>}
-          </div>
-        </div>
-      )}
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-2 rounded-2xl border border-[#e5e7eb] bg-white/95 px-4 py-2.5 shadow-[0_10px_40px_rgba(16,24,40,0.18)] backdrop-blur-md transition-colors hover:bg-white"
-      >
-        <span className="hidden text-[9px] font-bold uppercase tracking-[0.12em] text-[#9ca3af] sm:inline">Viewing</span>
-        <span className="text-[13px] leading-none">🏢</span>
-        <span className="max-w-[220px] truncate text-[13px] font-bold text-[#111]">{account.name}</span>
-        <span className="text-[11px] text-[#9ca3af]">▾</span>
-      </button>
-    </div>
-  );
 }

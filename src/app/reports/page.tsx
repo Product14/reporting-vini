@@ -276,7 +276,7 @@ function NoRooftop() {
       <span className="text-[26px] leading-none">🏢</span>
       <p className="text-[14px] font-bold text-[#111]">No rooftop selected</p>
       <p className="max-w-[460px] text-[12.5px] leading-snug text-[#6b7280]">
-        Add <b>?team_id=…</b> to the URL (or pick a rooftop below) to load live reporting.
+        Add <b>?team_id=…</b> to the URL to load live reporting.
       </p>
     </div>
   );
