@@ -189,6 +189,11 @@ export interface NoInteraction {
   noReply: number;
   disconnected: number;
 }
+// One slice of the outbound disposition mix (e.g. "Not Connected" → 206).
+export interface OutcomeSlice {
+  label: string;
+  value: number;
+}
 // The 3-pitch inbound story, each shown against the industry/human-team average.
 export interface Benchmark {
   label: string; // "Leads touched"
@@ -227,6 +232,8 @@ export interface AgentReport {
   // outbound-only
   activeCampaigns?: ActiveCampaign[];
   noInteraction?: NoInteraction;
+  outcomes?: OutcomeSlice[]; // outbound disposition mix (from outbound_outcome), biggest first
+
   // inbound-only — the 3-pitch story (vs industry) + month-on-month before/after
   benchmarks?: Benchmark[];
   compare?: CompareRow[];

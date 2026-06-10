@@ -103,7 +103,8 @@ Sources: [data.ts](src/components/reports/data.ts) (model + mock),
 | Field | Meaning | Live? |
 |-------|---------|-------|
 | `activeCampaigns` | Campaigns running: status, days live, appts, conversion % | **coming soon** |
-| `noInteraction` | Why leads couldn't be reached — total, interested, no-reply, disconnected | **coming soon** |
+| `outcomes` | Outbound disposition mix — "How outbound conversations ended" (Not Connected / General Engagement / Not Interested / Opt Out / …), from the `outbound_outcome` column. Renders as a SplitBar. | yes |
+| `noInteraction` | (superseded by `outcomes`) Older total/interested/no-reply/disconnected shape; no longer rendered | mock only |
 
 ## 6. Story blocks (slated for removal — see tracker)
 

@@ -37,6 +37,7 @@ export interface RawRow {
   opted_out_sms: number;
   opted_out_call: number;
   after_hours: number;
+  outbound_outcome: string | null; // outbound disposition: "Not Connected" | "Opt Out" | "Not Interested" | …
   [k: string]: unknown;
 }
 
@@ -75,7 +76,7 @@ export interface AgentDailyRow {
   stl_count: number; // # leads with a measurable first-touch latency
 }
 
-export type BreakdownDim = "intent" | "source" | "hour" | "reply_offset";
+export type BreakdownDim = "intent" | "source" | "hour" | "reply_offset" | "outcome";
 
 // Tall distribution row. e.g. (dim="intent", dim_value="Pricing / payment", count=95, qualified=72).
 export interface BreakdownRow {

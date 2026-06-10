@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useEffect, useState } from "react";
 import { ACCOUNTS, type Account, type AccountStage } from "./accounts";
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -65,14 +65,34 @@ interface Ctx {
 }
 const ScenarioCtx = createContext<Ctx | null>(null);
 
-export function ScenarioProvider({ children }: { children: React.ReactNode }) {
-  // Scope is set entirely by the ?team_id= URL param the host passes in — read once on the client.
-  // No in-app switching, so the value never changes after mount (the iframe reloads to rescope).
-  const [account] = useState<Account>(() => {
-    if (typeof window === "undefined") return NO_ACCOUNT;
-    return resolveAccount(new URLSearchParams(window.location.search).get("team_id"));
-  });
+// Neutral full-screen loader shown for the one frame before team_id resolves on the client.
+function ScenarioResolving() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#fafafa]">
+      <div
+        className="h-6 w-6 animate-spin rounded-full border-2 border-[#e5e7eb] border-t-[#813fed]"
+        role="status"
+        aria-label="Loading"
+      />
+    </div>
+  );
+}
 
+export function ScenarioProvider({ children }: { children: React.ReactNode }) {
+  // Scope is set entirely by the ?team_id= URL param the host passes in. The server can't see the
+  // URL (this lives in a layout, which gets no searchParams), so account starts null and is read
+  // from the URL after mount. While it's null we render a neutral loader on BOTH the server and the
+  // first client render — that keeps hydration identical (no server/client divergence) AND avoids
+  // briefly flashing the "No rooftop selected" state before the real team resolves. No in-app
+  // switching, so this resolves once and then never changes (the iframe reloads to rescope).
+  const [account, setAccount] = useState<Account | null>(null);
+  useEffect(() => {
+    // intentional: read the browser-only URL after mount, then render children for the first time
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAccount(resolveAccount(new URLSearchParams(window.location.search).get("team_id")));
+  }, []);
+
+  if (account === null) return <ScenarioResolving />;
   return <ScenarioCtx.Provider value={{ account }}>{children}</ScenarioCtx.Provider>;
 }
 

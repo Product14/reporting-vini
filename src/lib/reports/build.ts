@@ -187,6 +187,12 @@ export function buildResult({ daily, breakdown, priorDaily }: BuildInput): Fetch
       },
     };
 
+    // ── outbound-only: disposition mix (from outbound_outcome) → "Outbound outcomes" widget ──
+    if (!inbound) {
+      const outcomes = rollupDim(bd, "outcome");
+      if (outcomes.length) a.report.outcomes = outcomes.slice(0, 8).map((o) => ({ label: o.value, value: o.count }));
+    }
+
     // ── inbound-only: leads by source + speed to lead ──
     if (inbound && sources.length) {
       a.report.leadsBySource = sources.slice(0, 8).map((r) => ({

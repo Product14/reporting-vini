@@ -24,20 +24,33 @@ export function agentsForAccount(agents: AgentData[], account: Account | undefin
 
 export const DEFAULT_TEAM_ID = "9923577d07"; // Honda of Downtown LA — overridable per call
 
-/* Date window per the UI's bucket toggle (anchored to the data's latest day, 2026-06-09 exclusive).
- * `end` is exclusive. Each window is a distinct range — Today is the latest day, Yesterday the one
- * before it, and last7/14/30 are trailing windows ending on the latest day. */
-const RANGES: Record<Bucket, { start: string; end: string }> = {
-  today: { start: "2026-06-08", end: "2026-06-09" },
-  yesterday: { start: "2026-06-07", end: "2026-06-08" },
-  last7: { start: "2026-06-02", end: "2026-06-09" },
-  last14: { start: "2026-05-26", end: "2026-06-09" },
-  last30: { start: "2026-05-10", end: "2026-06-09" },
-  // "Lifetime" = everything up to the data's latest day; start sits far enough back to capture all history.
-  lifetime: { start: "2020-01-01", end: "2026-06-09" },
-};
+// Current UTC date as YYYY-MM-DD. `activity_day` is a UTC date string, so windows anchor to UTC too.
+function todayUTC(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+// Shift a YYYY-MM-DD date by n whole days (UTC), returning YYYY-MM-DD.
+function shiftDays(iso: string, n: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/* Date window per the UI's bucket toggle — ROLLING relative to today (UTC). `end` is exclusive and
+ * equals today's date, so each window's latest included day is yesterday (the freshest complete day;
+ * the sync lags real-time by ~a day). Widths match the original fixed windows: Today = the latest
+ * complete day, Yesterday the one before, last7/14/30 trailing N-day windows, Lifetime all history.
+ * (With today=2026-06-09 this reproduces the previous hardcoded ranges exactly.) */
 export function rangeFor(bucket: Bucket): { start: string; end: string } {
-  return RANGES[bucket] ?? RANGES.last30;
+  const end = todayUTC(); // exclusive upper bound
+  switch (bucket) {
+    case "today": return { start: shiftDays(end, -1), end };
+    case "yesterday": return { start: shiftDays(end, -2), end: shiftDays(end, -1) };
+    case "last7": return { start: shiftDays(end, -7), end };
+    case "last14": return { start: shiftDays(end, -14), end };
+    case "last30": return { start: shiftDays(end, -30), end };
+    case "lifetime": return { start: "2020-01-01", end };
+    default: return { start: shiftDays(end, -30), end };
+  }
 }
 
 // Shift an inclusive ISO date one day forward — turns a UI date-picker "end" into the exclusive end the queries expect.

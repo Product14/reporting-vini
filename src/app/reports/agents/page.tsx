@@ -36,6 +36,9 @@ import { useScenario, ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, agentsForAccount, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
 import { UpsellAgent } from "@/components/reports/upsell";
 
+// Palette for the outbound-outcomes SplitBar — outcomes are ranked by volume, so colors are positional.
+const OUTCOME_COLORS = ["#6366f1", "#813fed", "#10b981", "#f59e0b", "#0ea5e9", "#94a3b8", "#ef4444", "#14b8a6"];
+
 // useSearchParams() (to read ?agent=) needs a Suspense boundary above it.
 export default function AgentReportsPage() {
   return (
@@ -494,8 +497,14 @@ function AgentReportsView() {
                   <ComingSoon title="Campaign attribution" note="Per-campaign volume and conversion need a campaign-level card — not wired yet." />
                 </Card>
               </div>
-              <Card title="No interaction" sub="Why we couldn't reach them">
-                <ComingSoon title="No-reach reasons" note="Disconnected / no-reply breakdown isn't wired to a card yet." />
+              <Card title="Outbound outcomes" sub="How outbound conversations ended">
+                {r.outcomes?.length ? (
+                  <SplitBar
+                    segments={r.outcomes.map((o, i) => ({ label: o.label, value: o.value, color: OUTCOME_COLORS[i % OUTCOME_COLORS.length] }))}
+                  />
+                ) : (
+                  <ComingSoon title="No-reach reasons" note="Outbound disposition breakdown appears once this rooftop has outbound activity." />
+                )}
               </Card>
             </div>
           )}
