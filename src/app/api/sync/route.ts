@@ -66,16 +66,29 @@ async function handle(request: Request): Promise<Response> {
     return Response.json({ ok: false, error: msg }, { status });
   };
 
-  // Pull raw rows. Scope server-side if the card exposes a date param; else full-table pull + client filter.
+  // Pull raw rows. Q12227's activity_day param is single-date equality (= {{activity_day}}), so the
+  // incremental path pulls ONE day per call across the window (each ~3MB) instead of the 382MB full
+  // table. Without the param (or ?full=1) it falls back to the full-table pull + client-side filter.
   const dateParam = process.env.METABASE_RAW_DATE_PARAM;
-  const params = dateParam && !full ? { [dateParam]: `${windowStart}~${today}` } : {};
-  const { rows, error } = await fetchEmbedRows(RAW_QUESTION, params);
-  if (error) return fail(`Metabase pull failed: ${error}`);
-  // Never wipe the window on an empty pull — Q12227 is never truly empty, so 0 rows means the pull
-  // failed (almost always the 382MB full-table timeout). Abort before the destructive delete.
-  if (!rows.length) return fail("Metabase pull returned 0 rows — aborting before delete (likely the full-table pull timed out; add an activity_day embedding param so the sync pulls only the window).");
+  const perDay = Boolean(dateParam && !full);
+  let raw: RawRow[];
+  if (perDay) {
+    raw = [];
+    for (let d = windowStart; d < windowEnd; d = addDay(d)) {
+      const { rows, error } = await fetchEmbedRows(RAW_QUESTION, { [dateParam as string]: d });
+      if (error) return fail(`Metabase pull failed for ${d}: ${error}`);
+      raw.push(...(rows as RawRow[]));
+    }
+  } else {
+    const { rows, error } = await fetchEmbedRows(RAW_QUESTION, {});
+    if (error) return fail(`Metabase pull failed: ${error}`);
+    raw = rows as RawRow[];
+  }
+  // Never wipe the window on an empty pull. A single empty day is fine (today often lags), but 0 rows
+  // across the WHOLE window means the pull failed — Q12227 is never truly empty across all teams.
+  if (!raw.length) return fail("Metabase pull returned 0 rows across the window — aborting before delete (pull likely failed).");
 
-  const scoped = (rows as RawRow[]).filter((r) => String(r.activity_day || "") >= windowStart);
+  const scoped = raw.filter((r) => String(r.activity_day || "") >= windowStart);
   const { daily, breakdown } = aggregate(scoped);
 
   // Replace the window: delete then insert (drops stale breakdown values that no longer appear).
@@ -95,8 +108,8 @@ async function handle(request: Request): Promise<Response> {
 
   return Response.json({
     ok: true, window_start: windowStart, window_end: windowEnd,
-    raw_rows: rows.length, scoped_rows: scoped.length, daily_rows: daily.length, breakdown_rows: breakdown.length,
-    scoped_server_side: Boolean(dateParam && !full),
+    raw_rows: raw.length, scoped_rows: scoped.length, daily_rows: daily.length, breakdown_rows: breakdown.length,
+    mode: perDay ? "incremental-per-day" : "full-table",
   });
 }
 
