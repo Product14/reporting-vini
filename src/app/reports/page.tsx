@@ -5,9 +5,9 @@ import { useRouter } from "next/navigation";
 import {
   Bucket,
   BUCKET_LABELS,
-  BucketToggle,
   Card,
   ComingSoon,
+  DateFilter,
   Eyebrow,
   fmtInt,
   fmtMoney,
@@ -23,7 +23,7 @@ import {
   StepList,
 } from "@/components/reports/kit";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, aggregateFleet, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
 
 const AGENT_COLOR: Record<string, string> = {
   sales_ib: "#6366f1",
@@ -35,6 +35,7 @@ const AGENT_COLOR: Record<string, string> = {
 export default function OverviewReportPage() {
   const router = useRouter();
   const [bucket, setBucket] = useState<Bucket>("last30");
+  const [custom, setCustom] = useState<{ start: string; end: string } | null>(null);
   const { scenario, view, teamId, account } = useScenario();
 
   // cost per appointment — set on the Agents tab; read once from localStorage (same initializer
@@ -45,8 +46,11 @@ export default function OverviewReportPage() {
     return s ? Number(s) : 150;
   });
 
-  // Live fleet for the selected rooftop, refetched per rooftop/window. null === loading.
-  const [feed, setFeed] = useState<FetchResult | null>(null);
+  // custom range (inclusive end) overrides the preset bucket; end is made exclusive for the query.
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end) } : { bucket };
+  // Live fleet for the selected rooftop. Seed from the client cache so navigating back paints
+  // instantly instead of flashing a skeleton; null === nothing cached yet (cold load).
+  const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30000);
@@ -55,18 +59,20 @@ export default function OverviewReportPage() {
   useEffect(() => {
     if (!teamId) return; // no rooftop selected → leave feed as-is (UI shows the no-rooftop state)
     let on = true;
-    // intentional: reset to the loading skeleton while the new rooftop/window fetches
+    // show cached data immediately (stale-while-revalidate); only blank to the skeleton when cold
+    const cached = peekAgents({ teamId, ...rangeOpts });
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setFeed(null);
-    fetchAgents({ teamId, bucket })
+    setFeed(cached);
+    fetchAgents({ teamId, ...rangeOpts })
       .then((res) => { if (on) setFeed(res); })
-      .catch(() => { if (on) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
+      .catch(() => { if (on && !cached) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
     return () => { on = false; };
-  }, [teamId, bucket]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, bucket, custom]);
   const refresh = () => {
     if (!teamId) return;
     setFeed(null);
-    fetchAgents({ teamId, bucket, force: true })
+    fetchAgents({ teamId, ...rangeOpts, force: true })
       .then(setFeed)
       .catch(() => setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }));
   };
@@ -76,7 +82,7 @@ export default function OverviewReportPage() {
   const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
 
   const hasTeam = teamId !== "";
-  const periodLabel = BUCKET_LABELS[bucket];
+  const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
   const valueCreated = fleet.appointments * apptCost;
   const comingSoon = hasTeam && feed !== null && !feed.hasData; // rooftop selected, no live data yet
   const showReport = scenario !== "first_time" && scenario !== "onboarding";
@@ -93,13 +99,19 @@ export default function OverviewReportPage() {
           title="Overview"
           subtitle="Your daily control-tower report — every agent, call and appointment in one place."
           active="overview"
+          teamId={teamId}
           right={
             hasTeam ? (
               <div className="flex items-center gap-3">
                 <span className="hidden text-[11px] text-[#9ca3af] md:inline">
                   {feed === null ? "Syncing…" : feed.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
                 </span>
-                <BucketToggle bucket={bucket} onChange={setBucket} />
+                <DateFilter
+                  bucket={bucket}
+                  custom={custom}
+                  onPreset={(b) => { setBucket(b); setCustom(null); }}
+                  onCustom={(r) => setCustom(r)}
+                />
                 <button
                   onClick={refresh}
                   disabled={feed === null}
@@ -171,7 +183,7 @@ export default function OverviewReportPage() {
               {ranked.map((a, i) => (
                 <button
                   key={a.id}
-                  onClick={() => router.push(`/reports/agents?team_id=${teamId}`)}
+                  onClick={() => router.push(`/reports/agents?team_id=${teamId}&agent=${a.id}`)}
                   className="group flex items-center gap-4 rounded-2xl border border-[#e9e9ee] bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-[#c4b5fd] hover:shadow-md"
                 >
                   <span className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-[#f3eaff] text-[12px] font-extrabold text-[#813fed]">{i + 1}</span>
@@ -249,11 +261,6 @@ export default function OverviewReportPage() {
           </div>
           </>
           )}
-
-          <p className="text-[11px] text-[#9ca3af] text-center">
-            This is your daily control-tower report. Live numbers are pulled per rooftop from Metabase; sections marked
-            &ldquo;coming soon&rdquo; need the outcome/event store before they can show real data.
-          </p>
         </main>
       </div>
     </div>

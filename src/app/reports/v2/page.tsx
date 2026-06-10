@@ -555,7 +555,7 @@ function CaughtPillar({
   const effort = humanEffort(touches);
   const spanLabel =
     scenario === "repeat"
-      ? { today: "today", yesterday: "in a day", last7: "in 7 days", last14: "in 14 days", last30: "in 30 days" }[bucket]
+      ? { today: "today", yesterday: "in a day", last7: "in 7 days", last14: "in 14 days", last30: "in 30 days", lifetime: "all time" }[bucket]
       : `in ${view.daysLive} days`;
   const isInbound = lensIsInbound(lens);
 

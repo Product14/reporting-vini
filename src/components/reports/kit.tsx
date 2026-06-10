@@ -9,10 +9,12 @@ export * from "./data";
 /* ── tabs ── */
 export type ReportTab = "overview" | "agents" | "campaigns" | "impact";
 
-export function ReportTabs({ active }: { active: ReportTab }) {
+export function ReportTabs({ active, teamId }: { active: ReportTab; teamId?: string }) {
+  // keep the rooftop scope across tab navigation — the host passes it as ?team_id=
+  const q = teamId ? `?team_id=${teamId}` : "";
   const tabs = [
-    { id: "overview", label: "Overview", href: "/reports" },
-    { id: "agents", label: "By agent", href: "/reports/agents" },
+    { id: "overview", label: "Overview", href: `/reports${q}` },
+    { id: "agents", label: "By agent", href: `/reports/agents${q}` },
   ] as const;
   return (
     <div className="mx-auto max-w-[1400px] mt-4 flex items-center gap-1">
@@ -41,23 +43,53 @@ export function ReportTopBar({
   subtitle,
   active,
   right,
+  back,
+  teamId,
 }: {
   title: string;
   subtitle: string;
   active: ReportTab;
   right?: React.ReactNode;
+  back?: string; // when set, render a back arrow linking here (e.g. the overview)
+  teamId?: string; // preserved across tab + back navigation
 }) {
+  // sticky header that condenses once the page is scrolled
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
   return (
-    <div className="border-b border-[#f0f0f0] bg-white px-10 py-5">
+    <div
+      className={`sticky top-0 z-30 border-b border-[#f0f0f0] bg-white px-10 transition-[padding,box-shadow] duration-200 ${
+        scrolled ? "py-2.5 shadow-[0_4px_16px_rgba(16,24,40,0.06)]" : "py-5"
+      }`}
+    >
       <div className="mx-auto max-w-[1400px] flex items-end justify-between gap-4">
-        <div>
-          <span className="text-[10.5px] font-bold uppercase tracking-wider text-[#6366f1]">Reports</span>
-          <h1 className="text-[22px] font-bold text-[#111] tracking-[-0.2px]">{title}</h1>
-          <p className="text-[12.5px] text-[#6b7280] mt-1">{subtitle}</p>
+        <div className="flex items-start gap-3">
+          {back && (
+            <Link
+              href={back}
+              aria-label="Back to overview"
+              title="Back to overview"
+              className="mt-0.5 flex h-9 w-9 flex-none items-center justify-center rounded-lg border border-[#e5e7eb] bg-white text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed]"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </Link>
+          )}
+          <div>
+            <span className="text-[10.5px] font-bold uppercase tracking-wider text-[#6366f1]">Reports</span>
+            <h1 className={`font-bold text-[#111] tracking-[-0.2px] transition-all duration-200 ${scrolled ? "text-[17px]" : "text-[22px]"}`}>{title}</h1>
+            <p className={`overflow-hidden text-[12.5px] text-[#6b7280] transition-all duration-200 ${scrolled ? "max-h-0 opacity-0" : "mt-1 max-h-10 opacity-100"}`}>{subtitle}</p>
+          </div>
         </div>
         <div className="flex items-center gap-3">{right}</div>
       </div>
-      <ReportTabs active={active} />
+      <ReportTabs active={active} teamId={teamId} />
     </div>
   );
 }
@@ -77,6 +109,73 @@ export function BucketToggle({ bucket, onChange }: { bucket: Bucket; onChange: (
           {BUCKET_LABELS[b]}
         </button>
       ))}
+    </div>
+  );
+}
+
+/* ── date filter: presets (incl. Lifetime) + a custom range ── */
+export const DATE_PRESETS: { id: Bucket; label: string }[] = [
+  { id: "today", label: "Today" },
+  { id: "yesterday", label: "Yest" },
+  { id: "last7", label: "7d" },
+  { id: "last14", label: "14d" },
+  { id: "last30", label: "30d" },
+  { id: "lifetime", label: "All" },
+];
+export function DateFilter({
+  bucket,
+  custom,
+  onPreset,
+  onCustom,
+}: {
+  bucket: Bucket;
+  custom: { start: string; end: string } | null;
+  onPreset: (b: Bucket) => void;
+  onCustom: (r: { start: string; end: string }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [s, setS] = useState(custom?.start ?? "2026-05-10");
+  const [e, setE] = useState(custom?.end ?? "2026-06-08");
+  return (
+    <div className="relative flex items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
+      {DATE_PRESETS.map((p) => {
+        const on = !custom && bucket === p.id;
+        return (
+          <button
+            key={p.id}
+            onClick={() => onPreset(p.id)}
+            className={`rounded-md px-2.5 py-1.5 text-[12px] font-semibold transition-all ${on ? "bg-white text-[#111] shadow-sm" : "text-[#6b7280] hover:text-[#111]"}`}
+          >
+            {p.label}
+          </button>
+        );
+      })}
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={`rounded-md px-2.5 py-1.5 text-[12px] font-semibold transition-all ${custom ? "bg-white text-[#111] shadow-sm" : "text-[#6b7280] hover:text-[#111]"}`}
+      >
+        {custom ? `${custom.start.slice(5)}–${custom.end.slice(5)}` : "Custom"}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-30 mt-2 flex flex-col gap-2.5 rounded-xl border border-[#e5e7eb] bg-white p-3 shadow-[0_10px_30px_rgba(16,24,40,0.15)]">
+          <div className="flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
+              From
+              <input type="date" value={s} max={e} onChange={(ev) => setS(ev.target.value)} className="rounded-md border border-[#e5e7eb] px-2 py-1 text-[12px] text-[#111]" />
+            </label>
+            <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
+              To
+              <input type="date" value={e} min={s} onChange={(ev) => setE(ev.target.value)} className="rounded-md border border-[#e5e7eb] px-2 py-1 text-[12px] text-[#111]" />
+            </label>
+          </div>
+          <button
+            onClick={() => { if (s && e) { onCustom({ start: s, end: e < s ? s : e }); setOpen(false); } }}
+            className="rounded-lg bg-[#813fed] px-3 py-1.5 text-[12px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
+          >
+            Apply range
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -540,6 +639,7 @@ export function DayTrend({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(0);
+  const [hover, setHover] = useState<number | null>(null);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -580,19 +680,23 @@ export function DayTrend({
         ` L ${x(n - 1).toFixed(1)} ${y(0).toFixed(1)} L ${x(0).toFixed(1)} ${y(0).toFixed(1)} Z`
       : "";
   const gridVals = [0, niceMax / 2, niceMax];
-  const last = points[n - 1];
+  // legend + tooltip reflect the hovered day, falling back to the latest day
+  const active = hover ?? n - 1;
+  const ap = points[active];
+  // keep the floating tooltip inside the card (which clips overflow): clamp its centre
+  const tipX = Math.min(Math.max(x(active), 80), Math.max(80, w - 80));
 
   return (
-    <div ref={ref} className="w-full">
+    <div ref={ref} className="relative w-full">
       <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-1.5">
         {series.map((s) => (
           <span key={s.key} className="flex items-baseline gap-1.5 text-[12px]">
             <span className="h-2.5 w-2.5 translate-y-[1px] rounded-full" style={{ background: s.color }} />
             <span className="text-[#6b7280]">{s.label}</span>
-            <b className="text-[15px] tabular-nums text-[#111]">{Math.round(last?.[s.key] ?? 0).toLocaleString()}</b>
+            <b className="text-[15px] tabular-nums text-[#111]">{Math.round(ap?.[s.key] ?? 0).toLocaleString()}</b>
           </span>
         ))}
-        <span className="ml-auto text-[10.5px] text-[#9ca3af]">last {n} day{n === 1 ? "" : "s"}</span>
+        <span className="ml-auto text-[10.5px] text-[#9ca3af]">{hover === null ? `last ${n} day${n === 1 ? "" : "s"}` : ap?.day}</span>
       </div>
       <div style={{ height: H }}>
         {w > 0 && n > 0 && (
@@ -612,22 +716,61 @@ export function DayTrend({
               </g>
             ))}
             {area && <path d={area} fill="url(#dt-area)" />}
+            {/* crosshair for the hovered day */}
+            {hover !== null && (
+              <line x1={x(active)} x2={x(active)} y1={padT} y2={H - padB} stroke="#d8caff" strokeWidth={1.5} strokeDasharray="3 3" />
+            )}
             {series.map((s) => (
               <g key={s.key}>
                 <path d={line(s.key)} fill="none" stroke={s.color} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
                 {points.map((p, i) => (
-                  <circle key={i} cx={x(i)} cy={y(p[s.key])} r={3.5} fill="#fff" stroke={s.color} strokeWidth={2} />
+                  <circle key={i} cx={x(i)} cy={y(p[s.key])} r={hover === i ? 5 : 3.5} fill="#fff" stroke={s.color} strokeWidth={2} />
                 ))}
               </g>
             ))}
             {points.map((p, i) => (
-              <text key={i} x={x(i)} y={H - 9} textAnchor="middle" style={{ fontSize: 10.5, fill: "#9ca3af" }}>
+              <text key={i} x={x(i)} y={H - 9} textAnchor="middle" style={{ fontSize: 10.5, fontWeight: hover === i ? 700 : 400, fill: hover === i ? "#111" : "#9ca3af" }}>
                 {p.day}
               </text>
             ))}
+            {/* invisible hover bands — one per day — drive the crosshair + tooltip */}
+            {points.map((p, i) => {
+              const left = i === 0 ? 0 : (x(i - 1) + x(i)) / 2;
+              const right = i === n - 1 ? w : (x(i) + x(i + 1)) / 2;
+              return (
+                <rect
+                  key={i}
+                  x={left}
+                  y={0}
+                  width={Math.max(0, right - left)}
+                  height={H}
+                  fill="transparent"
+                  onMouseEnter={() => setHover(i)}
+                  onMouseLeave={() => setHover(null)}
+                />
+              );
+            })}
           </svg>
         )}
       </div>
+      {/* floating tooltip for the hovered day */}
+      {hover !== null && ap && w > 0 && (
+        <div
+          className="pointer-events-none absolute z-10 -translate-x-1/2 rounded-xl border border-[#ece6fb] bg-white px-3 py-2.5 shadow-[0_8px_24px_rgba(16,24,40,0.14)]"
+          style={{ left: tipX, top: 44 }}
+        >
+          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">{ap.day}</p>
+          <div className="flex flex-col gap-1">
+            {series.map((s) => (
+              <div key={s.key} className="flex items-center gap-2 text-[11.5px]">
+                <span className="h-2 w-2 rounded-full" style={{ background: s.color }} />
+                <span className="text-[#6b7280]">{s.label}</span>
+                <b className="ml-auto tabular-nums text-[#111]">{Math.round(ap[s.key]).toLocaleString()}</b>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

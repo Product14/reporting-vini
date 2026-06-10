@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   AGENTS as MOCK_AGENTS,
   AgentData,
@@ -11,6 +12,7 @@ import {
   Card,
   ComingSoon,
   ConfidenceChip,
+  DateFilter,
   DeltaPill,
   fmtInt,
   fmtMoneyFull,
@@ -31,17 +33,30 @@ import {
   TrendBars,
 } from "@/components/reports/kit";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, agentsForAccount, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
 import { UpsellAgent } from "@/components/reports/upsell";
 
+// useSearchParams() (to read ?agent=) needs a Suspense boundary above it.
 export default function AgentReportsPage() {
+  return (
+    <Suspense fallback={null}>
+      <AgentReportsView />
+    </Suspense>
+  );
+}
+
+function AgentReportsView() {
+  const searchParams = useSearchParams();
+  const paramAgent = searchParams.get("agent"); // the agent the overview "who drove it" link picked
   const [bucket, setBucket] = useState<Bucket>("last30");
   const [custom, setCustom] = useState<{ start: string; end: string } | null>(null);
-  const [activeId, setActiveId] = useState<string>("sales_ib");
+  // open on the agent passed in; the picker on the page then drives selection locally.
+  // An invalid/absent id is corrected by the validity effect below once agents load.
+  const [activeId, setActiveId] = useState<string>(paramAgent || "sales_ib");
   // cost per appointment — asked once (stored locally), then editable via a hyperlink
   const [apptCost, setApptCost] = useState<number>(150);
   const [costModalOpen, setCostModalOpen] = useState<boolean>(false);
-  const [showDetail, setShowDetail] = useState<boolean>(false);
+  const [showDetail, setShowDetail] = useState<boolean>(true);
   // when set, the rooftop doesn't run this agent → show the upsell pitch instead of a report
   const [upsellId, setUpsellId] = useState<string | null>(null);
 
@@ -56,23 +71,25 @@ export default function AgentReportsPage() {
     setCostModalOpen(false);
   };
   const { scenario, view, teamId, account } = useScenario();
-  // Live agents for the selected rooftop, overlaid from Metabase; refetch on team/bucket change.
-  // feed === null while loading; feed.hasData === false → Metabase has nothing for this rooftop yet.
-  const [feed, setFeed] = useState<FetchResult | null>(null); // null === loading
+  // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end) } : { bucket };
+  // Live agents for the selected rooftop, overlaid from Metabase. Seed from the client cache so
+  // navigating back paints instantly instead of flashing a skeleton; null === nothing cached (cold).
+  const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30000); // tick the "synced X ago" label
     return () => clearInterval(t);
   }, []);
-  // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end) } : { bucket };
   useEffect(() => {
     if (!teamId) { setFeed(null); return; } // no rooftop selected → no data
     let on = true;
-    setFeed(null);
+    // show cached data immediately (stale-while-revalidate); only blank to the skeleton when cold
+    const cached = peekAgents({ teamId, ...rangeOpts });
+    setFeed(cached);
     fetchAgents({ teamId, ...rangeOpts })
       .then((res) => { if (on) setFeed(res); })
-      .catch(() => { if (on) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
+      .catch(() => { if (on && !cached) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, bucket, custom]);
@@ -165,6 +182,8 @@ export default function AgentReportsPage() {
           title="Agent performance"
           subtitle="ROI, pipeline and quality by agent — Sales & Service, inbound & outbound."
           active="agents"
+          teamId={teamId}
+          back={`/reports${teamId ? `?team_id=${teamId}` : ""}`}
           right={
             hasTeam ? (
               <div className="flex items-center gap-3">
@@ -328,17 +347,6 @@ export default function AgentReportsPage() {
                   </div>
                 </div>
               </section>
-
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                <ComingSoon
-                  title={`How ${r.summary.person} compares to industry`}
-                  note="Benchmarks against typical dealer performance need an external reference set — not wired yet."
-                />
-                <ComingSoon
-                  title="Before / after vs your human baseline"
-                  note="Your pre-Vini baseline is captured from your CRM at onboarding; this populates once that import lands."
-                />
-              </div>
 
               <button
                 onClick={() => setShowDetail((v) => !v)}
@@ -566,11 +574,6 @@ export default function AgentReportsPage() {
           )}
           </>
           )}
-
-          <p className="text-[11px] text-[#9ca3af] text-center">
-            Phase 1 shows representative fleet numbers · Phase 2 wires to the live outcome/event store and feeds the daily
-            control-tower report to reports@spyne.ai.
-          </p>
         </main>
       </div>
       {costModalOpen && <CostModal initial={apptCost} onSave={saveApptCost} />}
@@ -676,11 +679,6 @@ function ActivityStat({ label, value, hint, delta }: { label: string; value: str
 }
 
 /* ── live-data toolbar helpers ── */
-function addDay(iso: string): string {
-  const d = new Date(`${iso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
 function relTime(then: number, now: number): string {
   const s = Math.max(0, Math.round((now - then) / 1000));
   if (s < 45) return "just now";
@@ -708,72 +706,6 @@ function SyncStatus({ fetchedAt, loading, now, onRefresh }: { fetchedAt: number 
           <path d="M21 3v6h-6" />
         </svg>
       </button>
-    </div>
-  );
-}
-
-/* ── date filter: presets + a custom range ── */
-const DATE_PRESETS: { id: Bucket; label: string }[] = [
-  { id: "today", label: "Today" },
-  { id: "yesterday", label: "Yest" },
-  { id: "last7", label: "7d" },
-  { id: "last14", label: "14d" },
-  { id: "last30", label: "30d" },
-];
-function DateFilter({
-  bucket,
-  custom,
-  onPreset,
-  onCustom,
-}: {
-  bucket: Bucket;
-  custom: { start: string; end: string } | null;
-  onPreset: (b: Bucket) => void;
-  onCustom: (r: { start: string; end: string }) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [s, setS] = useState(custom?.start ?? "2026-05-10");
-  const [e, setE] = useState(custom?.end ?? "2026-06-08");
-  return (
-    <div className="relative flex items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
-      {DATE_PRESETS.map((p) => {
-        const on = !custom && bucket === p.id;
-        return (
-          <button
-            key={p.id}
-            onClick={() => onPreset(p.id)}
-            className={`rounded-md px-2.5 py-1.5 text-[12px] font-semibold transition-all ${on ? "bg-white text-[#111] shadow-sm" : "text-[#6b7280] hover:text-[#111]"}`}
-          >
-            {p.label}
-          </button>
-        );
-      })}
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className={`rounded-md px-2.5 py-1.5 text-[12px] font-semibold transition-all ${custom ? "bg-white text-[#111] shadow-sm" : "text-[#6b7280] hover:text-[#111]"}`}
-      >
-        {custom ? `${custom.start.slice(5)}–${custom.end.slice(5)}` : "Custom"}
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full z-30 mt-2 flex flex-col gap-2.5 rounded-xl border border-[#e5e7eb] bg-white p-3 shadow-[0_10px_30px_rgba(16,24,40,0.15)]">
-          <div className="flex items-end gap-2">
-            <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
-              From
-              <input type="date" value={s} max={e} onChange={(ev) => setS(ev.target.value)} className="rounded-md border border-[#e5e7eb] px-2 py-1 text-[12px] text-[#111]" />
-            </label>
-            <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
-              To
-              <input type="date" value={e} min={s} onChange={(ev) => setE(ev.target.value)} className="rounded-md border border-[#e5e7eb] px-2 py-1 text-[12px] text-[#111]" />
-            </label>
-          </div>
-          <button
-            onClick={() => { if (s && e) { onCustom({ start: s, end: e < s ? s : e }); setOpen(false); } }}
-            className="rounded-lg bg-[#813fed] px-3 py-1.5 text-[12px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
-          >
-            Apply range
-          </button>
-        </div>
-      )}
     </div>
   );
 }

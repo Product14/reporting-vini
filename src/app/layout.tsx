@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, DM_Mono } from "next/font/google";
 import { NewCampaignProvider } from "@/context/NewCampaignContext";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -36,6 +37,7 @@ export default function RootLayout({
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} ${dmMono.variable}`} suppressHydrationWarning>
       <body className="min-h-screen antialiased">
         <NewCampaignProvider>{children}</NewCampaignProvider>
+        <Analytics />
       </body>
     </html>
   );

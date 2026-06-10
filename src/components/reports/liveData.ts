@@ -40,9 +40,18 @@ const RANGES: Record<Bucket, { start: string; end: string }> = {
   last7: { start: "2026-06-02", end: "2026-06-09" },
   last14: { start: "2026-05-26", end: "2026-06-09" },
   last30: { start: "2026-05-10", end: "2026-06-09" },
+  // "Lifetime" = everything up to the data's latest day; start sits far enough back to capture all history.
+  lifetime: { start: "2020-01-01", end: "2026-06-09" },
 };
 export function rangeFor(bucket: Bucket): { start: string; end: string } {
   return RANGES[bucket] ?? RANGES.last30;
+}
+
+// Shift an inclusive ISO date one day forward — turns a UI date-picker "end" into the exclusive end the queries expect.
+export function addDay(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
 }
 
 // The equal-length window immediately before [start, end) — used to compute real period deltas.
@@ -174,6 +183,15 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
 // Client-side cache so switching back to a team/window doesn't re-hit Metabase. 5-minute TTL.
 const CACHE = new Map<string, FetchResult>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+/* Synchronously read a cached window without touching the network — lets the UI paint instantly when
+ * you navigate back to a page (stale-while-revalidate: show what we have, then fetchAgents refreshes
+ * in the background per the TTL). Returns whatever is cached regardless of age, or null. */
+export function peekAgents(opts: LiveOpts = {}): FetchResult | null {
+  if (!opts.teamId) return null;
+  const { start, end } = opts.start && opts.end ? { start: opts.start, end: opts.end } : rangeFor(opts.bucket ?? "last30");
+  return CACHE.get(`${opts.teamId}|${start}|${end}`) ?? null;
+}
 
 /* Per-agent totals for one window — the lightweight basis for period deltas (bottom-line + funnel
  * only). Uses fetchCard directly (not the hit-counting wrapper) so an empty prior window never

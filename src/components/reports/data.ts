@@ -8,15 +8,16 @@
  * pipeline, activity, quality, missed opportunity, compliance and data-health.
  */
 
-export type Bucket = "today" | "yesterday" | "last7" | "last14" | "last30";
+export type Bucket = "today" | "yesterday" | "last7" | "last14" | "last30" | "lifetime";
 export const BUCKET_LABELS: Record<Bucket, string> = {
   today: "Today",
   yesterday: "Yesterday",
   last7: "Last 7 days",
   last14: "Last 14 days",
   last30: "Last 30 days",
+  lifetime: "Lifetime",
 };
-export const BUCKET_FACTOR: Record<Bucket, number> = { today: 0.42, yesterday: 1, last7: 6.6, last14: 13, last30: 27.5 };
+export const BUCKET_FACTOR: Record<Bucket, number> = { today: 0.42, yesterday: 1, last7: 6.6, last14: 13, last30: 27.5, lifetime: 120 };
 
 export type RAG = "green" | "amber" | "red";
 
