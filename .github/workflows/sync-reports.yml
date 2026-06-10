@@ -1,0 +1,39 @@
+name: Sync reporting aggregate
+
+# Pulls Q12227 and rebuilds the Supabase reporting aggregate on a schedule. Runs on GitHub's
+# runners (7GB RAM, no 300s cap) because the full 382MB Metabase pull can't complete reliably on
+# Vercel serverless. Once Q12227 gains an `activity_day` embedding param, switch to the lightweight
+# Vercel pg_cron path (small pulls) and you can retire / slow this workflow.
+
+on:
+  schedule:
+    # Every 15 min. NOTE: each run downloads the full ~382MB Q12227 (~4 min runtime). On a PRIVATE
+    # repo that's ~11k Action-minutes/month — over the 2,000 free tier. To cut cost: raise to */30 or
+    # 0 * * * * (hourly), make the repo public (unlimited free), or add the activity_day Metabase param
+    # and switch to the lightweight Vercel pg_cron path (small pulls, near-zero cost).
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}       # allow manual runs from the Actions tab
+
+concurrency:
+  group: sync-reports
+  cancel-in-progress: false   # don't kill an in-flight rebuild
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Backfill Supabase aggregate
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+          METABASE_SITE_URL: ${{ secrets.METABASE_SITE_URL }}
+          METABASE_SECRET_KEY: ${{ secrets.METABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx tsx scripts/backfill.ts
