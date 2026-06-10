@@ -72,13 +72,14 @@ insert into public.sync_state (id) values (1) on conflict (id) do nothing;
 create extension if not exists pg_cron;
 create extension if not exists pg_net;
 
--- Edit <APP_URL> (e.g. https://reporting.spyne.ai) and <CRON_SECRET> (must match the app env var),
--- then run this block. Cadence: every 2 min if Q12227 has an activity_day embedding param; otherwise
--- raise the interval (e.g. '*/15 * * * *') since each run does a full-table pull.
+-- OPTIONAL: a free, tighter-cadence alternative to the GitHub Actions sync. Requires the app env
+-- METABASE_RAW_DATE_PARAM=activity_day so /api/sync pulls per-day incrementally (each run ~100s for a
+-- 3-day window — Metabase re-runs the query per day). Edit <APP_URL> (your deployed origin) and
+-- <CRON_SECRET> (must match the app env var). Every 5 min so runs don't overlap the ~100s job.
 -- select cron.unschedule('agent-sync');  -- run first if re-scheduling
 select cron.schedule(
   'agent-sync',
-  '*/2 * * * *',
+  '*/5 * * * *',
   $$
   select net.http_post(
     url     := '<APP_URL>/api/sync',

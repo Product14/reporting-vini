@@ -1,22 +1,26 @@
 name: Sync reporting aggregate
 
-# Pulls Q12227 and rebuilds the Supabase reporting aggregate on a schedule. Runs on GitHub's
-# runners (7GB RAM, no 300s cap) because the full 382MB Metabase pull can't complete reliably on
-# Vercel serverless. Once Q12227 gains an `activity_day` embedding param, switch to the lightweight
-# Vercel pg_cron path (small pulls) and you can retire / slow this workflow.
+# Keeps the Supabase reporting aggregate fresh by running scripts/backfill.ts.
+# - Every 30 min: INCREMENTAL — per-day pulls over the trailing window (~3MB/day, ~1 min total).
+# - Daily 04:17 UTC: FULL reconcile — one 382MB pull rebuilds everything (catches edits to older rows).
+# Both are cheap enough to stay within free Action minutes. (A Vercel pg_cron → /api/sync path can do
+# 2-min incremental for free instead — see supabase/migrations/0001_agent_facts.sql.)
 
 on:
   schedule:
-    # Every 15 min. NOTE: each run downloads the full ~382MB Q12227 (~4 min runtime). On a PRIVATE
-    # repo that's ~11k Action-minutes/month — over the 2,000 free tier. To cut cost: raise to */30 or
-    # 0 * * * * (hourly), make the repo public (unlimited free), or add the activity_day Metabase param
-    # and switch to the lightweight Vercel pg_cron path (small pulls, near-zero cost).
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {}       # allow manual runs from the Actions tab
+    - cron: "*/30 * * * *"   # incremental
+    - cron: "17 4 * * *"     # daily full reconcile
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Sync mode"
+        default: incremental
+        type: choice
+        options: [incremental, full]
 
 concurrency:
   group: sync-reports
-  cancel-in-progress: false   # don't kill an in-flight rebuild
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -29,11 +33,17 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Backfill Supabase aggregate
+      - name: Sync Supabase aggregate
         env:
           NODE_OPTIONS: --max-old-space-size=6144
           METABASE_SITE_URL: ${{ secrets.METABASE_SITE_URL }}
           METABASE_SECRET_KEY: ${{ secrets.METABASE_SECRET_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx tsx scripts/backfill.ts
+          METABASE_RAW_DATE_PARAM: activity_day
+        run: |
+          MODE="${{ github.event.inputs.mode || 'incremental' }}"
+          # the daily cron forces a full reconcile regardless of manual input
+          if [ "${{ github.event.schedule }}" = "17 4 * * *" ]; then MODE=full; fi
+          echo "Running sync mode=$MODE"
+          if [ "$MODE" = "full" ]; then npx tsx scripts/backfill.ts --full; else npx tsx scripts/backfill.ts; fi
