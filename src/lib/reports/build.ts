@@ -9,7 +9,7 @@
 
 import { AGENTS as MOCK_AGENTS, type AgentData } from "@/components/reports/data";
 import type { FetchResult, Basis } from "@/components/reports/liveData";
-import type { AgentDailyRow, BreakdownRow } from "./schema";
+import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow } from "./schema";
 
 const AGENT_TYPE_BY_ID: Record<AgentData["id"], string> = {
   sales_ib: "Sales Inbound",
@@ -56,10 +56,41 @@ export interface BuildInput {
   daily: AgentDailyRow[]; // current window, this team
   breakdown: BreakdownRow[]; // current window, this team
   priorDaily: AgentDailyRow[]; // prior equal-length window, this team (basis for deltas)
+  // rooftop-level detail (from the dedicated cards); attached to the relevant agents below.
+  appointments?: AppointmentRow[];
+  callbacks?: CallbackRow[];
+  campaigns?: CampaignRow[];
 }
 
-export function buildResult({ daily, breakdown, priorDaily }: BuildInput): FetchResult {
+// Format an ISO timestamp as a short, locale-stable "when" label (e.g. "Jun 11 · 9:30 AM" UTC).
+function fmtWhen(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "—";
+  const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
+  let h = d.getUTCHours();
+  const m = d.getUTCMinutes().toString().padStart(2, "0");
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${mon} ${d.getUTCDate()} · ${h}:${m} ${ap}`;
+}
+
+export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
+
+  // Rooftop-level detail mapped once into the UI shapes. Appointments/callbacks attach to inbound
+  // agents, campaigns to outbound — the cards aren't split by agent, so each relevant agent shows
+  // the rooftop's list.
+  const apptItems = (appointments ?? []).map((a) => ({
+    customer: a.customer_name ?? "—", when: fmtWhen(a.appointment_time), vehicle: a.vehicle ?? "", status: a.status ?? "",
+  }));
+  const callbackItems = (callbacks ?? []).map((c) => ({
+    customer: c.customer_name ?? "—", due: fmtWhen(c.callback_due), intent: c.intent ?? "", priority: c.priority ?? "",
+  }));
+  const campaignItems = (campaigns ?? []).map((c) => ({
+    name: c.campaign, useCase: c.use_case ?? "", enrolled: c.enrolled, appts: c.appointments,
+    apptRate: c.appt_rate_pct ?? 0, warmLeads: c.warm_leads, optOuts: c.opt_outs, noReach: c.no_reach,
+  }));
 
   // prior-window per-agent basis (drives report.deltas + fleet deltas)
   const prior: Record<string, Basis> = {};
@@ -79,7 +110,11 @@ export function buildResult({ daily, breakdown, priorDaily }: BuildInput): Fetch
     const rows = daily.filter((r) => r.agent_type === type).sort((a, b) => a.activity_day.localeCompare(b.activity_day));
     const bd = breakdown.filter((r) => r.agent_type === type);
     const a: AgentData = structuredClone(base);
-    if (!rows.length) return a; // no live rows → pure mock fallback for this agent
+    // NOTE: we do NOT early-return mock when rows is empty. An agent with no activity in the
+    // selected window must read as ZERO on a live rooftop — returning mock here let fabricated
+    // volume leak into the fleet roll-up and "Value created" (e.g. a 1-day window showing more
+    // appointments than a 7-day one). The overlay below produces zeros from the empty sums; the
+    // residual mock visuals are cleared at the end of the loop.
 
     const inbound = base.dir === "Inbound";
     const calls = sum(rows, (r) => r.calls);
@@ -97,20 +132,9 @@ export function buildResult({ daily, breakdown, priorDaily }: BuildInput): Fetch
     const connectRate = calls ? Math.round((connected / calls) * 100) : 0;
     const aht = connected ? talkSeconds / connected : 0;
 
-    // ── no-column outcome fields (showed/deals/revenue/cost) have no Q12227 source. Derive them from
-    //    the live funnel via the mock's conversion rates so they scale with live volume and stay
-    //    monotonic, instead of leaking raw mock counts — which produced impossible funnels like
-    //    showed (28) > appointments (1) when live volume is low. ──
-    const showRate = base.metrics.appointments ? base.metrics.showed / base.metrics.appointments : 0;
-    const closeRate = base.metrics.showed ? base.metrics.deals / base.metrics.showed : 0;
-    const dealValue = base.metrics.deals ? base.metrics.revenue / base.metrics.deals : 0;
-    const costPerCall = base.metrics.calls ? base.metrics.cost / base.metrics.calls : 0;
-    const showed = Math.round(appointments * showRate);
-    const deals = Math.round(showed * closeRate);
-
-    // ── metrics: once an agent has live rows, every field reflects live data — a real 0 stays 0.
-    //    No `|| mock` fallback: that previously replaced a true 0 with the mock value, letting mock
-    //    numbers exceed live ones (e.g. qualified 96 > calls 82 when live qualified summed to 0). ──
+    // ── metrics: live-backed fields only, real 0 stays 0. Fields with NO Q12227 source
+    //    (showed/deals/revenue/cost) are zeroed — never fabricated — and surfaced as "coming soon"
+    //    in the UI rather than carrying mock values. ──
     a.metrics = {
       ...a.metrics,
       calls,
@@ -118,21 +142,24 @@ export function buildResult({ daily, breakdown, priorDaily }: BuildInput): Fetch
       connectRate,
       qualified,
       appointments,
-      showed,
-      deals,
-      revenue: Math.round(deals * dealValue),
-      cost: Math.round(calls * costPerCall),
+      showed: 0,
+      deals: 0,
+      revenue: 0,
+      cost: 0,
       afterHours,
       talkMinutes: Math.round(talkSeconds / 60),
       smsSent,
       optOuts,
     };
 
-    // ── quality: primary + handleTime are live; csat/sentiment have no Q12227 column → stay mock ──
+    // ── quality: only the live-backed bits. csat/sentiment have no Q12227 column → zeroed (the UI
+    //    hides them); handleTime is "—" when there's no talk time, never a mock value. ──
     a.quality = {
       ...a.quality,
       primary: connectRate,
-      handleTime: aht ? fmtHandle(aht) : a.quality.handleTime,
+      handleTime: aht ? fmtHandle(aht) : "—",
+      csat: 0,
+      sentiment: 0,
     };
 
     // ── channel split (counts: voice calls vs sms threads) ──
@@ -169,16 +196,16 @@ export function buildResult({ daily, breakdown, priorDaily }: BuildInput): Fetch
       dayOnDay: rows.map((r) => ({ day: shortDay(r.activity_day), touched: r.calls, qualified: r.qualified, appts: r.appointments })),
       intent: intents.length
         ? intents.slice(0, 8).map((r, i) => ({ label: r.value, value: r.count, color: COLORS[i % COLORS.length] }))
-        : a.report.intent,
+        : [],
       queries: intents.length
         ? intents.slice(0, 8).map((r) => ({ label: r.value, total: r.count, resolved: r.qualified }))
-        : a.report.queries,
+        : [],
       multiDayReply: replies.length
         ? REPLY_ORDER.filter((o) => replies.some((r) => r.value === o)).map((o) => {
             const r = replies.find((x) => x.value === o)!;
             return { day: REPLY_LABEL[o], pct: r.count ? Math.round((100 * r.qualified) / r.count) : 0 };
           })
-        : a.report.multiDayReply,
+        : [],
       summary: {
         ...a.report.summary,
         conversations: connected,
@@ -193,27 +220,29 @@ export function buildResult({ daily, breakdown, priorDaily }: BuildInput): Fetch
       if (outcomes.length) a.report.outcomes = outcomes.slice(0, 8).map((o) => ({ label: o.value, value: o.count }));
     }
 
-    // ── inbound-only: leads by source + speed to lead ──
-    if (inbound && sources.length) {
-      a.report.leadsBySource = sources.slice(0, 8).map((r) => ({
-        source: r.value, interacted: r.count, engaged: r.count, total: r.count, handoffs: 0, appts: r.appts,
-      }));
-    }
+    // ── inbound-only: leads by source + speed to lead. Always assigned from live data (or cleared) —
+    //    never left as the cloned mock when there's nothing live to show. ──
+    a.report.leadsBySource = inbound && sources.length
+      ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.count, engaged: r.count, total: r.count, handoffs: 0, appts: r.appts }))
+      : undefined;
     if (inbound) {
       const newLeads = sum(rows, (r) => r.new_leads);
       const within5 = sum(rows, (r) => r.stl_within5);
       const stlSec = sum(rows, (r) => r.stl_seconds_sum);
       const stlCnt = sum(rows, (r) => r.stl_count);
-      if (newLeads || stlCnt) {
-        a.report.speedToLead = {
-          ...(a.report.speedToLead ?? ({} as NonNullable<AgentData["report"]["speedToLead"]>)),
-          avg: stlCnt ? fmtAvgLatency(stlSec / stlCnt) : (a.report.speedToLead?.avg ?? "—"),
-          pctWithin5: newLeads ? Math.round((100 * within5) / newLeads) : 0,
-          crmLeadsNew: newLeads,
-          instantlyTouched: within5,
-          pctTouched: a.report.speedToLead?.pctTouched ?? 0,
-        };
-      }
+      a.report.speedToLead = (newLeads || stlCnt)
+        ? {
+            avg: stlCnt ? fmtAvgLatency(stlSec / stlCnt) : "—",
+            pctWithin5: newLeads ? Math.round((100 * within5) / newLeads) : 0,
+            crmLeadsNew: newLeads,
+            instantlyTouched: within5,
+            missedCalledBack: 0, // no Q12227 source
+            pctTouched: 0,
+            note: "",
+          }
+        : undefined;
+    } else {
+      a.report.speedToLead = undefined;
     }
 
     // ── real period-over-period deltas vs prior window ──
@@ -228,6 +257,24 @@ export function buildResult({ daily, breakdown, priorDaily }: BuildInput): Fetch
         totalSms: pctDelta(smsSent, pb.sms),
         abr: pctDelta(a.report.abr, abrPrev),
       };
+    }
+
+    // No activity in this window → strip the mock visuals that fall back when there are no rows,
+    // so the agent reads as a genuine zero (metrics/report counts are already 0 from empty sums).
+    if (!rows.length) {
+      a.trend7 = a.trend7.map(() => 0);
+      a.hourly = a.hourly.map(() => 0);
+      a.channelSplit = { voice: 0, sms: 0 };
+      a.report = { ...a.report, intent: [], queries: [], multiDayReply: [], leadsBySource: undefined, speedToLead: undefined, outcomes: undefined };
+    }
+
+    // Rooftop-level detail (not split by agent): appointments + callbacks on inbound agents,
+    // campaigns on outbound. Attached after the zeroing above so it survives for quiet agents.
+    if (inbound) {
+      a.report.upcomingAppointments = apptItems.length ? apptItems : undefined;
+      a.report.followUps = callbackItems.length ? callbackItems : undefined;
+    } else {
+      a.report.activeCampaigns = campaignItems.length ? campaignItems : undefined;
     }
 
     return a;

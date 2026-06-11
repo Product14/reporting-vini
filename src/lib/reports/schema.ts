@@ -95,6 +95,38 @@ export interface AggregateResult {
   breakdown: BreakdownRow[];
 }
 
+// ── Per-row detail tables (rooftop-level; keyed by team_id). Populated by the sync from the dedicated
+//    Metabase cards, read by the GET API and attached to each report. Not part of the daily aggregate. ──
+export interface AppointmentRow {
+  team_id: string;
+  customer_name: string | null;
+  appointment_time: string | null;
+  vehicle: string | null;
+  status: string | null;
+  assigned_to: string | null;
+  booked_at: string | null;
+}
+export interface CallbackRow {
+  team_id: string;
+  customer_name: string | null;
+  callback_due: string | null;
+  intent: string | null;
+  priority: string | null;
+  assigned_to: string | null;
+  requested_on: string | null;
+}
+export interface CampaignRow {
+  team_id: string;
+  campaign: string;
+  use_case: string | null;
+  enrolled: number;
+  appointments: number;
+  warm_leads: number;
+  opt_outs: number;
+  no_reach: number;
+  appt_rate_pct: number | null;
+}
+
 // Single-row sync bookkeeping table (id = 1).
 export interface SyncState {
   id: number;

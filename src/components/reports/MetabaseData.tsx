@@ -57,39 +57,25 @@ export function MetabaseData({ question, params }: { question: number; params?: 
       <div className="flex items-center justify-center py-16">
         <span className="flex items-center gap-2 text-[12px] text-[#9ca3af]">
           <span className="h-3 w-3 animate-spin rounded-full border-2 border-[#d8caff] border-t-[#813fed]" />
-          Pulling live numbers from Metabase…
+          Loading your live numbers…
         </span>
       </div>
     );
   }
 
   if (error) {
-    const paramIssue = /required parameter|unknown parameter|not allowed/i.test(error);
-    const runIssue = /error occurred while running/i.test(error);
     return (
       <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-[#fde68a] bg-[#fffbeb] px-6 py-10 text-center">
-        <p className="text-[13px] font-bold text-[#92400e]">Metabase returned an error</p>
-        <p className="max-w-[560px] text-[12px] text-[#a16207]">{error}</p>
-        {paramIssue && (
-          <p className="mt-1 max-w-[560px] text-[11.5px] leading-snug text-[#6b7280]">
-            This question’s filters (<b>TEAM_ID · AGENT_TYPE · CALLTYPES · TZ</b>) aren’t enabled for embedding yet. In
-            Metabase open question 12182 → <b>Sharing → Embed</b>, set each of those four parameters to <b>Locked</b>,
-            then <b>Publish</b>.
-          </p>
-        )}
-        {runIssue && (
-          <p className="mt-1 max-w-[560px] text-[11.5px] leading-snug text-[#6b7280]">
-            The filters are enabled, but the query errors under embedding (the real reason is masked here). This is almost
-            always a <b>referenced question or SQL snippet that isn’t published for embedding</b>, or a field-filter
-            parameter type. The actual error shows in <b>Metabase → Admin → Troubleshooting → Logs</b>.
-          </p>
-        )}
+        <p className="text-[13px] font-bold text-[#92400e]">We couldn’t load this data right now</p>
+        <p className="max-w-[560px] text-[12px] text-[#a16207]">
+          This usually clears on its own in a moment. Refresh to try again, or reach out to support if it keeps happening.
+        </p>
       </div>
     );
   }
 
   if (!data || !data.rows.length) {
-    return <div className="py-12 text-center text-[12px] text-[#9ca3af]">No rows returned for this filter.</div>;
+    return <div className="py-12 text-center text-[12px] text-[#9ca3af]">No data to show for this view yet.</div>;
   }
 
   // Single summary row → KPI tiles. Breakdown → table.
@@ -99,7 +85,7 @@ export function MetabaseData({ question, params }: { question: number; params?: 
       <div>
         <div className="mb-3 flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-[#10b981]" />
-          <span className="text-[11px] font-semibold text-[#065f46]">Live from Metabase · {data.cols.length} metrics</span>
+          <span className="text-[11px] font-semibold text-[#065f46]">Live data · {data.cols.length} metrics</span>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
           {data.cols.map((c) => (
@@ -117,7 +103,7 @@ export function MetabaseData({ question, params }: { question: number; params?: 
     <div>
       <div className="mb-3 flex items-center gap-2">
         <span className="h-2 w-2 rounded-full bg-[#10b981]" />
-        <span className="text-[11px] font-semibold text-[#065f46]">Live from Metabase · {data.rows.length} rows</span>
+        <span className="text-[11px] font-semibold text-[#065f46]">Live data · {data.rows.length} rows</span>
       </div>
       <div className="max-h-[460px] overflow-auto rounded-xl border border-[#f0f0f0]">
         <table className="w-full">

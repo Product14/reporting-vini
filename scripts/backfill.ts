@@ -60,6 +60,20 @@ async function fetchRows(params: Record<string, string>): Promise<RawRow[]> {
   return json as RawRow[];
 }
 
+// Pull any embeddable card (the rooftop-level detail cards are pre-aggregated; no date param).
+async function fetchCard(id: number, params: Record<string, string> = {}): Promise<Record<string, unknown>[]> {
+  const token = sign({ resource: { question: id }, params, exp: Math.round(Date.now() / 1000) + 1800 });
+  const res = await fetch(`${SITE}/api/embed/card/${token}/query/json`, {
+    cache: "no-store",
+    dispatcher: new Agent({ headersTimeout: 0, bodyTimeout: 0, connect: { timeout: 60_000 } }),
+  } as RequestInit);
+  const text = await res.text();
+  if (!res.ok) throw new Error(`card ${id} HTTP ${res.status}: ${text.slice(0, 120)}`);
+  const json = JSON.parse(text);
+  if (!Array.isArray(json)) throw new Error(`card ${id} not an array`);
+  return json as Record<string, unknown>[];
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function insertAll(sb: any, table: string, rows: object[]) {
   for (let i = 0; i < rows.length; i += 500) {
@@ -112,6 +126,44 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   }
   await insertAll(sb, "agent_daily", daily);
   await insertAll(sb, "agent_daily_breakdown", breakdown);
+
+  // ── rooftop-level detail: appointments (12233) + callbacks (12234) + campaigns (12232) → detail
+  //    tables. 12233/12234 carry a rooftop NAME (mapped to team_id via the map Q12227 carries);
+  //    12232 now carries team_id directly. Best-effort: a failure here (e.g. migration 0002 not
+  //    applied yet) must NOT fail the main aggregate sync above. ──
+  try {
+    const rooftopToTeam = new Map<string, string>();
+    for (const r of raw) {
+      const name = String(r.rooftop_name || "").trim();
+      const team = String(r["cs.team_id"] || "");
+      if (name && team && !rooftopToTeam.has(name)) rooftopToTeam.set(name, team);
+    }
+    const mapTeam = (rooftop: unknown) => rooftopToTeam.get(String(rooftop || "").trim());
+    const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+    const appts = await fetchCard(12233);
+    const apptRows = appts
+      .map((a) => ({ team_id: mapTeam(a.rooftop), customer_name: a.customer_name ?? null, appointment_time: a.appointment_time ?? null, vehicle: a.vehicle ?? null, status: a.status ?? null, assigned_to: a.assigned_to ?? null, booked_at: a.booked_at ?? null }))
+      .filter((r) => r.team_id);
+    const cbs = await fetchCard(12234);
+    const cbRows = cbs
+      .map((c) => ({ team_id: mapTeam(c.rooftop), customer_name: c.customer_name ?? null, callback_due: c.callback_due ?? null, intent: c.intent ?? null, priority: c.priority ?? null, assigned_to: c.assigned_to ?? null, requested_on: c.requested_on ?? null }))
+      .filter((r) => r.team_id);
+    const camps = await fetchCard(12232);
+    const campRows = camps
+      .map((c) => ({ team_id: String(c.team_id ?? ""), campaign: String(c.campaign ?? ""), use_case: c.use_case ?? null, enrolled: n(c.enrolled), appointments: n(c.appointments), warm_leads: n(c.warm_leads), opt_outs: n(c.opt_outs), no_reach: n(c.no_reach), appt_rate_pct: c.appt_rate_pct ?? null }))
+      .filter((r) => r.team_id && r.campaign);
+
+    for (const [t, rows] of [["report_appointments", apptRows], ["report_callbacks", cbRows], ["report_campaigns", campRows]] as const) {
+      const { error: delErr } = await sb.from(t).delete().gte("synced_at", "1900-01-01");
+      if (delErr) throw new Error(`${t} delete: ${delErr.message}`);
+      await insertAll(sb, t, rows);
+    }
+    console.log(`detail: ${apptRows.length}/${appts.length} appointments + ${cbRows.length}/${cbs.length} callbacks + ${campRows.length}/${camps.length} campaigns synced.`);
+  } catch (e) {
+    console.warn(`detail sync skipped: ${(e as Error).message} — has migration 0002 been applied?`);
+  }
+
   await sb.from("sync_state").update({
     last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: daily.length, window_start: windowStart, error: null,
   }).eq("id", 1);

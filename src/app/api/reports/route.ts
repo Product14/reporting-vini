@@ -1,6 +1,6 @@
-import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN } from "@/lib/reports/supabase";
+import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_APPOINTMENTS, REPORT_CALLBACKS, REPORT_CAMPAIGNS } from "@/lib/reports/supabase";
 import { buildResult } from "@/lib/reports/build";
-import type { AgentDailyRow, BreakdownRow } from "@/lib/reports/schema";
+import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 
@@ -63,10 +63,25 @@ export async function GET(request: Request): Promise<Response> {
     });
   }
 
+  // Rooftop-level detail (appointments / callbacks / campaigns). These tables may not exist yet
+  // (migration 0002 not applied) — a read error there must NOT fail the report, so each degrades to
+  // an empty list independently.
+  const safe = async <T,>(p: PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> => {
+    try { const { data, error } = await p; return error ? [] : ((data ?? []) as T[]); } catch { return []; }
+  };
+  const [appointments, callbacks, campaigns] = await Promise.all([
+    safe<AppointmentRow>(sb.from(REPORT_APPOINTMENTS).select("*").eq("team_id", teamId)),
+    safe<CallbackRow>(sb.from(REPORT_CALLBACKS).select("*").eq("team_id", teamId)),
+    safe<CampaignRow>(sb.from(REPORT_CAMPAIGNS).select("*").eq("team_id", teamId)),
+  ]);
+
   const result = buildResult({
     daily: (cur.data ?? []) as AgentDailyRow[],
     breakdown: (bd.data ?? []) as BreakdownRow[],
     priorDaily: (pri.data ?? []) as AgentDailyRow[],
+    appointments,
+    callbacks,
+    campaigns,
   });
 
   return Response.json(result, {

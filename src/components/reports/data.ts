@@ -163,25 +163,29 @@ export interface SpeedToLead {
   pctTouched: number;
   note: string;
 }
+// Shapes mirror the Supabase-backed Metabase cards (12233 / 12234 / 12232).
 export interface UpcomingAppt {
-  name: string;
-  when: string;
+  customer: string; // customer_name
+  when: string; // appointment_time (formatted for display)
   vehicle: string;
-  note: string;
+  status: string; // booked / confirmed / cancelled …
 }
 export interface FollowUp {
-  name: string;
-  reason: string;
-  when: string;
-  status: "Callback requested" | "No answer" | "Voicemail";
+  customer: string; // customer_name
+  due: string; // callback_due (formatted)
+  intent: string; // RequestCallback, …
+  priority: string; // LOW / MEDIUM / HIGH
 }
 // ── Outbound-only ──
 export interface ActiveCampaign {
-  name: string;
-  status: string;
-  days: number;
-  appts: number;
-  conversion: number; // %
+  name: string; // campaign
+  useCase: string; // use_case
+  enrolled: number;
+  appts: number; // appointments
+  apptRate: number; // appt_rate_pct
+  warmLeads: number;
+  optOuts: number;
+  noReach: number;
 }
 export interface NoInteraction {
   total: number;
@@ -327,16 +331,6 @@ export const AGENTS: AgentData[] = [
         { source: "Other", interacted: 39, engaged: 21, total: 39, handoffs: 4, appts: 3 },
       ],
       speedToLead: { avg: "1m 47s", pctWithin5: 97, crmLeadsNew: 87, instantlyTouched: 68, missedCalledBack: 23, pctTouched: 94, note: "6 of 7 days the average was under 5 minutes" },
-      upcomingAppointments: [
-        { name: "Helen Carter", when: "Today · 4:30 PM", vehicle: "2024 RAV4 Hybrid", note: "Test drive + trade appraisal" },
-        { name: "Robert Kim", when: "Today · 6:00 PM", vehicle: "Certified Camry", note: "Financing pre-approved" },
-        { name: "Amit Lal", when: "Tomorrow · 11:00 AM", vehicle: "Highlander XLE", note: "Comparing two trims" },
-        { name: "James Wu", when: "Tomorrow · 5:00 PM", vehicle: "Tacoma TRD", note: "Wants out-the-door price" },
-      ],
-      followUps: [
-        { name: "Jessica Parker", reason: "Wants a follow-up after 4 PM", when: "2h ago", status: "Callback requested" },
-        { name: "Tommy Lee", reason: "Asked to confirm availability", when: "4h ago", status: "Callback requested" },
-      ],
       benchmarks: [
         { label: "Leads touched", ours: "100%", theirs: "55%", caption: "Every lead — including after-hours and overflow that used to ring out.", multiplier: "Never misses", accent: "#10b981" },
         { label: "Time to first touch", ours: "47 sec", theirs: "3 hrs", caption: "Instant, not hours later. Speed is what wins the lead.", multiplier: "~230× faster", accent: "#813fed" },
@@ -428,13 +422,6 @@ export const AGENTS: AgentData[] = [
         { day: "Day 3+", pct: 17 },
       ],
       summary: { person: "Jenny", tagline: "Sales · Outbound", conversations: 384, avgFirstContact: "3m 48s", apptsBooked: 54, bookingRate: 14 },
-      activeCampaigns: [
-        { name: "Spring Inventory Clearance", status: "Active", days: 64, appts: 3, conversion: 4.7 },
-        { name: "Service Loyalty May", status: "Active", days: 20, appts: 3, conversion: 5.0 },
-        { name: "Equity Mining", status: "Active", days: 31, appts: 14, conversion: 4.6 },
-        { name: "Aged-Lead Re-Engagement", status: "Active", days: 45, appts: 11, conversion: 2.4 },
-      ],
-      noInteraction: { total: 507, interested: 142, noReply: 318, disconnected: 47 },
       benchmarks: [
         { label: "List worked", ours: "100%", theirs: "20%", caption: "Every aged, equity and lease lead — humans only chase the hottest few.", multiplier: "Never cherry-picks", accent: "#10b981" },
         { label: "Touches per lead", ours: "8", theirs: "2", caption: "Call → SMS → call across days; humans give up after 2 dials.", multiplier: "4× the cadence", accent: "#6366f1" },
@@ -532,15 +519,6 @@ export const AGENTS: AgentData[] = [
         { source: "Other", interacted: 6, engaged: 4, total: 6, handoffs: 1, appts: 4 },
       ],
       speedToLead: { avg: "2m 10s", pctWithin5: 92, crmLeadsNew: 64, instantlyTouched: 51, missedCalledBack: 13, pctTouched: 89, note: "After-hours demand booked straight into the scheduler" },
-      upcomingAppointments: [
-        { name: "Dana Foster", when: "Today · 8:00 AM", vehicle: "2021 Camry · 38k mi", note: "Oil change + tire rotation" },
-        { name: "Luis Romero", when: "Today · 10:30 AM", vehicle: "2019 RAV4 · recall", note: "Open safety recall" },
-        { name: "Priya Nair", when: "Tomorrow · 9:15 AM", vehicle: "2022 Highlander", note: "Check-engine diagnostic" },
-      ],
-      followUps: [
-        { name: "Greg Mason", reason: "Declined work — wants a quote", when: "1h ago", status: "Callback requested" },
-        { name: "Sara Pearce", reason: "Reschedule from yesterday", when: "3h ago", status: "Voicemail" },
-      ],
       benchmarks: [
         { label: "Calls answered", ours: "100%", theirs: "61%", caption: "Every service call — even the 8am open rush and after hours.", multiplier: "Never misses", accent: "#10b981" },
         { label: "Time to first touch", ours: "38 sec", theirs: "2h 40m", caption: "Booked straight into the drive — no voicemail tag.", multiplier: "~250× faster", accent: "#813fed" },
@@ -631,12 +609,6 @@ export const AGENTS: AgentData[] = [
         { day: "Day 3+", pct: 14 },
       ],
       summary: { person: "Theo", tagline: "Service · Outbound", conversations: 353, avgFirstContact: "2m 51s", apptsBooked: 71, bookingRate: 20 },
-      activeCampaigns: [
-        { name: "Recall (safety)", status: "Active", days: 30, appts: 38, conversion: 13.3 },
-        { name: "Due-Service Reminder", status: "Active", days: 28, appts: 21, conversion: 5.2 },
-        { name: "Service Specials", status: "Active", days: 14, appts: 12, conversion: 4.1 },
-      ],
-      noInteraction: { total: 412, interested: 96, noReply: 274, disconnected: 42 },
       benchmarks: [
         { label: "Recall / due list worked", ours: "100%", theirs: "25%", caption: "Every recall and due-service owner contacted — nothing slips.", multiplier: "Never misses a recall", accent: "#10b981" },
         { label: "Touches per lead", ours: "7", theirs: "2", caption: "Persistent, compliant cadence; humans stop after 2 tries.", multiplier: "3.5× the cadence", accent: "#6366f1" },

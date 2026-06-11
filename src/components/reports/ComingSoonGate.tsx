@@ -19,8 +19,7 @@ export function ReportingComingSoon() {
           <p className="mt-6 text-[10.5px] font-bold uppercase tracking-[0.18em] text-[#c4b5fd]">Reports</p>
           <h1 className="mt-2 text-[30px] font-black leading-[1.05] tracking-[-0.02em]">Reporting is coming soon</h1>
           <p className="mt-3 max-w-[420px] text-[14px] leading-snug text-[#d6cdf0]">
-            We&apos;re putting the finishing touches on your dashboard and validating every number, so the figures you
-            see are accurate from day one. Your full reporting suite goes live right here shortly.
+            We&apos;re putting the finishing touches on your dashboard.
           </p>
           <span className="mt-7 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 text-[12px] font-semibold text-white backdrop-blur-sm">
             <span className="relative flex h-2 w-2">

@@ -18,3 +18,7 @@ export function getSupabase(): SupabaseClient | null {
 export const AGENT_DAILY = "agent_daily";
 export const AGENT_DAILY_BREAKDOWN = "agent_daily_breakdown";
 export const SYNC_STATE = "sync_state";
+// Per-row detail tables (see supabase/migrations/0002_report_detail.sql).
+export const REPORT_APPOINTMENTS = "report_appointments";
+export const REPORT_CALLBACKS = "report_callbacks";
+export const REPORT_CAMPAIGNS = "report_campaigns";

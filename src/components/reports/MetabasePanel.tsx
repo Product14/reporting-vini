@@ -59,10 +59,9 @@ export function MetabasePanel({
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-[#fecaca] bg-[#fef2f2] px-6 py-12 text-center">
-        <p className="text-[13px] font-bold text-[#991b1b]">Couldn’t load live data</p>
-        <p className="max-w-[480px] text-[12px] text-[#b91c1c]">{error}</p>
-        <p className="mt-1 text-[11px] text-[#9ca3af]">
-          Set <b>METABASE_SITE_URL</b> + <b>METABASE_SECRET_KEY</b> in <b>.env.local</b>, then restart the dev server.
+        <p className="text-[13px] font-bold text-[#991b1b]">We couldn’t load live data right now</p>
+        <p className="max-w-[480px] text-[12px] text-[#b91c1c]">
+          This usually clears on its own in a moment. Refresh to try again, or reach out to support if it keeps happening.
         </p>
       </div>
     );
@@ -82,7 +81,7 @@ export function MetabasePanel({
   return (
     <iframe
       src={url}
-      title={`Metabase question ${question}`}
+      title="Live reporting dashboard"
       className="w-full rounded-xl bg-white"
       style={{ height, border: 0 }}
     />

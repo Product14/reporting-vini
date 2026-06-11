@@ -13,6 +13,7 @@ export const SECRET = process.env.METABASE_SECRET_KEY;
 export const ALLOWED_QUESTIONS = new Set<number>([
   12182,
   12227,
+  12232, 12233, 12234, // rooftop-level detail cards: best campaign / upcoming appts / callbacks
   ...Array.from({ length: 12212 - 12193 + 1 }, (_, i) => 12193 + i),
 ]);
 

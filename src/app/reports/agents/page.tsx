@@ -3,10 +3,13 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  ActiveCampaign,
   AGENTS as MOCK_AGENTS,
   AgentData,
   agentById,
   Bucket,
+  FollowUp,
+  UpcomingAppt,
   BUCKET_LABELS,
   CalibratingBanner,
   Card,
@@ -17,7 +20,6 @@ import {
   fmtInt,
   fmtMoneyFull,
   GhostPreview,
-  HealthChip,
   HOUR_LABELS,
   DayTrend,
   ProgressBar,
@@ -210,9 +212,10 @@ function AgentReportsView() {
           {scenario !== "first_time" && live && !hasTeam && (
             <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[#e0e0e0] bg-[#fcfcfd] px-6 py-16 text-center">
               <span className="text-[26px] leading-none">🏢</span>
-              <p className="text-[14px] font-bold text-[#111]">No rooftop selected</p>
+              <p className="text-[14px] font-bold text-[#111]">We couldn’t tell which dealership to show</p>
               <p className="max-w-[460px] text-[12.5px] leading-snug text-[#6b7280]">
-                Add <b>?team_id=…</b> to the URL to load a rooftop&apos;s live reporting. Without a rooftop, there&apos;s no data to show.
+                Open your report from your dashboard so it loads the right dealership. If you reached this page another
+                way, your administrator can point you to the correct link.
               </p>
             </div>
           )}
@@ -223,32 +226,29 @@ function AgentReportsView() {
 
           {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !comingSoon)) && (
           <>
-          {/* agent selector — live agents this rooftop runs, plus "add" cards for the rest */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {/* agent switcher — full-width row of equal pills; the selected one drives the report below */}
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
             {visibleAgents.map((ag) => {
               const selected = ag.id === activeId && !upsell;
               return (
                 <button
                   key={ag.id}
                   onClick={() => { setActiveId(ag.id); setUpsellId(null); }}
-                  className={`text-left rounded-2xl border bg-white p-4 transition-all ${
+                  className={`flex items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-all ${
                     selected
-                      ? "border-[#813fed] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
-                      : "border-[#e5e7eb] hover:border-[#c4b5fd] hover:shadow-sm"
+                      ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
+                      : "border-[#e5e7eb] bg-white hover:border-[#c4b5fd] hover:bg-[#faf8ff]"
                   }`}
                 >
-                  <div className="flex items-start justify-between">
-                    <span className="text-[20px] leading-none">{ag.icon}</span>
-                    <HealthChip status={ag.health} />
-                  </div>
-                  <p className="mt-2 text-[13.5px] font-bold text-[#111] leading-tight">{ag.name}</p>
-                  <p className="text-[10.5px] font-semibold uppercase tracking-wider text-[#9ca3af]">
-                    {ag.dept} · {ag.dir}
-                  </p>
-                  <div className="mt-3">
-                    <p className="text-[20px] font-bold tabular-nums text-[#111]">{view.agentLive ? fmtInt(ag.metrics.calls * factor) : "—"}</p>
-                    <p className="text-[10.5px] text-[#6b7280]">{ag.headlineLabel}</p>
-                  </div>
+                  <span className={`flex h-9 w-9 flex-none items-center justify-center rounded-lg text-[18px] leading-none ${selected ? "bg-white shadow-sm" : "bg-[#f6f1ff]"}`}>
+                    {ag.icon}
+                  </span>
+                  <span className="flex flex-col">
+                    <span className={`text-[13px] font-bold leading-tight ${selected ? "text-[#111]" : "text-[#374151]"}`}>{ag.name}</span>
+                    <span className="mt-0.5 text-[11px] leading-none text-[#6b7280]">
+                      <b className="tabular-nums text-[#111]">{view.agentLive ? fmtInt(ag.report.leadsAttempted * factor) : "—"}</b> leads attempted
+                    </span>
+                  </span>
                 </button>
               );
             })}
@@ -258,24 +258,17 @@ function AgentReportsView() {
                 <button
                   key={ag.id}
                   onClick={() => setUpsellId(ag.id)}
-                  className={`text-left rounded-2xl border border-dashed bg-[#fcfcfd] p-4 transition-all ${
+                  className={`flex items-center gap-3 rounded-xl border border-dashed px-3.5 py-2.5 text-left transition-all ${
                     selected
-                      ? "border-[#813fed] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
-                      : "border-[#dcd3f5] hover:border-[#c4b5fd] hover:bg-[#faf8ff]"
+                      ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
+                      : "border-[#dcd3f5] bg-[#fcfcfd] hover:border-[#c4b5fd] hover:bg-[#faf8ff]"
                   }`}
                 >
-                  <div className="flex items-start justify-between">
-                    <span className="text-[20px] leading-none opacity-60">{ag.icon}</span>
-                    <span className="inline-flex items-center gap-1 rounded-full bg-[#f3eaff] px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#813fed]">+ Add</span>
-                  </div>
-                  <p className="mt-2 text-[13.5px] font-bold text-[#6b7280] leading-tight">{ag.name}</p>
-                  <p className="text-[10.5px] font-semibold uppercase tracking-wider text-[#9ca3af]">
-                    {ag.dept} · {ag.dir}
-                  </p>
-                  <div className="mt-3">
-                    <p className="text-[12.5px] font-bold text-[#813fed]">See what it could do →</p>
-                    <p className="text-[10.5px] text-[#9ca3af]">Not active yet</p>
-                  </div>
+                  <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#f3eaff] text-[18px] leading-none opacity-70">{ag.icon}</span>
+                  <span className="flex flex-col">
+                    <span className="text-[13px] font-bold leading-tight text-[#6b7280]">{ag.name}</span>
+                    <span className="mt-0.5 text-[11px] font-semibold leading-none text-[#813fed]">+ Add · see what it does</span>
+                  </span>
                 </button>
               );
             })}
@@ -292,16 +285,6 @@ function AgentReportsView() {
 
           {!upsell && (
           <>
-          {/* detail identity strip */}
-          <section className="flex items-center gap-3 rounded-2xl border border-[#e5e7eb] bg-gradient-to-r from-[#faf8ff] to-white px-6 py-3.5 shadow-sm">
-            <span className="text-[20px] leading-none">{a.icon}</span>
-            <p className="flex-1 text-[15px] font-bold text-[#111]">
-              {a.name} <span className="text-[12px] font-medium text-[#9ca3af]">· {r.summary.person} · {a.dept} {a.dir}</span>
-            </p>
-            <span className="text-[11px] font-medium text-[#9ca3af]">{periodLabel}</span>
-            <HealthChip status={a.health} />
-          </section>
-
           {scenario === "onboarding" && <OnboardingAgents agent={a} view={view} />}
 
           {live && agentEmpty && (
@@ -366,20 +349,36 @@ function AgentReportsView() {
 
           {/* Performance — outcome funnel (primary) → activity (secondary) → call breakdown (tertiary) */}
           <div className="overflow-hidden rounded-2xl border border-[#e5e7eb] bg-white shadow-sm">
-            {/* primary: lead → qualified → appointment */}
-            <div className="flex flex-col gap-4 px-6 py-6 sm:flex-row sm:items-center sm:gap-2">
-              <PerfStage label="Leads attempted" value={fmtInt(scale(r.leadsAttempted))} delta={r.deltas.leadsAttempted} />
-              <PerfArrow pct={r.leadsAttempted > 0 ? Math.round((m.qualified / r.leadsAttempted) * 100) : 0} />
-              <PerfStage label="Leads qualified" value={fmtInt(scale(m.qualified))} delta={r.deltas.leadsQualified} />
-              <PerfArrow pct={m.qualified > 0 ? Math.round((m.appointments / m.qualified) * 100) : 0} />
-              <PerfStage label="Appointments" value={fmtInt(scale(m.appointments))} delta={r.deltas.appointments} primary />
-              <div className="sm:ml-auto sm:pl-2">
-                <div className="rounded-2xl bg-[#f6f1ff] px-5 py-3 text-center">
-                  <p className="text-[9.5px] font-bold uppercase tracking-wider text-[#9ca3af]">ABR · appts / leads</p>
-                  <p className="text-[26px] font-extrabold tabular-nums leading-none text-[#813fed]">{r.abr}%</p>
-                  <span className="mt-0.5 inline-block"><DeltaPill delta={r.deltas.abr} /></span>
+            {/* header — agent identity (persona · name · health · period) + booking rate */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#f0f0f0] bg-gradient-to-r from-[#faf8ff] to-white px-6 py-4">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-white text-[17px] leading-none shadow-sm">{a.icon}</span>
+                <div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <p className="text-[14px] font-bold leading-tight text-[#111]">{r.summary.person}</p>
+                    <span className="text-[12px] font-medium text-[#9ca3af]">{a.name}</span>
+                  </div>
+                  <p className="mt-0.5 text-[11px] leading-tight text-[#9ca3af]">Lead → appointment funnel · {periodLabel}</p>
                 </div>
               </div>
+              <div className="flex items-center gap-2.5 rounded-xl bg-white px-4 py-2 shadow-sm ring-1 ring-[#ece6fb]">
+                <div className="text-right leading-tight">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Booking rate</p>
+                  <DeltaPill delta={r.deltas.abr} />
+                </div>
+                <p className="text-[28px] font-extrabold tabular-nums leading-none text-[#813fed]">{r.abr}%</p>
+              </div>
+            </div>
+
+            {/* primary: the lead → qualified → appointment funnel */}
+            <div className="px-6 py-6">
+              <PerfFunnel
+                stages={[
+                  { label: inbound ? "Leads attempted" : "Leads dialed", value: scale(r.leadsAttempted), delta: r.deltas.leadsAttempted },
+                  { label: "Leads qualified", value: scale(m.qualified), delta: r.deltas.leadsQualified },
+                  { label: "Appointments booked", value: scale(m.appointments), delta: r.deltas.appointments },
+                ]}
+              />
             </div>
 
             {/* secondary: activity */}
@@ -413,7 +412,7 @@ function AgentReportsView() {
             <DayTrend points={r.dayOnDay} />
           </Card>
 
-          <SectionLabel hint={`${r.qualifiedPct}% qualified · ${a.quality.sentiment}% positive sentiment`}>Conversations &amp; outcomes</SectionLabel>
+          <SectionLabel hint={`${r.qualifiedPct}% qualified`}>Conversations &amp; outcomes</SectionLabel>
 
           {/* call & intent flow — Sankey centerpiece */}
           <Card
@@ -426,10 +425,14 @@ function AgentReportsView() {
           {/* query resolution + top objections */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <Card title="Query resolution rate" sub="Share of each topic the agent resolved without a human">
-              <QueryBars topics={r.queries} />
+              {r.queries.length ? (
+                <QueryBars topics={r.queries} />
+              ) : (
+                <ComingSoon title="Resolution by topic" note="How often the agent resolves each topic without a human — appears once there's tagged conversation activity in the window." />
+              )}
             </Card>
             <Card title="Top objections" sub="What the agent heard most">
-              <ComingSoon title="Objection classification" note="Tagging objections from transcripts isn't wired to a card yet." />
+              <ComingSoon title="Objections, ranked by how often they come up" note="The concerns customers raise most on calls — price, timing, trade-in value — so your team can prepare for them and sharpen its talk tracks." />
             </Card>
           </div>
 
@@ -480,11 +483,19 @@ function AgentReportsView() {
           {/* ── Inbound-only: upcoming appointments + priority follow-ups (need the action-item store) ── */}
           {inbound && (
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <Card title="Upcoming appointments" sub="Conversation → action item → appointment" pad={false}>
-                <ComingSoon title="Booked appointments feed" note="The per-customer appointment list comes from the action-item store — not wired to a card yet." />
+              <Card title="Upcoming appointments" sub="Every booking the agent set, with customer and vehicle" pad={false}>
+                {r.upcomingAppointments?.length ? (
+                  <AppointmentsList items={r.upcomingAppointments} />
+                ) : (
+                  <ComingSoon title="Your booked appointments, in one list" note="Each appointment the agent booked — customer, time, and vehicle — so your team can confirm and prepare before the visit." />
+                )}
               </Card>
               <Card title="Priority follow-ups" sub="Callbacks the agent flagged" pad={false}>
-                <ComingSoon title="Flagged callbacks feed" note="Agent-flagged callbacks come from the action-item store — not wired to a card yet." />
+                {r.followUps?.length ? (
+                  <CallbacksList items={r.followUps} />
+                ) : (
+                  <ComingSoon title="The callbacks worth your team's time" note="Leads the agent flagged for a personal follow-up, ranked by urgency — so high-intent buyers never slip through the cracks." />
+                )}
               </Card>
             </div>
           )}
@@ -493,8 +504,12 @@ function AgentReportsView() {
           {!inbound && (
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
               <div className="lg:col-span-2">
-                <Card title="Best use cases — active campaigns" sub="Campaigns this agent is currently running" pad={false}>
-                  <ComingSoon title="Campaign attribution" note="Per-campaign volume and conversion need a campaign-level card — not wired yet." />
+                <Card title="Active campaigns" sub="What this agent is working on right now" pad={false}>
+                  {r.activeCampaigns?.length ? (
+                    <CampaignsTable items={r.activeCampaigns} />
+                  ) : (
+                    <ComingSoon title="Performance by campaign" note="How each outreach campaign is doing — calls made, conversations, and appointments booked — so you can see what's working and where to lean in." />
+                  )}
                 </Card>
               </div>
               <Card title="Outbound outcomes" sub="How outbound conversations ended">
@@ -503,7 +518,7 @@ function AgentReportsView() {
                     segments={r.outcomes.map((o, i) => ({ label: o.label, value: o.value, color: OUTCOME_COLORS[i % OUTCOME_COLORS.length] }))}
                   />
                 ) : (
-                  <ComingSoon title="No-reach reasons" note="Outbound disposition breakdown appears once this rooftop has outbound activity." />
+                  <ComingSoon title="How your outbound calls end" note="A breakdown of every outbound outcome — connected, engaged, not interested, opted out — appears here once this dealership starts outbound calling." />
                 )}
               </Card>
             </div>
@@ -512,10 +527,16 @@ function AgentReportsView() {
           {/* multi-day reply effectiveness + channel mix */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <Card title="Multi-day reply effectiveness" sub="When replies land, relative to the first touch">
-              <TrendBars values={r.multiDayReply.map((d) => d.pct)} labels={r.multiDayReply.map((d) => d.day)} height={96} />
-              <p className="mt-3 text-[11px] text-[#6b7280]">
-                {r.multiDayReply[0].pct}% of replies arrive the same day — the rest justify the multi-day cadence.
-              </p>
+              {r.multiDayReply.length ? (
+                <>
+                  <TrendBars values={r.multiDayReply.map((d) => d.pct)} labels={r.multiDayReply.map((d) => d.day)} height={96} />
+                  <p className="mt-3 text-[11px] text-[#6b7280]">
+                    {r.multiDayReply[0].pct}% of replies arrive the same day — the rest justify the multi-day cadence.
+                  </p>
+                </>
+              ) : (
+                <ComingSoon title="Reply timing" note="When replies land relative to the first touch — appears once this agent has SMS reply activity in the window." />
+              )}
             </Card>
             <Card title="Channel mix" sub="Share of contacts by channel">
               <SplitBar
@@ -539,14 +560,14 @@ function AgentReportsView() {
           <SectionLabel>Quality &amp; trend</SectionLabel>
 
           {/* quality health — full width (the flow funnel lives in the Sankey above) */}
-          <Card title="Quality health" sub="Green / amber / red — watched in production monitoring">
+          <Card title="Conversation quality" sub="From live calls — the metrics we can measure today">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-              <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} status={a.quality.primaryStatus} />
-              <QCell label="Avg handle time" value={a.quality.handleTime} status={a.quality.handleStatus} />
-              <QCell label="CSAT" value={`${a.quality.csat} / 5`} status={a.quality.csatStatus} />
+              <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} />
+              <QCell label="Avg handle time" value={a.quality.handleTime} />
+              <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
+              <ComingSoon title="CSAT" inline />
+              <ComingSoon title="Positive sentiment" inline />
               <ComingSoon title={a.quality.fourthLabel} inline />
-              <QCell label="Positive sentiment" value={`${a.quality.sentiment}%`} status="green" />
-              <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} status="green" />
             </div>
           </Card>
 
@@ -561,9 +582,9 @@ function AgentReportsView() {
           </div>
 
           {/* highlights */}
-          <Card title="Highlights & missed opportunities" sub="The action items this agent surfaces" pad={false}>
+          <Card title="Highlights & missed opportunities" sub="Standout moments worth a closer look" pad={false}>
             <div className="px-6 py-5">
-              <ComingSoon title="Surfaced action items" note="Win/miss highlights are generated from the action-item store — not wired to a card yet." />
+              <ComingSoon title="Your wins — and the ones that got away" note="The best moments the agent caught, plus the deals worth a second look, gathered in one place so you can act on them quickly." />
             </div>
           </Card>
 
@@ -571,7 +592,7 @@ function AgentReportsView() {
           {inbound && (
             <Card title={a.activityTitle} sub={periodLabel} pad={false}>
               <div className="px-6 py-5">
-                <ComingSoon title="Calls by reason" note="Per-reason handled / qualified / appointment splits aren't wired to a card yet." />
+                <ComingSoon title="Why customers are calling" note="A breakdown of call reasons — and how often each one turns into a booking — so you can staff and script for what matters most." />
               </div>
             </Card>
           )}
@@ -650,26 +671,53 @@ function CostModal({ initial, onSave }: { initial: number; onSave: (v: number) =
 }
 
 /* ── Performance helpers ── */
-function PerfStage({ label, value, delta, primary }: { label: string; value: string; delta: number; primary?: boolean }) {
+/* Lead → qualified → appointment funnel: narrowing proportional bars with per-stage deltas and the
+ * step-to-step conversion rate, so the drop-off reads at a glance. */
+function PerfFunnel({ stages }: { stages: { label: string; value: number; delta: number }[] }) {
+  const max = Math.max(1, stages[0]?.value ?? 1);
   return (
-    <div className="flex flex-col gap-1">
-      <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">{label}</p>
-      <p
-        className={`font-extrabold tabular-nums leading-none ${primary ? "text-[34px] text-[#10b981]" : "text-[28px] text-[#111]"}`}
-      >
-        {value}
-      </p>
-      <DeltaPill delta={delta} />
-    </div>
-  );
-}
-
-function PerfArrow({ pct }: { pct: number }) {
-  return (
-    <div className="flex flex-none items-center gap-1.5 self-start px-1 pt-5 sm:flex-col sm:items-center sm:gap-1 sm:self-center sm:pt-0">
-      <span className="hidden text-[15px] text-[#d8caff] sm:block">→</span>
-      <span className="text-[12px] text-[#d8caff] sm:hidden">↓</span>
-      <span className="rounded-full bg-[#f3f4f6] px-2 py-0.5 text-[10px] font-bold tabular-nums text-[#6b7280]">{pct}%</span>
+    <div className="flex flex-col gap-2.5">
+      {stages.map((s, i) => {
+        const pct = Math.max(2, (s.value / max) * 100);
+        const prev = i > 0 ? stages[i - 1].value : null;
+        const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
+        const isLast = i === stages.length - 1;
+        return (
+          <div key={s.label} className="flex items-center gap-3 sm:gap-4">
+            {/* number + label */}
+            <div className="w-[120px] flex-none sm:w-[150px]">
+              <p className={`text-[24px] font-extrabold tabular-nums leading-none sm:text-[26px] ${isLast ? "text-[#10b981]" : "text-[#111]"}`}>
+                {fmtInt(s.value)}
+              </p>
+              <p className="mt-1 text-[11px] leading-tight text-[#6b7280]">{s.label}</p>
+            </div>
+            {/* step conversion (from the stage above) */}
+            <div className="w-[40px] flex-none text-right sm:w-[46px]">
+              {conv !== null && (
+                <span className="rounded-full bg-[#f3eaff] px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-[#813fed]" title="conversion from the previous step">
+                  {conv}%
+                </span>
+              )}
+            </div>
+            {/* proportional bar */}
+            <div className="flex flex-1 items-center">
+              <div
+                className="h-8 rounded-lg transition-all"
+                style={{
+                  width: `${pct}%`,
+                  minWidth: 10,
+                  background: isLast ? "linear-gradient(90deg,#10b981,#059669)" : "linear-gradient(90deg,#813fed,#6366f1)",
+                  opacity: 1 - i * 0.06,
+                }}
+              />
+            </div>
+            {/* period-over-period delta */}
+            <div className="w-[92px] flex-none text-right sm:w-[104px]">
+              <DeltaPill delta={s.delta} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -756,10 +804,10 @@ function RooftopComingSoon({ name }: { name: string }) {
     <div className="flex flex-col items-center justify-center gap-3 rounded-3xl border border-[#ece6fb] bg-gradient-to-br from-[#f6f1ff] to-white px-6 py-20 text-center shadow-sm">
       <span className="text-[34px] leading-none">🛠️</span>
       <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-[#813fed]">Coming soon</p>
-      <p className="text-[20px] font-extrabold tracking-[-0.02em] text-[#111]">Live reporting for {name} is being wired up</p>
+      <p className="text-[20px] font-extrabold tracking-[-0.02em] text-[#111]">{name}&apos;s report is on its way</p>
       <p className="max-w-[480px] text-[13px] leading-snug text-[#6b7280]">
-        We don&apos;t have data flowing from this rooftop yet. The moment its calls and outcomes land in the reporting
-        pipeline, the full report appears here automatically — nothing to set up on your end.
+        As soon as your agents start handling calls and messages, your full report fills in here automatically —
+        usually within a day of going live. There&apos;s nothing for you to set up.
       </p>
     </div>
   );
@@ -852,14 +900,100 @@ function SummaryStat({ label, value, accent }: { label: string; value: string; a
   );
 }
 
-function QCell({ label, value, status }: { label: string; value: string; status: "green" | "amber" | "red" }) {
+function QCell({ label, value, status }: { label: string; value: string; status?: "green" | "amber" | "red" }) {
   return (
     <div className="rounded-xl border border-[#f0f0f0] px-4 py-3">
       <div className="flex items-center gap-1.5">
-        <span className="h-2 w-2 rounded-full" style={{ background: RAG_STYLE[status].dot }} />
+        {status && <span className="h-2 w-2 rounded-full" style={{ background: RAG_STYLE[status].dot }} />}
         <p className="text-[11px] font-semibold uppercase tracking-wider text-[#9ca3af]">{label}</p>
       </div>
       <p className="mt-1 text-[18px] font-bold tabular-nums text-[#111]">{value}</p>
+    </div>
+  );
+}
+
+/* ── Upcoming appointments (Supabase ← card 12233) ── */
+function AppointmentsList({ items }: { items: UpcomingAppt[] }) {
+  return (
+    <div className="max-h-[320px] divide-y divide-[#f3f4f6] overflow-y-auto">
+      {items.map((a, i) => (
+        <div key={i} className="flex items-center justify-between gap-3 px-6 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-[13px] font-semibold text-[#111]">{a.customer || "—"}</p>
+            <p className="truncate text-[11px] text-[#6b7280]">{a.vehicle || "Vehicle TBD"}</p>
+          </div>
+          <div className="flex-none text-right">
+            <p className="text-[12px] font-medium text-[#111]">{a.when}</p>
+            <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: apptStatusColor(a.status) }}>{a.status}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+function apptStatusColor(s: string): string {
+  const v = (s || "").toLowerCase();
+  if (v.includes("cancel") || v.includes("no-show") || v.includes("no show")) return "#dc2626";
+  if (v.includes("confirm") || v.includes("show")) return "#10b981";
+  return "#6b7280";
+}
+
+/* ── Priority follow-ups / callbacks (Supabase ← card 12234) ── */
+function CallbacksList({ items }: { items: FollowUp[] }) {
+  return (
+    <div className="max-h-[320px] divide-y divide-[#f3f4f6] overflow-y-auto">
+      {items.map((f, i) => (
+        <div key={i} className="flex items-center justify-between gap-3 px-6 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-[13px] font-semibold text-[#111]">{f.customer || "—"}</p>
+            <p className="truncate text-[11px] text-[#6b7280]">{f.intent}</p>
+          </div>
+          <div className="flex-none text-right">
+            <PriorityPill priority={f.priority} />
+            <p className="mt-0.5 text-[10.5px] text-[#9ca3af]">{f.due}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+function PriorityPill({ priority }: { priority: string }) {
+  const v = (priority || "").toUpperCase();
+  const c = v.startsWith("H") ? { bg: "#fee2e2", fg: "#991b1b" } : v.startsWith("M") ? { bg: "#fef3c7", fg: "#92400e" } : { bg: "#f3f4f6", fg: "#6b7280" };
+  return <span className="rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide" style={{ background: c.bg, color: c.fg }}>{priority || "—"}</span>;
+}
+
+/* ── Best campaigns (Supabase ← card 12232) ── */
+function CampaignsTable({ items }: { items: ActiveCampaign[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full">
+        <thead className="border-b border-[#f0f0f0]">
+          <tr>
+            <Th>Campaign</Th>
+            <Th align="right">Enrolled</Th>
+            <Th align="right">Appts</Th>
+            <Th align="right">Appt rate</Th>
+            <Th align="right">Warm</Th>
+            <Th align="right">Opt-outs</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((c, i) => (
+            <tr key={i} className="border-b border-[#f7f7f9] last:border-0">
+              <Td>
+                <p className="text-[12.5px] font-semibold text-[#111]">{c.name}</p>
+                <p className="text-[10.5px] text-[#9ca3af]">{c.useCase}</p>
+              </Td>
+              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#111]">{fmtInt(c.enrolled)}</span></Td>
+              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#111]">{fmtInt(c.appts)}</span></Td>
+              <Td align="right"><span className="text-[12.5px] font-semibold tabular-nums text-[#10b981]">{c.apptRate}%</span></Td>
+              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#6b7280]">{fmtInt(c.warmLeads)}</span></Td>
+              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#6b7280]">{fmtInt(c.optOuts)}</span></Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

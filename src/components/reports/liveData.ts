@@ -4,7 +4,7 @@
  * backing card (revenue/cost/deals/showed, the human-baseline story, period deltas) keep their
  * mock values. Used by /reports (Overview) and /reports/agents — no component/JSX changes. */
 
-import { AGENTS as MOCK_AGENTS, type AgentData, type Bucket } from "./data";
+import { type AgentData, type Bucket } from "./data";
 import { type Account } from "./accounts";
 
 // Maps the CSM sheet's agent-type labels to this report's agent ids.
@@ -183,7 +183,8 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
       prior: (j.prior as Record<string, Basis>) ?? {},
     };
   } catch {
-    result = { agents: MOCK_AGENTS.map((a) => structuredClone(a)), hasData: false, fetchedAt: Date.now(), prior: {} };
+    // On error, render nothing rather than mock numbers — hasData:false drives the "coming soon" state.
+    result = { agents: [], hasData: false, fetchedAt: Date.now(), prior: {} };
   }
 
   CACHE.set(cacheKey, result);

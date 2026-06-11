@@ -13,7 +13,6 @@ import {
   fmtMoney,
   fmtMoneyFull,
   GhostPreview,
-  HealthChip,
   InlineBar,
   RAG_STYLE,
   ReportTopBar,
@@ -139,8 +138,8 @@ export default function OverviewReportPage() {
           {showReport && hasTeam && feed === null && <OverviewSkeleton />}
           {showReport && hasTeam && comingSoon && (
             <ComingSoon
-              title={`Live reporting for ${account.name} is being wired up`}
-              note="We don't have data flowing from this rooftop yet. The full report appears here automatically once its calls and outcomes land in the pipeline."
+              title={`${account.name}'s report is on its way`}
+              note="Your full report fills in here automatically as soon as your agents start handling calls and messages — usually within a day of going live. Nothing to set up on your end."
             />
           )}
 
@@ -196,7 +195,6 @@ export default function OverviewReportPage() {
                     <MicroStat label="Calls" value={fmtInt(a.metrics.calls)} />
                     <MicroStat label="Connect" value={`${a.metrics.connectRate}%`} />
                     <MicroStat label="Appts" value={fmtInt(a.metrics.appointments)} />
-                    <MicroStat label="CSAT" value={`${a.quality.csat}`} />
                     <span className="hidden lg:inline"><Sparkline values={a.trend7} color={AGENT_COLOR[a.id]} width={70} height={26} /></span>
                   </div>
                   <div className="w-[170px] flex-none">
@@ -206,7 +204,6 @@ export default function OverviewReportPage() {
                     </div>
                     <div className="mt-1.5"><InlineBar pct={(a.metrics.appointments / maxAppts) * 100} color={AGENT_COLOR[a.id]} /></div>
                   </div>
-                  <HealthChip status={a.health} />
                   <span className="text-[15px] font-bold text-[#d8caff] group-hover:text-[#813fed]">→</span>
                 </button>
               ))}
@@ -217,11 +214,11 @@ export default function OverviewReportPage() {
           <div className="flex flex-col gap-3.5">
             <SectionLabel hint="where revenue is won and lost">What&apos;s working · what to fix</SectionLabel>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <Card title="Top campaigns" sub="Ranked by attributed revenue">
-                <ComingSoon title="Campaign attribution" note="Per-campaign volume and conversion need a campaign-level card — not wired yet." />
+              <Card title="Top campaigns" sub="Ranked by the revenue they bring in">
+                <ComingSoon title="Performance by campaign" note="Which outreach campaigns drive the most conversations, appointments, and revenue — so you can put your budget where it pays off." />
               </Card>
-              <Card title="Money on the table" sub="Fixes that recover revenue">
-                <ComingSoon title="Missed-opportunity model" note="The recoverable-revenue estimate needs the outcome store — not wired yet." />
+              <Card title="Money on the table" sub="Revenue you could still win back">
+                <ComingSoon title="Revenue you can still recover" note="An estimate of the revenue within reach — leads worth re-engaging and the follow-ups most likely to close — so nothing valuable goes cold." />
               </Card>
             </div>
           </div>
@@ -245,17 +242,16 @@ export default function OverviewReportPage() {
             <SectionLabel hint="audit-grade hygiene you can show">Can you trust it</SectionLabel>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card title="Conversation quality" sub="Fleet-level, call-weighted across your live agents">
-                <div className="grid grid-cols-3 gap-3">
-                  <QualityCell label="Avg CSAT" value={`${fleet.csat} / 5`} status="green" />
-                  <QualityCell label="Positive sentiment" value={`${fleet.sentiment}%`} status="green" />
-                  <QualityCell label="Connect / answer" value={`${fleet.connectRate}%`} status={fleet.connectRate >= 60 ? "green" : "amber"} />
+                <QualityCell label="Connect / answer" value={`${fleet.connectRate}%`} status={fleet.connectRate >= 60 ? "green" : "amber"} />
+                <div className="mt-3">
+                  <ComingSoon title="CSAT & sentiment" note="Per-conversation satisfaction and sentiment land here once call transcripts are scored." />
                 </div>
                 <div className="mt-3">
-                  <ComingSoon title="Compliance posture (DNC, 10DLC, opt-outs, silent hours)" note="Audit-grade compliance reporting isn't wired to a card yet." />
+                  <ComingSoon title="Compliance & consent at a glance" note="Proof your outreach stays inside Do-Not-Call, texting (10DLC), opt-out, and quiet-hours rules — ready to show in an audit." />
                 </div>
               </Card>
-              <Card title="Data health" sub="Completeness of the data layer the agents run on">
-                <ComingSoon title="Data-completeness scoring" note="Phone/email/equity/opt-in coverage needs a data-health card — not wired yet." />
+              <Card title="Data health" sub="How complete the customer data your agents work from is">
+                <ComingSoon title="Customer data quality" note="How complete your records are — phone, email, equity, and consent coverage — because cleaner data means more reach and sharper targeting." />
               </Card>
             </div>
           </div>
@@ -281,9 +277,10 @@ function NoRooftop() {
   return (
     <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[#e0e0e0] bg-[#fcfcfd] px-6 py-16 text-center">
       <span className="text-[26px] leading-none">🏢</span>
-      <p className="text-[14px] font-bold text-[#111]">No rooftop selected</p>
+      <p className="text-[14px] font-bold text-[#111]">We couldn’t tell which dealership to show</p>
       <p className="max-w-[460px] text-[12.5px] leading-snug text-[#6b7280]">
-        Add <b>?team_id=…</b> to the URL to load live reporting.
+        Open your report from your dashboard so it loads the right dealership. If you reached this page another way,
+        your administrator can point you to the correct link.
       </p>
     </div>
   );

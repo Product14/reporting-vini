@@ -129,10 +129,10 @@ export default function ImpactReportPage() {
 
               {/* live data — real Metabase question 12182: numbers (JSON) or the full chart (iframe) */}
               <div className="flex flex-col gap-3">
-                <SectionLabel hint="server-signed · pulls real data">Live data · Metabase #12182</SectionLabel>
+                <SectionLabel hint="updated in real time">Live data</SectionLabel>
                 <Card
-                  title="Reporting dashboard — live from Metabase"
-                  sub="Real data from question 12182 on metabase.spyne.ai"
+                  title="Your live reporting dashboard"
+                  sub="Pulled straight from your live numbers"
                   right={
                     <div className="flex items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
                       {(["numbers", "chart"] as const).map((v) => (
