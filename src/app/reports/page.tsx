@@ -84,6 +84,12 @@ export default function OverviewReportPage() {
   const hasTeam = teamId !== "";
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
   const valueCreated = fleet.appointments * apptCost;
+  // ROI gate: only surface a $ "value created" when real revenue exceeds run cost. Both are zeroed today
+  // (no Q12227 source), so this is false → we show appointments (real value delivered) instead of a
+  // break-even $ that would read as "no ROI" and risk churn. Flips on automatically once revenue/cost wire.
+  const totalRevenue = agents.reduce((s, a) => s + a.metrics.revenue, 0);
+  const totalCost = agents.reduce((s, a) => s + a.metrics.cost, 0);
+  const showDollarValue = totalCost > 0 && totalRevenue / totalCost > 1;
   const comingSoon = hasTeam && feed !== null && !feed.hasData; // rooftop selected, no live data yet
   const showReport = scenario !== "first_time" && scenario !== "onboarding";
   const liveReady = showReport && hasTeam && feed !== null && !comingSoon;
@@ -155,14 +161,29 @@ export default function OverviewReportPage() {
           <section className="overflow-hidden rounded-[28px] border border-[#ddd0fb] bg-gradient-to-br from-[#1c1033] via-[#2a1656] to-[#3a1d6e] text-white shadow-[0_20px_60px_-24px_rgba(58,29,110,0.7)]">
             <div className="flex flex-col gap-7 px-9 pt-8 pb-7 lg:flex-row lg:items-end lg:justify-between">
               <div>
-                <p className="text-[10.5px] font-bold uppercase tracking-[0.16em] text-[#c4b5fd]">Value created · {periodLabel}</p>
-                <div className="mt-3 flex items-end gap-4">
-                  <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white">{fmtMoneyFull(valueCreated)}</span>
-                </div>
-                <p className="mt-3 max-w-[560px] text-[14px] leading-snug text-[#d6cdf0]">
-                  From <b className="text-white">{fmtInt(fleet.appointments)} appointments</b> booked across your live agents, at{" "}
-                  <b className="text-white">{fmtMoneyFull(apptCost)}</b> per appointment.
-                </p>
+                {showDollarValue ? (
+                  <>
+                    <p className="text-[10.5px] font-bold uppercase tracking-[0.16em] text-[#c4b5fd]">Value created · {periodLabel}</p>
+                    <div className="mt-3 flex items-end gap-4">
+                      <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white">{fmtMoneyFull(valueCreated)}</span>
+                    </div>
+                    <p className="mt-3 max-w-[560px] text-[14px] leading-snug text-[#d6cdf0]">
+                      From <b className="text-white">{fmtInt(fleet.appointments)} appointments</b> booked across your live agents, at{" "}
+                      <b className="text-white">{fmtMoneyFull(apptCost)}</b> per appointment.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[10.5px] font-bold uppercase tracking-[0.16em] text-[#c4b5fd]">Appointments booked · {periodLabel}</p>
+                    <div className="mt-3 flex items-end gap-4">
+                      <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white">{fmtInt(fleet.appointments)}</span>
+                      <span className="pb-2.5 text-[15px] font-semibold text-[#c4b5fd]">booked this period</span>
+                    </div>
+                    <p className="mt-3 max-w-[560px] text-[14px] leading-snug text-[#d6cdf0]">
+                      From <b className="text-white">{fmtInt(fleet.conversations)} conversations</b> across your live agents, with <b className="text-white">{fmtInt(fleet.qualified)} qualified</b>. Dollar value appears once revenue tracking is on.
+                    </p>
+                  </>
+                )}
               </div>
               <DeltaBadge label="appointments vs prior" delta={fleet.deltas.appointments} />
             </div>
@@ -205,8 +226,8 @@ export default function OverviewReportPage() {
                   </div>
                   <div className="w-[170px] flex-none">
                     <div className="flex items-baseline justify-between">
-                      <span className="text-[19px] font-extrabold tabular-nums text-[#10b981]">{fmtMoney(a.metrics.appointments * apptCost)}</span>
-                      <span className="text-[10px] text-[#9ca3af]">value</span>
+                      <span className="text-[19px] font-extrabold tabular-nums text-[#10b981]">{showDollarValue ? fmtMoney(a.metrics.appointments * apptCost) : fmtInt(a.metrics.appointments)}</span>
+                      <span className="text-[10px] text-[#9ca3af]">{showDollarValue ? "value" : "appts"}</span>
                     </div>
                     <div className="mt-1.5"><InlineBar pct={(a.metrics.appointments / maxAppts) * 100} color={AGENT_COLOR[a.id]} /></div>
                   </div>

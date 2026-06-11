@@ -129,6 +129,9 @@ function AgentReportsView() {
   }, [upsellAgents, upsellId]);
   const m = a.metrics;
   const r = a.report;
+  // Only show a $ "value created" when real revenue beats run cost. Both are zeroed today (no Q12227
+  // source) → false → show appointments delivered instead of a break-even $ that reads as "no ROI".
+  const showDollarValue = m.cost > 0 && m.revenue / m.cost > 1;
   const inbound = a.dir === "Inbound";
   const hasStory = !!(r.benchmarks && r.compare); // story-first treatment for every agent that has it
   const live = view.hasData; // recently_live + repeat render the real report
@@ -306,33 +309,50 @@ function AgentReportsView() {
             <>
               {/* value created — cost per appointment is set once in a modal, editable here */}
               <section className="rounded-3xl border border-[#cdeede] bg-gradient-to-r from-[#f0fdf6] to-white shadow-sm px-7 py-6">
-                <div className="flex flex-wrap items-center justify-between gap-x-10 gap-y-4">
+                {showDollarValue ? (
+                  <div className="flex flex-wrap items-center justify-between gap-x-10 gap-y-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#059669]">
+                          Value created · {periodLabel}
+                        </p>
+                        {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
+                      </div>
+                      <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">
+                        {fmtMoneyFull(scale(m.appointments) * apptCost)}
+                      </p>
+                      <p className="mt-2 text-[12px] text-[#6b7280]">
+                        <b className="text-[#111]">{fmtInt(scale(m.appointments))}</b> appointments ×{" "}
+                        <b className="text-[#111]">{fmtMoneyFull(apptCost)}</b> per appointment{" "}
+                        <button
+                          onClick={() => setCostModalOpen(true)}
+                          className="ml-1 font-semibold text-[#059669] underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                        >
+                          Edit
+                        </button>
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Your cost / appointment</p>
+                      <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{fmtMoneyFull(apptCost)}</p>
+                    </div>
+                  </div>
+                ) : (
                   <div>
                     <div className="flex items-center gap-2">
                       <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#059669]">
-                        Value created · {periodLabel}
+                        Appointments booked · {periodLabel}
                       </p>
                       {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
                     </div>
                     <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">
-                      {fmtMoneyFull(scale(m.appointments) * apptCost)}
+                      {fmtInt(scale(m.appointments))}
                     </p>
-                    <p className="mt-2 text-[12px] text-[#6b7280]">
-                      <b className="text-[#111]">{fmtInt(scale(m.appointments))}</b> appointments ×{" "}
-                      <b className="text-[#111]">{fmtMoneyFull(apptCost)}</b> per appointment{" "}
-                      <button
-                        onClick={() => setCostModalOpen(true)}
-                        className="ml-1 font-semibold text-[#059669] underline decoration-dotted underline-offset-2 hover:decoration-solid"
-                      >
-                        Edit
-                      </button>
+                    <p className="mt-2 max-w-[520px] text-[12px] text-[#6b7280]">
+                      From <b className="text-[#111]">{fmtInt(scale(m.conversations))}</b> conversations · <b className="text-[#111]">{fmtInt(scale(m.qualified))}</b> qualified. Dollar value appears once revenue tracking is on.
                     </p>
                   </div>
-                  <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Your cost / appointment</p>
-                    <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{fmtMoneyFull(apptCost)}</p>
-                  </div>
-                </div>
+                )}
               </section>
 
               <button
