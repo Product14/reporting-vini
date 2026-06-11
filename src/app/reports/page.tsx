@@ -12,6 +12,7 @@ import {
   fmtInt,
   fmtMoney,
   fmtMoneyFull,
+  ActiveCampaign,
   GhostPreview,
   InlineBar,
   RAG_STYLE,
@@ -89,6 +90,11 @@ export default function OverviewReportPage() {
 
   const ranked = useMemo(() => [...agents].sort((a, b) => b.metrics.appointments - a.metrics.appointments), [agents]);
   const maxAppts = useMemo(() => Math.max(1, ...agents.map((a) => a.metrics.appointments)), [agents]);
+  // Rooftop campaigns (attached to outbound agents in build.ts; the same list per agent). Top by appointments.
+  const campaigns = useMemo<ActiveCampaign[]>(() => {
+    const found = agents.find((a) => a.report.activeCampaigns?.length)?.report.activeCampaigns ?? [];
+    return [...found].sort((a, b) => b.appts - a.appts);
+  }, [agents]);
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -214,8 +220,25 @@ export default function OverviewReportPage() {
           <div className="flex flex-col gap-3.5">
             <SectionLabel hint="where revenue is won and lost">What&apos;s working · what to fix</SectionLabel>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <Card title="Top campaigns" sub="Ranked by the revenue they bring in">
-                <ComingSoon title="Performance by campaign" note="Which outreach campaigns drive the most conversations, appointments, and revenue — so you can put your budget where it pays off." />
+              <Card title="Top campaigns" sub="Your outbound campaigns, ranked by appointments booked">
+                {campaigns.length ? (
+                  <div className="flex flex-col gap-2.5">
+                    {campaigns.slice(0, 6).map((c, i) => (
+                      <div key={i} className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-[12.5px] font-semibold text-[#111]">{c.name}</p>
+                          <p className="truncate text-[10.5px] text-[#9ca3af]">{c.useCase || "—"} · {fmtInt(c.enrolled)} enrolled</p>
+                        </div>
+                        <div className="flex-none text-right">
+                          <p className="text-[13px] font-bold tabular-nums text-[#10b981]">{fmtInt(c.appts)} appts</p>
+                          <p className="text-[10.5px] text-[#9ca3af]">{c.apptRate}% booking rate</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <ComingSoon title="Performance by campaign" note="Which outreach campaigns drive the most conversations and appointments — so you can put your budget where it pays off. Appears once this rooftop runs outbound campaigns." />
+                )}
               </Card>
               <Card title="Money on the table" sub="Revenue you could still win back">
                 <ComingSoon title="Revenue you can still recover" note="An estimate of the revenue within reach — leads worth re-engaging and the follow-ups most likely to close — so nothing valuable goes cold." />

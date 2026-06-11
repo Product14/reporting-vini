@@ -117,6 +117,7 @@ export interface CallbackRow {
 }
 export interface CampaignRow {
   team_id: string;
+  agent_type: string | null; // "Sales Outbound" | "Service Outbound" — which outbound agent owns it
   campaign: string;
   use_case: string | null;
   enrolled: number;

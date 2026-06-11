@@ -14,6 +14,7 @@ import {
   CalibratingBanner,
   Card,
   ComingSoon,
+  EmptyState,
   ConfidenceChip,
   DateFilter,
   DeltaPill,
@@ -487,14 +488,14 @@ function AgentReportsView() {
                 {r.upcomingAppointments?.length ? (
                   <AppointmentsList items={r.upcomingAppointments} />
                 ) : (
-                  <ComingSoon title="Your booked appointments, in one list" note="Each appointment the agent booked — customer, time, and vehicle — so your team can confirm and prepare before the visit." />
+                  <EmptyState icon="📅" title="No upcoming appointments" body="No booked appointments for this rooftop yet — they'll appear here as the agent books them." />
                 )}
               </Card>
               <Card title="Priority follow-ups" sub="Callbacks the agent flagged" pad={false}>
                 {r.followUps?.length ? (
                   <CallbacksList items={r.followUps} />
                 ) : (
-                  <ComingSoon title="The callbacks worth your team's time" note="Leads the agent flagged for a personal follow-up, ranked by urgency — so high-intent buyers never slip through the cracks." />
+                  <EmptyState icon="📞" title="No callbacks flagged" body="No follow-ups flagged for this rooftop right now — they'll appear here when the agent flags one." />
                 )}
               </Card>
             </div>
@@ -508,7 +509,7 @@ function AgentReportsView() {
                   {r.activeCampaigns?.length ? (
                     <CampaignsTable items={r.activeCampaigns} />
                   ) : (
-                    <ComingSoon title="Performance by campaign" note="How each outreach campaign is doing — calls made, conversations, and appointments booked — so you can see what's working and where to lean in." />
+                    <EmptyState icon="📣" title="No active campaigns" body="This rooftop isn't running any outbound campaigns yet." />
                   )}
                 </Card>
               </div>
@@ -518,7 +519,7 @@ function AgentReportsView() {
                     segments={r.outcomes.map((o, i) => ({ label: o.label, value: o.value, color: OUTCOME_COLORS[i % OUTCOME_COLORS.length] }))}
                   />
                 ) : (
-                  <ComingSoon title="How your outbound calls end" note="A breakdown of every outbound outcome — connected, engaged, not interested, opted out — appears here once this dealership starts outbound calling." />
+                  <EmptyState icon="📊" title="No outbound activity yet" body="The outbound outcome breakdown appears once this rooftop starts outbound calling." />
                 )}
               </Card>
             </div>

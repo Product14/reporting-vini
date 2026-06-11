@@ -36,6 +36,7 @@ create index if not exists report_callbacks_team_idx on public.report_callbacks 
 -- ── best campaign (card 12232) ──
 create table if not exists public.report_campaigns (
   team_id       text not null,
+  agent_type    text, -- "Sales Outbound" | "Service Outbound" (card 12232 filtered per agent_type)
   campaign      text not null,
   use_case      text,
   enrolled      integer not null default 0,

@@ -75,6 +75,21 @@ function fmtWhen(iso: string | null): string {
   return `${mon} ${d.getUTCDate()} · ${h}:${m} ${ap}`;
 }
 
+// The card sends `vehicle` as a JSON-encoded array of VIN/identifier strings — "[]" when empty,
+// '["1N4BL...","..."]' when populated. Parse it to a clean comma-joined label; "" → UI "Vehicle TBD".
+function fmtVehicle(raw: string | null | undefined): string {
+  if (!raw) return "";
+  const s = raw.trim();
+  if (s === "" || s === "[]") return "";
+  try {
+    const arr = JSON.parse(s);
+    if (Array.isArray(arr)) return arr.map((v) => String(v).trim()).filter(Boolean).join(", ");
+  } catch {
+    /* not JSON — fall through and show the raw value */
+  }
+  return s;
+}
+
 export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
@@ -82,13 +97,14 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
   // agents, campaigns to outbound — the cards aren't split by agent, so each relevant agent shows
   // the rooftop's list.
   const apptItems = (appointments ?? []).map((a) => ({
-    customer: a.customer_name ?? "—", when: fmtWhen(a.appointment_time), vehicle: a.vehicle ?? "", status: a.status ?? "",
+    customer: a.customer_name ?? "—", when: fmtWhen(a.appointment_time),
+    vehicle: fmtVehicle(a.vehicle), status: a.status ?? "",
   }));
   const callbackItems = (callbacks ?? []).map((c) => ({
     customer: c.customer_name ?? "—", due: fmtWhen(c.callback_due), intent: c.intent ?? "", priority: c.priority ?? "",
   }));
   const campaignItems = (campaigns ?? []).map((c) => ({
-    name: c.campaign, useCase: c.use_case ?? "", enrolled: c.enrolled, appts: c.appointments,
+    agentType: c.agent_type, name: c.campaign, useCase: c.use_case ?? "", enrolled: c.enrolled, appts: c.appointments,
     apptRate: c.appt_rate_pct ?? 0, warmLeads: c.warm_leads, optOuts: c.opt_outs, noReach: c.no_reach,
   }));
 
@@ -274,7 +290,11 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       a.report.upcomingAppointments = apptItems.length ? apptItems : undefined;
       a.report.followUps = callbackItems.length ? callbackItems : undefined;
     } else {
-      a.report.activeCampaigns = campaignItems.length ? campaignItems : undefined;
+      // campaigns are tagged by agent_type → Sales OB shows its sales campaigns, Service OB its service ones.
+      const mine = campaignItems.filter((c) => c.agentType === type);
+      a.report.activeCampaigns = mine.length
+        ? mine.map((c) => ({ name: c.name, useCase: c.useCase, enrolled: c.enrolled, appts: c.appts, apptRate: c.apptRate, warmLeads: c.warmLeads, optOuts: c.optOuts, noReach: c.noReach }))
+        : undefined;
     }
 
     return a;

@@ -62,8 +62,10 @@ async function fetchRows(params: Record<string, string>): Promise<RawRow[]> {
 
 // Pull any embeddable card (the rooftop-level detail cards are pre-aggregated; no date param).
 async function fetchCard(id: number, params: Record<string, string> = {}): Promise<Record<string, unknown>[]> {
-  const token = sign({ resource: { question: id }, params, exp: Math.round(Date.now() / 1000) + 1800 });
-  const res = await fetch(`${SITE}/api/embed/card/${token}/query/json`, {
+  // These cards' params (team_id/agent_type/…) are EDITABLE → pass via URL; locking them in the token errors.
+  const token = sign({ resource: { question: id }, params: {}, exp: Math.round(Date.now() / 1000) + 1800 });
+  const qs = new URLSearchParams(params).toString();
+  const res = await fetch(`${SITE}/api/embed/card/${token}/query/json${qs ? `?${qs}` : ""}`, {
     cache: "no-store",
     dispatcher: new Agent({ headersTimeout: 0, bodyTimeout: 0, connect: { timeout: 60_000 } }),
   } as RequestInit);
@@ -149,10 +151,18 @@ async function insertAll(sb: any, table: string, rows: object[]) {
     const cbRows = cbs
       .map((c) => ({ team_id: mapTeam(c.rooftop), customer_name: c.customer_name ?? null, callback_due: c.callback_due ?? null, intent: c.intent ?? null, priority: c.priority ?? null, assigned_to: c.assigned_to ?? null, requested_on: c.requested_on ?? null }))
       .filter((r) => r.team_id);
-    const camps = await fetchCard(12232);
-    const campRows = camps
-      .map((c) => ({ team_id: String(c.team_id ?? ""), campaign: String(c.campaign ?? ""), use_case: c.use_case ?? null, enrolled: n(c.enrolled), appointments: n(c.appointments), warm_leads: n(c.warm_leads), opt_outs: n(c.opt_outs), no_reach: n(c.no_reach), appt_rate_pct: c.appt_rate_pct ?? null }))
-      .filter((r) => r.team_id && r.campaign);
+    // 12232 has no sales/service column, but filters by agent_type → pull per outbound agent and TAG it,
+    // so build.ts can show sales campaigns under Sales OB and service campaigns under Service OB.
+    let camps: Record<string, unknown>[] = [];
+    const campRows: object[] = [];
+    for (const at of ["Sales Outbound", "Service Outbound"]) {
+      const rows = await fetchCard(12232, { agent_type: at });
+      camps = camps.concat(rows);
+      for (const c of rows) {
+        const team = String(c.team_id ?? ""), campaign = String(c.campaign ?? "");
+        if (team && campaign) campRows.push({ team_id: team, agent_type: at, campaign, use_case: c.use_case ?? null, enrolled: n(c.enrolled), appointments: n(c.appointments), warm_leads: n(c.warm_leads), opt_outs: n(c.opt_outs), no_reach: n(c.no_reach), appt_rate_pct: c.appt_rate_pct ?? null });
+      }
+    }
 
     for (const [t, rows] of [["report_appointments", apptRows], ["report_callbacks", cbRows], ["report_campaigns", campRows]] as const) {
       const { error: delErr } = await sb.from(t).delete().gte("synced_at", "1900-01-01");
