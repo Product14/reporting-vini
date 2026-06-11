@@ -198,7 +198,7 @@ export default function OverviewReportPage() {
                     <p className="text-[10.5px] font-medium uppercase tracking-wide text-[#9ca3af]">{a.dept} · {a.dir}</p>
                   </div>
                   <div className="hidden flex-1 items-center justify-around gap-4 md:flex">
-                    <MicroStat label="Calls" value={fmtInt(a.metrics.calls)} />
+                    <MicroStat label="Leads" value={fmtInt(a.report.leadsAttempted)} />
                     <MicroStat label="Connect" value={`${a.metrics.connectRate}%`} />
                     <MicroStat label="Appts" value={fmtInt(a.metrics.appointments)} />
                     <span className="hidden lg:inline"><Sparkline values={a.trend7} color={AGENT_COLOR[a.id]} width={70} height={26} /></span>
