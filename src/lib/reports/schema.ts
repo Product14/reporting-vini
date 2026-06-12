@@ -38,6 +38,8 @@ export interface RawRow {
   opted_out_call: number;
   after_hours: number;
   outbound_outcome: string | null; // outbound disposition: "Not Connected" | "Opt Out" | "Not Interested" | …
+  is_speed_to_lead: number; // 1 = speed-to-lead SMS (smsFlowJourneySource = speed_to_lead)
+  speed_to_lead_response_time: number | null; // seconds: lead.external_created_at → conversation.createdAt
   [k: string]: unknown;
 }
 
@@ -69,14 +71,14 @@ export interface AgentDailyRow {
   // quality accumulators → weighted mean in the API
   quality_score_sum: number;
   quality_basis: number; // # rows with a quality_score
-  // speed-to-lead accumulators (first-touch latency vs lead_created_at)
-  new_leads: number; // distinct leads whose lead_created_at is on this day
-  stl_within5: number; // first touches within 5 min of lead creation ("instantly touched")
-  stl_within1: number; // first touches within 1 min — basis for the median-vs-1min upsell gate
-  stl_seconds_sum: number; // Σ first-touch latency seconds
-  stl_count: number; // # leads with a measurable first-touch latency
-  stl_afterhours_within5: number; // instantly-touched leads whose first touch was after-hours (≈ lead arrived after-hours)
-  stl_within5_appts: number; // instantly-touched leads that went on to book an appointment
+  // speed-to-lead accumulators (earliest is_speed_to_lead conversation per lead — cross-day deduped)
+  new_leads: number; // distinct STL leads whose earliest STL conversation is on this activity_day
+  stl_within5: number; // STL leads with speed_to_lead_response_time ≤ 300s ("instantly touched")
+  stl_within1: number; // STL leads with speed_to_lead_response_time ≤ 60s (median-vs-1min upsell gate)
+  stl_seconds_sum: number; // Σ min(speed_to_lead_response_time, 10m) — capped for average only
+  stl_count: number; // # STL leads with a measurable speed_to_lead_response_time
+  stl_afterhours_within5: number; // instantly-touched STL leads whose STL SMS was after-hours
+  stl_within5_appts: number; // instantly-touched STL leads that booked on the earliest STL row
 }
 
 export type BreakdownDim = "intent" | "source" | "hour" | "reply_offset" | "outcome";

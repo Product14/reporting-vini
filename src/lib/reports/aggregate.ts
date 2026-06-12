@@ -4,6 +4,8 @@
  * against a real Q12227 pull without touching Supabase. See schema.ts for the column→field mapping. */
 
 import type { RawRow, AgentDailyRow, BreakdownRow, AggregateResult, BreakdownDim } from "./schema";
+import { collectEarliestStl, stlCountsForGroup, type StlLeadEntry } from "./stl";
+import { storeLocalDay } from "./tzMap";
 
 const num = (v: unknown): number => {
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
@@ -19,25 +21,15 @@ function hourOf(ts: string): number | null {
   const h = d.getUTCHours();
   return Number.isFinite(h) ? h : null;
 }
-// The local calendar day (YYYY-MM-DD) of an ISO timestamp in an IANA timezone, or null. Used to
-// re-bucket activity by the STORE's local day instead of the raw UTC `activity_day` (see aggregate()).
-function localDay(ts: string, tz: string): string | null {
-  const d = new Date(ts);
-  if (!Number.isFinite(d.getTime())) return null;
-  try {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
-  } catch {
-    return null; // invalid IANA zone → caller falls back to the raw day
-  }
-}
 
 export interface AggregateOpts {
   // Resolve a team_id to its IANA timezone. When provided, each row is bucketed by the team's LOCAL
-  // day (derived from activity_ts) rather than the raw UTC `activity_day` — this is what makes a
-  // Pacific rooftop's days line up with Pacific midnight. Omit (or return undefined) to keep the raw
-  // UTC bucketing (current/default behavior). Requires a re-backfill to take effect on history.
+  // day (derived from activity_ts) rather than the raw UTC `activity_day`.
   tzOf?: (teamId: string) => string | undefined;
+  // Cross-day deduped earliest STL per lead (from mergeStlEarliest). When omitted, built from `rows`.
+  stlEarliest?: Map<string, StlLeadEntry>;
 }
+
 // Whole-day offset between lead creation and an activity (>=0), or null.
 function dayOffset(createdAt: string | null, ts: string): number | null {
   if (!createdAt) return null;
@@ -48,16 +40,9 @@ function dayOffset(createdAt: string | null, ts: string): number | null {
 }
 const offsetBucket = (o: number): string => (o >= 3 ? "3+" : String(o));
 
-// Mutable per-group accumulator (a superset of AgentDailyRow plus Sets we collapse at the end).
 interface Acc extends AgentDailyRow {
   _leads: Set<string>;
   _apptLeads: Set<string>; // distinct leads with an appointment (the card counts these, not flag-sum)
-  _newLeads: Set<string>;
-  // per-lead earliest first-touch latency (sec) seen in this group, to avoid double-counting
-  _firstTouch: Map<string, number>;
-  // after-hours flag (0/1) of the row that produced that earliest touch. For an instant (≤5min) touch
-  // the conversation is within minutes of lead creation, so this stands in for "lead arrived after-hours".
-  _firstTouchAfterHours: Map<string, number>;
 }
 
 function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
@@ -69,15 +54,18 @@ function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
     opt_outs: 0, leads_attempted: 0, quality_score_sum: 0, quality_basis: 0,
     new_leads: 0, stl_within5: 0, stl_within1: 0, stl_seconds_sum: 0, stl_count: 0,
     stl_afterhours_within5: 0, stl_within5_appts: 0,
-    _leads: new Set(), _apptLeads: new Set(), _newLeads: new Set(), _firstTouch: new Map(), _firstTouchAfterHours: new Map(),
+    _leads: new Set(), _apptLeads: new Set(),
   };
 }
 
-// Breakdown accumulator key: group + dim + value.
 type BAcc = Omit<BreakdownRow, never>;
-const bkey = (g: string, dim: BreakdownDim, val: string) => `${g} ${dim} ${val}`;
+const bkey = (g: string, dim: BreakdownDim, val: string) => `${g}${dim}${val}`;
 
 export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateResult {
+  const dayOf = (team: string, activityTs: string, rawDay: string) =>
+    storeLocalDay(activityTs, opts.tzOf?.(team), rawDay);
+  const stl = opts.stlEarliest ?? collectEarliestStl(rows, undefined, { dayOf });
+
   const groups = new Map<string, Acc>();
   const breaks = new Map<string, BAcc>();
 
@@ -92,9 +80,7 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   for (const r of rows) {
     const team = str(r["cs.team_id"]);
     const type = str(r.agent_type);
-    // Bucket by the store's local day when a timezone is resolvable, else the raw UTC activity_day.
-    const tz = team ? opts.tzOf?.(team) : undefined;
-    const day = (tz && localDay(str(r.activity_ts), tz)) || str(r.activity_day);
+    const day = dayOf(team, str(r.activity_ts), str(r.activity_day));
     if (!day || !team || !type) continue;
 
     const gk = key(day, team, type);
@@ -105,8 +91,6 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.calls += isCall;
     a.sms_threads += isSms;
     a.conv_count += 1;
-    // The `connected`/`reached_person` columns are unpopulated; talk time is the live-conversation
-    // signal and matches the funnel card's "connected" near-exactly.
     if (num(r.talk_seconds) > 0) a.connected += 1;
     a.reached_person += num(r.reached_person);
     a.qualified += num(r.qualified);
@@ -122,34 +106,18 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     const lead = str(r["cs.lead_id"]);
     if (lead) {
       a._leads.add(lead);
-      if (num(r.appointment_booked)) a._apptLeads.add(lead); // appointments = distinct booked leads
-      // new lead = created on this (re-bucketed) day. Match the lead-created day in the SAME basis as
-      // `day` so re-bucketing by store tz stays self-consistent.
-      const leadDay = (tz && localDay(str(r.lead_created_at), tz)) || str(r.lead_created_at).slice(0, 10);
-      if (leadDay && leadDay === day) a._newLeads.add(lead);
-      // earliest first-touch latency for this lead within the group, plus the after-hours flag of
-      // that earliest touch (used only for the instant subset → ≈ "lead arrived after-hours").
-      const lat = dayOffsetSeconds(str(r.lead_created_at) || null, str(r.activity_ts));
-      if (lat != null) {
-        const prev = a._firstTouch.get(lead);
-        if (prev == null || lat < prev) {
-          a._firstTouch.set(lead, lat);
-          a._firstTouchAfterHours.set(lead, num(r.after_hours) > 0 ? 1 : 0);
-        }
-      }
+      if (num(r.appointment_booked)) a._apptLeads.add(lead);
     }
 
     const q = r.quality_score;
     if (q != null && Number.isFinite(Number(q))) { a.quality_score_sum += num(q); a.quality_basis += 1; }
 
-    // ── breakdowns ──
     const intent = str(r.primary_intent);
     if (intent) bump(a, "intent", intent, 1, num(r.query_resolved), num(r.appointment_booked));
     const source = str(r.lead_source);
     if (source) bump(a, "source", source, 1, num(r.qualified), num(r.appointment_booked));
     const h = hourOf(str(r.activity_ts));
     if (h != null) bump(a, "hour", String(h), isCall || 1, 0, 0);
-    // outbound disposition (only populated on outbound rows) → "Outbound outcomes" widget
     const outcome = str(r.outbound_outcome);
     if (outcome) bump(a, "outcome", outcome, 1, num(r.qualified), num(r.appointment_booked));
     if (isSms) {
@@ -158,39 +126,17 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     }
   }
 
-  // collapse Sets/Maps into scalar columns
   const daily: AgentDailyRow[] = [];
   for (const a of groups.values()) {
     a.leads_attempted = a._leads.size;
     a.appointments = a._apptLeads.size;
-    a.new_leads = a._newLeads.size;
-    for (const lead of a._newLeads) {
-      const lat = a._firstTouch.get(lead);
-      if (lat == null) continue;
-      a.stl_count += 1;
-      a.stl_seconds_sum += lat;
-      if (lat <= 60) a.stl_within1 += 1;
-      if (lat <= 300) {
-        a.stl_within5 += 1;
-        if (a._firstTouchAfterHours.get(lead)) a.stl_afterhours_within5 += 1;
-        if (a._apptLeads.has(lead)) a.stl_within5_appts += 1;
-      }
-    }
-    // talk_seconds / quality_score can be fractional per row; the bigint columns need integers.
+    const stlCols = stlCountsForGroup(stl, a.activity_day, a.team_id, a.agent_type);
+    Object.assign(a, stlCols);
     a.talk_seconds = Math.round(a.talk_seconds);
     a.quality_score_sum = Math.round(a.quality_score_sum);
     a.stl_seconds_sum = Math.round(a.stl_seconds_sum);
-    const { _leads, _apptLeads, _newLeads, _firstTouch, _firstTouchAfterHours, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
+    const { _leads, _apptLeads, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
     daily.push(row);
   }
   return { daily, breakdown: Array.from(breaks.values()) };
-}
-
-// First-touch latency in seconds between lead creation and an activity (>=0), or null.
-function dayOffsetSeconds(createdAt: string | null, ts: string): number | null {
-  if (!createdAt) return null;
-  const a = Date.parse(createdAt);
-  const b = Date.parse(ts);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  return Math.max(0, Math.round((b - a) / 1000));
 }

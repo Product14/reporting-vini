@@ -22,3 +22,4 @@ export const SYNC_STATE = "sync_state";
 export const REPORT_APPOINTMENTS = "report_appointments";
 export const REPORT_CALLBACKS = "report_callbacks";
 export const REPORT_CAMPAIGNS = "report_campaigns";
+export const STL_LEAD_FIRST = "stl_lead_first";

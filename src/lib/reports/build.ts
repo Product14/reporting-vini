@@ -25,10 +25,6 @@ function fmtHandle(sec: number): string {
   const m = Math.floor(sec / 60), s = Math.round(sec % 60);
   return m ? `${m}m ${s.toString().padStart(2, "0")}s` : `${s}s`;
 }
-function fmtAvgLatency(sec: number): string {
-  if (!sec) return "—";
-  return sec >= 60 ? `${(sec / 60).toFixed(1)}m` : `${Math.round(sec)}s`;
-}
 function shortDay(d: string): string {
   const m = d.match(/\d{4}-(\d{2})-(\d{2})/);
   return m ? `${Number(m[2])}/${Number(m[1])}` : d.slice(0, 6);
@@ -263,7 +259,7 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       const instantAppts = sum(rows, (r) => r.stl_within5_appts);
       a.report.speedToLead = (newLeads || stlCnt)
         ? {
-            avg: stlCnt ? fmtAvgLatency(stlSec / stlCnt) : "—",
+            avg: stlCnt ? fmtHandle(stlSec / stlCnt) : "—",
             pctWithin5: newLeads ? Math.round((100 * within5) / newLeads) : 0,
             crmLeadsNew: newLeads,
             instantlyTouched: within5,

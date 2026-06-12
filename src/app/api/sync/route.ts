@@ -1,6 +1,8 @@
 import { fetchEmbedRows } from "@/lib/metabase";
 import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, SYNC_STATE } from "@/lib/reports/supabase";
 import { aggregate } from "@/lib/reports/aggregate";
+import { mergeStlEarliest, reconcileHistoricalStl } from "@/lib/reports/stlSync";
+import { fetchTzMap, storeLocalDay, teamsInRows } from "@/lib/reports/tzMap";
 import type { RawRow } from "@/lib/reports/schema";
 
 /* Pulls Q12227 (event-level raw data), aggregates it into agent_daily + agent_daily_breakdown, and
@@ -66,15 +68,21 @@ async function handle(request: Request): Promise<Response> {
     return Response.json({ ok: false, error: msg }, { status });
   };
 
+  const tzMap = await fetchTzMap();
+  const reBucket = tzMap.size > 0;
+  const tzOf = (teamId: string) => tzMap.get(teamId);
+  const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
+
   // Pull raw rows. Q12227's activity_day param is single-date equality (= {{activity_day}}), so the
   // incremental path pulls ONE day per call across the window (each ~3MB) instead of the 382MB full
   // table. Without the param (or ?full=1) it falls back to the full-table pull + client-side filter.
   const dateParam = process.env.METABASE_RAW_DATE_PARAM;
   const perDay = Boolean(dateParam && !full);
+  const pullStart = !full && reBucket ? minusDays(windowStart, 1) : windowStart;
   let raw: RawRow[];
   if (perDay) {
     raw = [];
-    for (let d = windowStart; d < windowEnd; d = addDay(d)) {
+    for (let d = pullStart; d < windowEnd; d = addDay(d)) {
       const { rows, error } = await fetchEmbedRows(RAW_QUESTION, { [dateParam as string]: d });
       if (error) return fail(`Metabase pull failed for ${d}: ${error}`);
       raw.push(...(rows as RawRow[]));
@@ -84,14 +92,24 @@ async function handle(request: Request): Promise<Response> {
     if (error) return fail(`Metabase pull failed: ${error}`);
     raw = rows as RawRow[];
   }
-  // Never wipe the window on an empty pull. A single empty day is fine (today often lags), but 0 rows
-  // across the WHOLE window means the pull failed — Q12227 is never truly empty across all teams.
   if (!raw.length) return fail("Metabase pull returned 0 rows across the window — aborting before delete (pull likely failed).");
 
-  const scoped = raw.filter((r) => String(r.activity_day || "") >= windowStart);
-  const { daily, breakdown } = aggregate(scoped);
+  let stlEarliest;
+  let stlHistoricalPatched = 0;
+  try {
+    const { earliest, tableMissing } = await mergeStlEarliest(sb, raw, { full, dayOf });
+    stlEarliest = earliest;
+    if (!tableMissing && !full) {
+      stlHistoricalPatched = await reconcileHistoricalStl(sb, teamsInRows(raw), earliest, windowStart);
+    }
+  } catch (e) {
+    return fail(`STL merge failed: ${(e as Error).message}`);
+  }
 
-  // Replace the window: delete then insert (drops stale breakdown values that no longer appear).
+  const agg = aggregate(raw, { tzOf: reBucket ? tzOf : undefined, stlEarliest });
+  const daily = agg.daily.filter((r) => r.activity_day >= windowStart);
+  const breakdown = agg.breakdown.filter((r) => r.activity_day >= windowStart);
+
   const del1 = await sb.from(AGENT_DAILY).delete().gte("activity_day", windowStart);
   if (del1.error) return fail(`delete agent_daily: ${del1.error.message}`);
   const del2 = await sb.from(AGENT_DAILY_BREAKDOWN).delete().gte("activity_day", windowStart);
@@ -108,7 +126,9 @@ async function handle(request: Request): Promise<Response> {
 
   return Response.json({
     ok: true, window_start: windowStart, window_end: windowEnd,
-    raw_rows: raw.length, scoped_rows: scoped.length, daily_rows: daily.length, breakdown_rows: breakdown.length,
+    raw_rows: raw.length, daily_rows: daily.length, breakdown_rows: breakdown.length,
+    stl_leads: stlEarliest.size, stl_historical_patched: stlHistoricalPatched,
+    tz_rebucket: reBucket,
     mode: perDay ? "incremental-per-day" : "full-table",
   });
 }

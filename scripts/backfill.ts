@@ -16,6 +16,8 @@ import crypto from "node:crypto";
 import { Agent } from "undici";
 import { createClient } from "@supabase/supabase-js";
 import { aggregate } from "../src/lib/reports/aggregate";
+import { mergeStlEarliest, reconcileHistoricalStl } from "../src/lib/reports/stlSync";
+import { fetchTzMap, storeLocalDay } from "../src/lib/reports/tzMap";
 import type { RawRow } from "../src/lib/reports/schema";
 
 const RAW_QUESTION = 12227;
@@ -34,8 +36,6 @@ const SECRET = process.env.METABASE_SECRET_KEY!;
 const SB_URL = process.env.SUPABASE_URL!;
 const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const DATE_PARAM = process.env.METABASE_RAW_DATE_PARAM || "activity_day";
-const SPYNE_TOKEN = process.env.SPYNE_API_TOKEN?.trim();
-const SPYNE_BASE = process.env.SPYNE_API_BASE || "https://api.spyne.ai";
 for (const [k, v] of Object.entries({ METABASE_SITE_URL: SITE, METABASE_SECRET_KEY: SECRET, SUPABASE_URL: SB_URL, SUPABASE_SERVICE_ROLE_KEY: SB_KEY }))
   if (!v) { console.error(`Missing env: ${k}`); process.exit(1); }
 
@@ -78,36 +78,6 @@ async function fetchCard(id: number, params: Record<string, string> = {}): Promi
   return json as Record<string, unknown>[];
 }
 
-/* team_id → IANA timezone, from the Spyne working-hours API (paginated over all rooftops). Drives the
- * store-local re-bucketing of activity_day in aggregate(). Best-effort: with no SPYNE_API_TOKEN, or on
- * any failure, returns an EMPTY map → aggregate falls back to the historical UTC bucketing, so the
- * pipeline is unchanged until a (durable, admin-scoped) token is dropped in. */
-async function fetchTzMap(): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  if (!SPYNE_TOKEN) { console.log("tz: SPYNE_API_TOKEN unset → UTC bucketing (no re-bucket)"); return map; }
-  try {
-    for (let page = 1; page <= 50; page++) {
-      const res = await fetch(`${SPYNE_BASE}/conversation/admin-tools/working-hours?page=${page}&limit=200`, {
-        headers: { accept: "application/json", authorization: `Bearer ${SPYNE_TOKEN}` }, cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`working-hours HTTP ${res.status}`);
-      const json = await res.json();
-      const data: Array<{ teamId?: string; timezone?: string }> = Array.isArray(json?.data) ? json.data : [];
-      for (const row of data) {
-        const team = String(row?.teamId || ""), tz = String(row?.timezone || "");
-        if (team && tz) map.set(team, tz);
-      }
-      const totalPages = Number(json?.pagination?.totalPages) || 1;
-      if (page >= totalPages || data.length === 0) break;
-    }
-    console.log(`tz: ${map.size} rooftops mapped → store-local re-bucketing ON`);
-  } catch (e) {
-    console.warn(`tz: working-hours fetch failed (${(e as Error).message}) → UTC bucketing`);
-    return new Map();
-  }
-  return map;
-}
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function insertAll(sb: any, table: string, rows: object[]) {
   for (let i = 0; i < rows.length; i += 500) {
@@ -129,6 +99,9 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   const tzMap = await fetchTzMap();
   const reBucket = tzMap.size > 0;
   const tzOf = (teamId: string) => tzMap.get(teamId);
+  const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
+  if (reBucket) console.log(`tz: ${tzMap.size} rooftops mapped → store-local re-bucketing ON`);
+  else console.log("tz: SPYNE_API_TOKEN unset or fetch failed → UTC bucketing (no re-bucket)");
 
   // windowStart = where we delete-and-replace from (matched on the FINAL, possibly re-bucketed,
   // activity_day). Full/file rebuilds replace everything.
@@ -159,16 +132,31 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   console.log("raw rows:", raw.length);
   if (!raw.length) throw new Error("0 raw rows across the window — refusing to wipe the aggregate");
 
-  // Aggregate ALL pulled rows (re-bucketing by store-local day when tzMap is set), then keep only the
-  // replace window by the FINAL activity_day. In UTC mode this is identical to the old "pre-filter raw
-  // by activity_day" because the output day equals the raw day; in re-bucket mode it correctly drops
-  // events that shifted to a store-local day before windowStart.
-  const agg = aggregate(raw, { tzOf: reBucket ? tzOf : undefined });
+  const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });
+
+  let stlEarliest;
+  try {
+    const { earliest } = await mergeStlEarliest(sb, raw, {
+      full: full || Boolean(fileArg) || windowStart <= "1900-01-01",
+      dayOf,
+    });
+    stlEarliest = earliest;
+    if (!full && !fileArg && windowStart > "1900-01-01") {
+      const teamIds = [...new Set(raw.map((r) => String(r["cs.team_id"] ?? "").trim()).filter(Boolean))];
+      const patched = await reconcileHistoricalStl(sb, teamIds, earliest, windowStart);
+      if (patched) console.log(`STL historical patch: ${patched} agent_daily rows before ${windowStart}`);
+    }
+  } catch (e) {
+    throw new Error(`STL merge failed: ${(e as Error).message}`);
+  }
+
+  // Aggregate ALL pulled rows (re-bucket by store-local day when tzMap is set), then keep only the
+  // replace window by the FINAL activity_day.
+  const agg = aggregate(raw, { tzOf: reBucket ? tzOf : undefined, stlEarliest });
   const daily = agg.daily.filter((r) => r.activity_day >= windowStart);
   const breakdown = agg.breakdown.filter((r) => r.activity_day >= windowStart);
   console.log("daily:", daily.length, " breakdown:", breakdown.length);
 
-  const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });
   for (const t of ["agent_daily", "agent_daily_breakdown"]) {
     const { error } = await sb.from(t).delete().gte("activity_day", windowStart);
     if (error) throw new Error(`${t} delete: ${error.message}`);
