@@ -55,6 +55,9 @@ interface Acc extends AgentDailyRow {
   _newLeads: Set<string>;
   // per-lead earliest first-touch latency (sec) seen in this group, to avoid double-counting
   _firstTouch: Map<string, number>;
+  // after-hours flag (0/1) of the row that produced that earliest touch. For an instant (≤5min) touch
+  // the conversation is within minutes of lead creation, so this stands in for "lead arrived after-hours".
+  _firstTouchAfterHours: Map<string, number>;
 }
 
 function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
@@ -64,8 +67,9 @@ function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
     calls: 0, sms_threads: 0, conv_count: 0, connected: 0, reached_person: 0, qualified: 0, appointments: 0,
     sms_sent: 0, sms_replied: 0, after_hours: 0, talk_seconds: 0, transfers: 0, callbacks: 0, query_resolved: 0,
     opt_outs: 0, leads_attempted: 0, quality_score_sum: 0, quality_basis: 0,
-    new_leads: 0, stl_within5: 0, stl_seconds_sum: 0, stl_count: 0,
-    _leads: new Set(), _apptLeads: new Set(), _newLeads: new Set(), _firstTouch: new Map(),
+    new_leads: 0, stl_within5: 0, stl_within1: 0, stl_seconds_sum: 0, stl_count: 0,
+    stl_afterhours_within5: 0, stl_within5_appts: 0,
+    _leads: new Set(), _apptLeads: new Set(), _newLeads: new Set(), _firstTouch: new Map(), _firstTouchAfterHours: new Map(),
   };
 }
 
@@ -123,11 +127,15 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
       // `day` so re-bucketing by store tz stays self-consistent.
       const leadDay = (tz && localDay(str(r.lead_created_at), tz)) || str(r.lead_created_at).slice(0, 10);
       if (leadDay && leadDay === day) a._newLeads.add(lead);
-      // earliest first-touch latency for this lead within the group
+      // earliest first-touch latency for this lead within the group, plus the after-hours flag of
+      // that earliest touch (used only for the instant subset → ≈ "lead arrived after-hours").
       const lat = dayOffsetSeconds(str(r.lead_created_at) || null, str(r.activity_ts));
       if (lat != null) {
         const prev = a._firstTouch.get(lead);
-        if (prev == null || lat < prev) a._firstTouch.set(lead, lat);
+        if (prev == null || lat < prev) {
+          a._firstTouch.set(lead, lat);
+          a._firstTouchAfterHours.set(lead, num(r.after_hours) > 0 ? 1 : 0);
+        }
       }
     }
 
@@ -158,13 +166,21 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.new_leads = a._newLeads.size;
     for (const lead of a._newLeads) {
       const lat = a._firstTouch.get(lead);
-      if (lat != null) { a.stl_count += 1; a.stl_seconds_sum += lat; if (lat <= 300) a.stl_within5 += 1; }
+      if (lat == null) continue;
+      a.stl_count += 1;
+      a.stl_seconds_sum += lat;
+      if (lat <= 60) a.stl_within1 += 1;
+      if (lat <= 300) {
+        a.stl_within5 += 1;
+        if (a._firstTouchAfterHours.get(lead)) a.stl_afterhours_within5 += 1;
+        if (a._apptLeads.has(lead)) a.stl_within5_appts += 1;
+      }
     }
     // talk_seconds / quality_score can be fractional per row; the bigint columns need integers.
     a.talk_seconds = Math.round(a.talk_seconds);
     a.quality_score_sum = Math.round(a.quality_score_sum);
     a.stl_seconds_sum = Math.round(a.stl_seconds_sum);
-    const { _leads, _apptLeads, _newLeads, _firstTouch, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
+    const { _leads, _apptLeads, _newLeads, _firstTouch, _firstTouchAfterHours, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
     daily.push(row);
   }
   return { daily, breakdown: Array.from(breaks.values()) };

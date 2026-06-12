@@ -7,7 +7,7 @@ import { Bucket, BUCKET_LABELS, RAG } from "./data";
 export * from "./data";
 
 /* ── tabs ── */
-export type ReportTab = "overview" | "agents" | "campaigns" | "impact";
+export type ReportTab = "overview" | "agents" | "campaigns";
 
 export function ReportTabs({ active, teamId }: { active: ReportTab; teamId?: string }) {
   // keep the rooftop scope across tab navigation — the host passes it as ?team_id=

@@ -41,6 +41,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           METABASE_RAW_DATE_PARAM: activity_day
+          # Optional: an admin-scoped Spyne API token. When set, backfill.ts re-buckets activity_day by
+          # each rooftop's store-local day (working-hours timezone) instead of UTC. Unset → UTC bucketing.
+          SPYNE_API_TOKEN: ${{ secrets.SPYNE_API_TOKEN }}
+          SPYNE_API_BASE: ${{ secrets.SPYNE_API_BASE }}
         run: |
           MODE="${{ github.event.inputs.mode || 'incremental' }}"
           # the daily cron forces a full reconcile regardless of manual input

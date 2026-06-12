@@ -36,8 +36,8 @@ import {
   TrendBars,
 } from "@/components/reports/kit";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
-import { UpsellAgent } from "@/components/reports/upsell";
+import { fetchAgents, agentsForAccount, addDay, peekAgents, tzShortLabel, type FetchResult } from "@/components/reports/liveData";
+import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 
 // Palette for the outbound-outcomes SplitBar — outcomes are ranked by volume, so colors are positional.
 const OUTCOME_COLORS = ["#6366f1", "#813fed", "#10b981", "#f59e0b", "#0ea5e9", "#94a3b8", "#ef4444", "#14b8a6"];
@@ -76,9 +76,10 @@ function AgentReportsView() {
     if (typeof window !== "undefined") window.localStorage.setItem("vini.apptCost", String(v));
     setCostModalOpen(false);
   };
-  const { scenario, view, teamId, account } = useScenario();
+  const { scenario, view, teamId, account, spyneToken } = useScenario();
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end) } : { bucket };
+  // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
   // Live agents for the selected rooftop, overlaid from Metabase. Seed from the client cache so
   // navigating back paints instantly instead of flashing a skeleton; null === nothing cached (cold).
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
@@ -196,6 +197,11 @@ function AgentReportsView() {
           right={
             hasTeam ? (
               <div className="flex items-center gap-3">
+                {feed?.timezone ? (
+                  <span className="hidden text-[11px] text-[#9ca3af] md:inline" title={`Report days & times use this rooftop's timezone (${feed.timezone})`}>
+                    Times in {tzShortLabel(feed.timezone)}
+                  </span>
+                ) : null}
                 <SyncStatus fetchedAt={feed?.fetchedAt ?? null} loading={feed === null} now={now} onRefresh={refresh} />
                 <DateFilter
                   bucket={bucket}
@@ -412,12 +418,19 @@ function AgentReportsView() {
             {/* tertiary: call breakdown — only the buckets we can derive from live volume */}
             <div className="border-t border-[#f0f0f0] px-6 py-4">
               <p className="mb-3 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Call breakdown</p>
-              <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
+              <div className={`grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 ${inbound ? "lg:grid-cols-6" : "lg:grid-cols-4"}`}>
                 {[
                   { label: "During hours", value: Math.max(0, m.calls - m.afterHours) },
                   { label: "After hours", value: m.afterHours },
                   { label: "Connected", value: m.conversations },
                   { label: "Qualified", value: m.qualified },
+                  // Transferred / Callbacks are an inbound concept — outbound agents (Sales/Service OB) don't show them.
+                  ...(inbound
+                    ? [
+                        { label: "Transferred", value: r.callFlow.transferred },
+                        { label: "Callbacks", value: r.callFlow.callbacks ?? 0 },
+                      ]
+                    : []),
                 ].map((b) => (
                   <div key={b.label} className="flex flex-col">
                     <span className="text-[18px] font-bold tabular-nums leading-none text-[#111]">{fmtInt(scale(b.value))}</span>
@@ -459,10 +472,10 @@ function AgentReportsView() {
 
           <SectionLabel>{inbound ? "Inbound operations" : "Outbound campaigns"}</SectionLabel>
 
-          {/* ── Inbound-only: leads by source + speed to lead ── */}
-          {inbound && r.leadsBySource && r.speedToLead && (
+          {/* ── Inbound-only: leads by source (+ speed-to-lead for SALES inbound only) ── */}
+          {inbound && r.leadsBySource && (
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-              <div className="lg:col-span-2">
+              <div className={a.id === "sales_ib" ? "lg:col-span-2" : "lg:col-span-3"}>
                 <Card title="Leads by source" sub={`${periodLabel} · interacted → total → booked`} pad={false}>
                   <table className="w-full">
                     <thead className="bg-[#fafafa]">
@@ -486,24 +499,31 @@ function AgentReportsView() {
                   </table>
                 </Card>
               </div>
-              <Card title="Speed to lead" sub="How fast new CRM leads get a first touch">
-                <div className="flex flex-col gap-4">
-                  <div>
-                    <p className="text-[30px] font-extrabold tabular-nums text-[#813fed] leading-none">{r.speedToLead.avg}</p>
-                    <p className="text-[11.5px] text-[#6b7280] mt-1">{r.speedToLead.pctWithin5}% of new leads contacted within 5 min</p>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <SummaryStat label="New CRM leads" value={fmtInt(scale(r.speedToLead.crmLeadsNew))} />
-                    <SummaryStat label="Instantly touched" value={fmtInt(scale(r.speedToLead.instantlyTouched))} accent="#10b981" />
-                  </div>
-                </div>
-              </Card>
+              {a.id === "sales_ib" && (
+                <Card title="Speed to lead" sub="How fast new CRM leads get a first touch">
+                  {r.speedToLead && r.speedToLead.medianUnderMin ? (
+                    <div className="flex flex-col gap-4">
+                      <div>
+                        <p className="text-[30px] font-extrabold tabular-nums text-[#813fed] leading-none">{r.speedToLead.avg}</p>
+                        <p className="text-[11.5px] text-[#6b7280] mt-1">{r.speedToLead.pctWithin5}% of new leads contacted within 5 min</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <SummaryStat label="Leads touched instantly" value={fmtInt(scale(r.speedToLead.instantlyTouched))} accent="#10b981" />
+                        <SummaryStat label="After-hours touched instantly" value={fmtInt(scale(r.speedToLead.afterHoursInstant))} />
+                        <SummaryStat label="Appointments booked" value={fmtInt(scale(r.speedToLead.instantAppts))} accent="#813fed" />
+                        <SummaryStat label="Instant → appointment" value={`${r.speedToLead.instantApptRate}%`} />
+                      </div>
+                    </div>
+                  ) : (
+                    <StlUpsell accountName={account.name} teamId={teamId} stl={r.speedToLead} />
+                  )}
+                </Card>
+              )}
             </div>
           )}
 
-          {/* ── Inbound-only: upcoming appointments + priority follow-ups (need the action-item store) ── */}
-          {inbound && (
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          {/* ── Upcoming appointments + priority follow-ups (rooftop-wide → shown on every agent) ── */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card title="Upcoming appointments" sub="Every booking the agent set, with customer and vehicle" pad={false}>
                 {r.upcomingAppointments?.length ? (
                   <AppointmentsList items={r.upcomingAppointments} />
@@ -519,7 +539,6 @@ function AgentReportsView() {
                 )}
               </Card>
             </div>
-          )}
 
           {/* ── Outbound-only: active campaigns + no-interaction ── */}
           {!inbound && (

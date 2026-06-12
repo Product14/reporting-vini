@@ -128,6 +128,7 @@ export interface CallFlow {
   answered: number;
   missed: number;
   transferred: number;
+  callbacks?: number; // had_callback — optional so mock callFlow objects don't need it
   lost: number;
   handledByAI: number;
 }
@@ -159,6 +160,10 @@ export interface SpeedToLead {
   pctWithin5: number;
   crmLeadsNew: number;
   instantlyTouched: number;
+  afterHoursInstant: number; // instantly-touched leads that arrived after-hours
+  instantAppts: number; // instantly-touched leads that booked an appointment
+  instantApptRate: number; // instantAppts / instantlyTouched, %
+  medianUnderMin: boolean; // typical (median) first-response ≤ 1 min — false → pitch the STL upsell
   missedCalledBack: number;
   pctTouched: number;
   note: string;
@@ -330,7 +335,7 @@ export const AGENTS: AgentData[] = [
         { source: "Phone", interacted: 101, engaged: 74, total: 101, handoffs: 9, appts: 6 },
         { source: "Other", interacted: 39, engaged: 21, total: 39, handoffs: 4, appts: 3 },
       ],
-      speedToLead: { avg: "1m 47s", pctWithin5: 97, crmLeadsNew: 87, instantlyTouched: 68, missedCalledBack: 23, pctTouched: 94, note: "6 of 7 days the average was under 5 minutes" },
+      speedToLead: { avg: "1m 47s", pctWithin5: 97, crmLeadsNew: 87, instantlyTouched: 68, afterHoursInstant: 19, instantAppts: 31, instantApptRate: 46, medianUnderMin: true, missedCalledBack: 23, pctTouched: 94, note: "6 of 7 days the average was under 5 minutes" },
       benchmarks: [
         { label: "Leads touched", ours: "100%", theirs: "55%", caption: "Every lead — including after-hours and overflow that used to ring out.", multiplier: "Never misses", accent: "#10b981" },
         { label: "Time to first touch", ours: "47 sec", theirs: "3 hrs", caption: "Instant, not hours later. Speed is what wins the lead.", multiplier: "~230× faster", accent: "#813fed" },
@@ -518,7 +523,7 @@ export const AGENTS: AgentData[] = [
         { source: "Walk-in", interacted: 18, engaged: 14, total: 18, handoffs: 2, appts: 9 },
         { source: "Other", interacted: 6, engaged: 4, total: 6, handoffs: 1, appts: 4 },
       ],
-      speedToLead: { avg: "2m 10s", pctWithin5: 92, crmLeadsNew: 64, instantlyTouched: 51, missedCalledBack: 13, pctTouched: 89, note: "After-hours demand booked straight into the scheduler" },
+      speedToLead: { avg: "2m 10s", pctWithin5: 92, crmLeadsNew: 64, instantlyTouched: 51, afterHoursInstant: 22, instantAppts: 27, instantApptRate: 53, medianUnderMin: true, missedCalledBack: 13, pctTouched: 89, note: "After-hours demand booked straight into the scheduler" },
       benchmarks: [
         { label: "Calls answered", ours: "100%", theirs: "61%", caption: "Every service call — even the 8am open rush and after hours.", multiplier: "Never misses", accent: "#10b981" },
         { label: "Time to first touch", ours: "38 sec", theirs: "2h 40m", caption: "Booked straight into the drive — no voicemail tag.", multiplier: "~250× faster", accent: "#813fed" },

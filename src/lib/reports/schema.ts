@@ -71,9 +71,12 @@ export interface AgentDailyRow {
   quality_basis: number; // # rows with a quality_score
   // speed-to-lead accumulators (first-touch latency vs lead_created_at)
   new_leads: number; // distinct leads whose lead_created_at is on this day
-  stl_within5: number; // first touches within 5 min of lead creation
+  stl_within5: number; // first touches within 5 min of lead creation ("instantly touched")
+  stl_within1: number; // first touches within 1 min — basis for the median-vs-1min upsell gate
   stl_seconds_sum: number; // Σ first-touch latency seconds
   stl_count: number; // # leads with a measurable first-touch latency
+  stl_afterhours_within5: number; // instantly-touched leads whose first touch was after-hours (≈ lead arrived after-hours)
+  stl_within5_appts: number; // instantly-touched leads that went on to book an appointment
 }
 
 export type BreakdownDim = "intent" | "source" | "hour" | "reply_offset" | "outcome";

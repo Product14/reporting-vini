@@ -60,6 +60,10 @@ export interface BuildInput {
   appointments?: AppointmentRow[];
   callbacks?: CallbackRow[];
   campaigns?: CampaignRow[];
+  // Slot ids the dealer has actually onboarded (from the Spyne onboarded-agents API). When provided,
+  // the report is GATED to these slots — agents the dealer hasn't paid for are dropped (personas kept
+  // as-is). null/undefined → don't gate (show all four), the previous behavior.
+  onboardedSlots?: Set<AgentData["id"]> | null;
 }
 
 // Format an ISO timestamp as a short, locale-stable "when" label (e.g. "Jun 11 · 9:30 AM" UTC).
@@ -90,7 +94,7 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, onboardedSlots }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
   // Rooftop-level detail mapped once into the UI shapes. Appointments/callbacks attach to inbound
@@ -121,7 +125,11 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     };
   }
 
-  const agents = MOCK_AGENTS.map((base): AgentData => {
+  // Gate to onboarded slots when the dealer's onboarded-agent list is known. null → show all four
+  // (previous behavior). Personas are NOT changed — only which slots appear.
+  const slots = onboardedSlots ? MOCK_AGENTS.filter((base) => onboardedSlots.has(base.id)) : MOCK_AGENTS;
+
+  const agents = slots.map((base): AgentData => {
     const type = AGENT_TYPE_BY_ID[base.id];
     const rows = daily.filter((r) => r.agent_type === type).sort((a, b) => a.activity_day.localeCompare(b.activity_day));
     const bd = breakdown.filter((r) => r.agent_type === type);
@@ -142,6 +150,7 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     const afterHours = sum(rows, (r) => r.after_hours);
     const talkSeconds = sum(rows, (r) => r.talk_seconds);
     const transfers = sum(rows, (r) => r.transfers);
+    const callbacks = sum(rows, (r) => r.callbacks);
     const queryResolved = sum(rows, (r) => r.query_resolved);
     const optOuts = sum(rows, (r) => r.opt_outs);
     const leadsAttempted = sum(rows, (r) => r.leads_attempted);
@@ -206,6 +215,7 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
         answered: connected,
         missed: Math.max(0, calls - connected),
         transferred: transfers,
+        callbacks,
         lost: Math.max(0, connected - qualified),
         handledByAI: queryResolved,
       },
@@ -241,17 +251,28 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     a.report.leadsBySource = inbound && sources.length
       ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.count, engaged: r.count, total: r.count, handoffs: 0, appts: r.appts }))
       : undefined;
-    if (inbound) {
+    // Speed-to-lead is a SALES INBOUND concept only — service inbound has no new-CRM-lead funnel,
+    // so it never shows the card (base.id gate, not just `inbound`).
+    if (base.id === "sales_ib") {
       const newLeads = sum(rows, (r) => r.new_leads);
       const within5 = sum(rows, (r) => r.stl_within5);
+      const within1 = sum(rows, (r) => r.stl_within1);
       const stlSec = sum(rows, (r) => r.stl_seconds_sum);
       const stlCnt = sum(rows, (r) => r.stl_count);
+      const afterHoursInstant = sum(rows, (r) => r.stl_afterhours_within5);
+      const instantAppts = sum(rows, (r) => r.stl_within5_appts);
       a.report.speedToLead = (newLeads || stlCnt)
         ? {
             avg: stlCnt ? fmtAvgLatency(stlSec / stlCnt) : "—",
             pctWithin5: newLeads ? Math.round((100 * within5) / newLeads) : 0,
             crmLeadsNew: newLeads,
             instantlyTouched: within5,
+            afterHoursInstant,
+            instantAppts,
+            instantApptRate: within5 ? Math.round((100 * instantAppts) / within5) : 0,
+            // median first-response ≤ 1 min ⇔ at least half of measured leads were touched within 1 min.
+            // false (slow, or no measurable leads) → the UI pitches the STL upsell instead of the card.
+            medianUnderMin: stlCnt > 0 && within1 * 2 >= stlCnt,
             missedCalledBack: 0, // no Q12227 source
             pctTouched: 0,
             note: "",
@@ -284,13 +305,12 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       a.report = { ...a.report, intent: [], queries: [], multiDayReply: [], leadsBySource: undefined, speedToLead: undefined, outcomes: undefined };
     }
 
-    // Rooftop-level detail (not split by agent): appointments + callbacks on inbound agents,
-    // campaigns on outbound. Attached after the zeroing above so it survives for quiet agents.
-    if (inbound) {
-      a.report.upcomingAppointments = apptItems.length ? apptItems : undefined;
-      a.report.followUps = callbackItems.length ? callbackItems : undefined;
-    } else {
-      // campaigns are tagged by agent_type → Sales OB shows its sales campaigns, Service OB its service ones.
+    // Rooftop-level detail. Appointments + callbacks are rooftop-wide → show on EVERY agent card.
+    // Campaigns are tagged by agent_type → only the matching outbound agent shows them.
+    // Attached after the zeroing above so it survives for quiet agents.
+    a.report.upcomingAppointments = apptItems.length ? apptItems : undefined;
+    a.report.followUps = callbackItems.length ? callbackItems : undefined;
+    if (!inbound) {
       const mine = campaignItems.filter((c) => c.agentType === type);
       a.report.activeCampaigns = mine.length
         ? mine.map((c) => ({ name: c.name, useCase: c.useCase, enrolled: c.enrolled, appts: c.appts, apptRate: c.apptRate, warmLeads: c.warmLeads, optOuts: c.optOuts, noReach: c.noReach }))

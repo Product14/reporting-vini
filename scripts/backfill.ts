@@ -34,6 +34,8 @@ const SECRET = process.env.METABASE_SECRET_KEY!;
 const SB_URL = process.env.SUPABASE_URL!;
 const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const DATE_PARAM = process.env.METABASE_RAW_DATE_PARAM || "activity_day";
+const SPYNE_TOKEN = process.env.SPYNE_API_TOKEN?.trim();
+const SPYNE_BASE = process.env.SPYNE_API_BASE || "https://api.spyne.ai";
 for (const [k, v] of Object.entries({ METABASE_SITE_URL: SITE, METABASE_SECRET_KEY: SECRET, SUPABASE_URL: SB_URL, SUPABASE_SERVICE_ROLE_KEY: SB_KEY }))
   if (!v) { console.error(`Missing env: ${k}`); process.exit(1); }
 
@@ -76,6 +78,36 @@ async function fetchCard(id: number, params: Record<string, string> = {}): Promi
   return json as Record<string, unknown>[];
 }
 
+/* team_id → IANA timezone, from the Spyne working-hours API (paginated over all rooftops). Drives the
+ * store-local re-bucketing of activity_day in aggregate(). Best-effort: with no SPYNE_API_TOKEN, or on
+ * any failure, returns an EMPTY map → aggregate falls back to the historical UTC bucketing, so the
+ * pipeline is unchanged until a (durable, admin-scoped) token is dropped in. */
+async function fetchTzMap(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (!SPYNE_TOKEN) { console.log("tz: SPYNE_API_TOKEN unset → UTC bucketing (no re-bucket)"); return map; }
+  try {
+    for (let page = 1; page <= 50; page++) {
+      const res = await fetch(`${SPYNE_BASE}/conversation/admin-tools/working-hours?page=${page}&limit=200`, {
+        headers: { accept: "application/json", authorization: `Bearer ${SPYNE_TOKEN}` }, cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`working-hours HTTP ${res.status}`);
+      const json = await res.json();
+      const data: Array<{ teamId?: string; timezone?: string }> = Array.isArray(json?.data) ? json.data : [];
+      for (const row of data) {
+        const team = String(row?.teamId || ""), tz = String(row?.timezone || "");
+        if (team && tz) map.set(team, tz);
+      }
+      const totalPages = Number(json?.pagination?.totalPages) || 1;
+      if (page >= totalPages || data.length === 0) break;
+    }
+    console.log(`tz: ${map.size} rooftops mapped → store-local re-bucketing ON`);
+  } catch (e) {
+    console.warn(`tz: working-hours fetch failed (${(e as Error).message}) → UTC bucketing`);
+    return new Map();
+  }
+  return map;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function insertAll(sb: any, table: string, rows: object[]) {
   for (let i = 0; i < rows.length; i += 500) {
@@ -93,7 +125,13 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   const days = daysArg || Number(process.env.SYNC_WINDOW_DAYS) || 3;
   const today = todayUTC();
 
-  // windowStart = where we delete-and-replace from. Full/file rebuilds replace everything.
+  // Resolve store timezones up front. Non-empty → re-bucket activity_day by store-local day.
+  const tzMap = await fetchTzMap();
+  const reBucket = tzMap.size > 0;
+  const tzOf = (teamId: string) => tzMap.get(teamId);
+
+  // windowStart = where we delete-and-replace from (matched on the FINAL, possibly re-bucketed,
+  // activity_day). Full/file rebuilds replace everything.
   let windowStart = "1900-01-01";
   let raw: RawRow[];
 
@@ -105,9 +143,13 @@ async function insertAll(sb: any, table: string, rows: object[]) {
     raw = await fetchRows({});
   } else {
     windowStart = shiftDays(today, -(days - 1));
-    console.log(`INCREMENTAL pull, ${windowStart}..${today} (param "${DATE_PARAM}")…`);
+    // When re-bucketing, a store-local day draws from events whose UTC activity_day is ±1 — pull one
+    // extra UTC day back so the store-local windowStart is fully covered (the future edge is the usual
+    // "today lags" tail). The output filter below trims anything that re-buckets before windowStart.
+    const pullStart = reBucket ? shiftDays(windowStart, -1) : windowStart;
+    console.log(`INCREMENTAL pull, ${pullStart}..${today} (param "${DATE_PARAM}", replace from ${windowStart})…`);
     raw = [];
-    for (let d = windowStart; d <= today; d = shiftDays(d, 1)) {
+    for (let d = pullStart; d <= today; d = shiftDays(d, 1)) {
       const dayRows = await fetchRows({ [DATE_PARAM]: d });
       console.log(`  ${d}: ${dayRows.length} rows`);
       raw.push(...dayRows);
@@ -117,8 +159,13 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   console.log("raw rows:", raw.length);
   if (!raw.length) throw new Error("0 raw rows across the window — refusing to wipe the aggregate");
 
-  const scoped = raw.filter((r) => String(r.activity_day || "") >= windowStart);
-  const { daily, breakdown } = aggregate(scoped);
+  // Aggregate ALL pulled rows (re-bucketing by store-local day when tzMap is set), then keep only the
+  // replace window by the FINAL activity_day. In UTC mode this is identical to the old "pre-filter raw
+  // by activity_day" because the output day equals the raw day; in re-bucket mode it correctly drops
+  // events that shifted to a store-local day before windowStart.
+  const agg = aggregate(raw, { tzOf: reBucket ? tzOf : undefined });
+  const daily = agg.daily.filter((r) => r.activity_day >= windowStart);
+  const breakdown = agg.breakdown.filter((r) => r.activity_day >= windowStart);
   console.log("daily:", daily.length, " breakdown:", breakdown.length);
 
   const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });

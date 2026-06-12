@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { type AgentData, fmtInt } from "./kit";
+import type { SpeedToLead } from "./data";
 
 interface UpsellCopy {
   headline: string;
@@ -154,21 +155,80 @@ export function UpsellAgent({
       {/* interest form (revealed on click) */}
       {open && (
         <div className="border-t border-[#ece6fb] px-8 py-7">
-          <InterestForm agent={agent} accountName={accountName} teamId={teamId} onCancel={() => setOpen(false)} />
+          <InterestForm agentId={agent.id} agentName={agent.name} accountName={accountName} teamId={teamId} onCancel={() => setOpen(false)} />
         </div>
       )}
     </section>
   );
 }
 
+/* ── Speed-to-Lead upsell — the BODY of the "Speed to lead" card (no chrome of its own) shown on a
+ * Sales Inbound report when the rooftop either isn't measuring STL or its typical (median) first
+ * response is slower than a minute. `stl` is passed when there IS data (the "slow" case) so we can
+ * ground the pitch in the rooftop's own numbers; omitted → the "not measuring" case. ── */
+export function StlUpsell({ accountName, teamId, stl }: { accountName: string; teamId: string; stl?: SpeedToLead }) {
+  const [open, setOpen] = useState(false);
+  const slow = !!stl; // we have data, it's just over a minute at the median
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 flex-none items-center justify-center rounded-2xl bg-[#f3eaff] text-[20px]">⚡</span>
+        <div>
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#f3eaff] px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-[#813fed]">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#813fed]" /> Speed-to-Lead
+          </span>
+          <h3 className="mt-1.5 text-[15px] font-extrabold tracking-[-0.01em] text-[#111]">
+            {slow ? "Get every new lead a reply under a minute" : "Turn new leads into instant conversations"}
+          </h3>
+        </div>
+      </div>
+
+      {/* grounded line (slow case) or generic value (no-data case) */}
+      <p className="text-[12px] leading-snug text-[#6b7280]">
+        {slow ? (
+          <>
+            Right now only <b className="text-[#111]">{stl!.pctWithin5}%</b> of your{" "}
+            <b className="text-[#111]">{fmtInt(stl!.crmLeadsNew)}</b> new leads get a first reply within 5 minutes,
+            and the typical lead waits longer than a minute. Speed-to-Lead replies to every one in seconds — day or night.
+          </>
+        ) : (
+          <>Speed-to-Lead replies to every new CRM lead in seconds — day, night and weekends — qualifies the buyer and books the appointment before they go cold.</>
+        )}
+      </p>
+
+      <ul className="flex flex-col gap-2">
+        {["Sub-minute first response on 100% of new leads", "Works after-hours and overflow automatically", "Books the appointment before the lead cools off"].map((d) => (
+          <li key={d} className="flex items-start gap-2.5 text-[12px] text-[#374151]">
+            <span className="mt-0.5 flex h-4 w-4 flex-none items-center justify-center rounded-full bg-[#dcfce7] text-[9px] font-bold text-[#065f46]">✓</span>
+            {d}
+          </li>
+        ))}
+      </ul>
+
+      {open ? (
+        <InterestForm agentId="speed_to_lead" agentName="Speed to Lead" accountName={accountName} teamId={teamId} onCancel={() => setOpen(false)} />
+      ) : (
+        <button
+          onClick={() => setOpen(true)}
+          className="mt-1 self-start rounded-xl bg-[#813fed] px-4 py-2 text-[12.5px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
+        >
+          {slow ? "Speed up my responses →" : "I’m interested →"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ── interest-capture form → POST /api/agent-interest ── */
 function InterestForm({
-  agent,
+  agentId,
+  agentName,
   accountName,
   teamId,
   onCancel,
 }: {
-  agent: AgentData;
+  agentId: string;
+  agentName: string;
   accountName: string;
   teamId: string;
   onCancel: () => void;
@@ -194,8 +254,8 @@ function InterestForm({
         body: JSON.stringify({
           teamId,
           accountName,
-          agentId: agent.id,
-          agentName: agent.name,
+          agentId,
+          agentName,
           name: name.trim(),
           email: email.trim(),
           phone: phone.trim(),
@@ -215,7 +275,7 @@ function InterestForm({
     return (
       <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#f0fdf6] px-6 py-8 text-center">
         <span className="text-[26px] leading-none">✅</span>
-        <p className="text-[14px] font-bold text-[#065f46]">Thanks — we’ll be in touch about {agent.name}.</p>
+        <p className="text-[14px] font-bold text-[#065f46]">Thanks — we’ll be in touch about {agentName}.</p>
         <p className="max-w-[440px] text-[12px] leading-snug text-[#15803d]">
           Your interest for <b>{accountName}</b> is in. Our team will reach out at <b>{email.trim()}</b> with next steps.
         </p>
@@ -228,7 +288,7 @@ function InterestForm({
       <div>
         <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#813fed]">Tell us where to reach you</p>
         <p className="mt-1 text-[12.5px] text-[#6b7280]">
-          We’ll show you what <b className="text-[#111]">{agent.name}</b> would do for <b className="text-[#111]">{accountName}</b> and get it set up.
+          We’ll show you what <b className="text-[#111]">{agentName}</b> would do for <b className="text-[#111]">{accountName}</b> and get it set up.
         </p>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

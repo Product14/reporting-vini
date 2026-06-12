@@ -62,6 +62,7 @@ function resolveAccount(teamId: string | null | undefined): Account {
 
 interface Ctx {
   account: Account;
+  spyneToken: string; // host-forwarded Spyne API token from the URL (prod); "" locally → server uses env
 }
 const ScenarioCtx = createContext<Ctx | null>(null);
 
@@ -86,20 +87,29 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
   // briefly flashing the "No rooftop selected" state before the real team resolves. No in-app
   // switching, so this resolves once and then never changes (the iframe reloads to rescope).
   const [account, setAccount] = useState<Account | null>(null);
+  const [spyneToken, setSpyneToken] = useState("");
   useEffect(() => {
     // intentional: read the browser-only URL after mount, then render children for the first time
+    const sp = new URLSearchParams(window.location.search);
+    // The host forwards the Spyne API token on the iframe URL (prod) as `auth_key` (value may include a
+    // "Bearer " prefix); `spyne_token`/`token` are accepted as fallbacks. Strip "Bearer " to the raw token
+    // (fetchAgents re-adds it as the Authorization header). Empty → no token, server falls back to env.
+    const rawToken = sp.get("auth_key") || sp.get("spyne_token") || sp.get("token") || "";
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setAccount(resolveAccount(new URLSearchParams(window.location.search).get("team_id")));
+    setSpyneToken(rawToken.replace(/^Bearer\s+/i, "").trim());
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAccount(resolveAccount(sp.get("team_id")));
   }, []);
 
   if (account === null) return <ScenarioResolving />;
-  return <ScenarioCtx.Provider value={{ account }}>{children}</ScenarioCtx.Provider>;
+  return <ScenarioCtx.Provider value={{ account, spyneToken }}>{children}</ScenarioCtx.Provider>;
 }
 
 export function useScenario(): {
   account: Account;
   scenario: Scenario;
   teamId: string;
+  spyneToken: string;
   view: ScenarioView;
 } {
   const c = useContext(ScenarioCtx);
@@ -109,6 +119,7 @@ export function useScenario(): {
     account,
     scenario,
     teamId: account.teamId,
+    spyneToken: c?.spyneToken ?? "",
     view: scenarioView(scenario),
   };
 }

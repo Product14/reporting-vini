@@ -23,7 +23,7 @@ import {
   StepList,
 } from "@/components/reports/kit";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult } from "@/components/reports/liveData";
 
 const AGENT_COLOR: Record<string, string> = {
   sales_ib: "#6366f1",
@@ -36,7 +36,7 @@ export default function OverviewReportPage() {
   const router = useRouter();
   const [bucket, setBucket] = useState<Bucket>("last30");
   const [custom, setCustom] = useState<{ start: string; end: string } | null>(null);
-  const { scenario, view, teamId, account } = useScenario();
+  const { scenario, view, teamId, account, spyneToken } = useScenario();
 
   // cost per appointment — set on the Agents tab; read once from localStorage (same initializer
   // pattern ScenarioProvider uses to seed the rooftop), so there's no setState-in-effect.
@@ -47,7 +47,8 @@ export default function OverviewReportPage() {
   });
 
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for the query.
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end) } : { bucket };
+  // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
   // Live fleet for the selected rooftop. Seed from the client cache so navigating back paints
   // instantly instead of flashing a skeleton; null === nothing cached yet (cold load).
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
@@ -114,6 +115,11 @@ export default function OverviewReportPage() {
           right={
             hasTeam ? (
               <div className="flex items-center gap-3">
+                {feed?.timezone ? (
+                  <span className="hidden text-[11px] text-[#9ca3af] md:inline" title={`Report days & times use this rooftop's timezone (${feed.timezone})`}>
+                    Times in {tzShortLabel(feed.timezone)}
+                  </span>
+                ) : null}
                 <span className="hidden text-[11px] text-[#9ca3af] md:inline">
                   {feed === null ? "Syncing…" : feed.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
                 </span>

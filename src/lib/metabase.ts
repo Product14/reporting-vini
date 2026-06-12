@@ -1,27 +1,20 @@
 import crypto from "node:crypto";
 
-/* Shared Metabase static-embedding helpers (server-only — imported by the route handlers).
- * The embedding SECRET both signs the iframe token AND authenticates the JSON data endpoint
- * (/api/embed/card/:token/query/json), so no separate API key is needed. */
+/* Shared Metabase static-embedding helpers (server-only). The embedding SECRET authenticates the
+ * static-embed JSON endpoint (/api/embed/card/:token/query/json). Used by /api/sync (the Q12227
+ * pull) via fetchEmbedRows. */
 
 export const SITE_URL = process.env.METABASE_SITE_URL;
 export const SECRET = process.env.METABASE_SECRET_KEY;
 
 // Only these questions may be signed — stops the endpoints signing arbitrary embeds.
-// 12182 = the V2 "reporting dashboard" embed · 12193–12212 = the 20 Agent-Performance cards ·
-// 12227 = the "raw-data-dashboard" event-level query the Supabase sync aggregates.
+// (The 12193–12212 Agent-Performance cards were dropped: the reports tab reads /api/reports now,
+// so nothing requests them anymore.)
 export const ALLOWED_QUESTIONS = new Set<number>([
-  12182,
-  12227,
+  12182, // "reporting dashboard" embed — only the (currently unlinked) v2/Impact tab uses it
+  12227, // "raw-data-dashboard" event-level query the Supabase sync aggregates
   12232, 12233, 12234, // rooftop-level detail cards: best campaign / upcoming appts / callbacks
-  ...Array.from({ length: 12212 - 12193 + 1 }, (_, i) => 12193 + i),
 ]);
-
-// Embedding parameter slugs across all cards. Q12182 uses the upper-case set; the 12193–12212
-// cards use team_id/start/end/agent_type; Q12227 (once an embedding param is added) takes
-// activity_day to scope the sync's trailing window. readParams forwards only the slugs PRESENT in
-// the request, so each card receives just the subset it defines (no "unknown parameter").
-export const QUESTION_PARAMS = ["TEAM_ID", "AGENT_TYPE", "CALLTYPES", "TZ", "team_id", "start", "end", "agent_type", "activity_day", "rooftop_stage", "enterprise_name"] as const;
 
 function base64url(input: string): string {
   return Buffer.from(input).toString("base64url");
@@ -34,17 +27,6 @@ export function signHS256(payload: Record<string, unknown>, secret: string): str
   const data = `${header}.${body}`;
   const signature = crypto.createHmac("sha256", secret).update(data).digest("base64url");
   return `${data}.${signature}`;
-}
-
-// Pull the known param slugs out of the request query — including empty strings, since the
-// question requires each param to be PRESENT (an empty value reads as "all", as in-app).
-export function readParams(searchParams: URLSearchParams): Record<string, string> {
-  const params: Record<string, string> = {};
-  for (const key of QUESTION_PARAMS) {
-    const value = searchParams.get(key);
-    if (value !== null) params[key] = value;
-  }
-  return params;
 }
 
 // A signed, 10-minute embed token for a question with locked params.
@@ -78,10 +60,9 @@ async function longPullDispatcher(): Promise<unknown> {
   return dispatcherPromise;
 }
 
-/* Server-side: fetch a question's ROWS via the static-embed JSON endpoint. Shared by
- * /api/metabase/data (per-card UI fetches) and /api/sync (the raw-data pull). `params` are LOCKED
- * into the signed token. Returns { rows, error? } — never throws. NOTE: the response is the full
- * result set with no row cap, so callers pulling Q12227 unfiltered must budget memory accordingly. */
+/* Server-side: fetch a question's ROWS via the static-embed JSON endpoint. Used by /api/sync (the
+ * Q12227 raw-data pull). `params` are LOCKED into the signed token. Returns { rows, error? } — never
+ * throws. NOTE: the response has no row cap, so an unfiltered Q12227 pull must budget memory. */
 export async function fetchEmbedRows(question: number, params: Record<string, string> = {}): Promise<EmbedRowsResult> {
   if (!SITE_URL || !SECRET) return { rows: [], error: "Metabase is not configured (METABASE_SITE_URL / METABASE_SECRET_KEY)." };
   if (!isAllowed(question)) return { rows: [], error: `Question ${question} is not allowlisted.` };

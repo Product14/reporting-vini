@@ -3,6 +3,7 @@ import { buildResult } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
+import { getStoreTimeZone, getOnboardedSlots } from "@/lib/spyne/teamContext";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
  * already consumes — one fast query instead of the ~84 Metabase round-trips fetchAgents() used to do.
@@ -24,15 +25,35 @@ export async function GET(request: Request): Promise<Response> {
   const teamId = searchParams.get("team_id");
   if (!teamId) return Response.json({ error: "team_id is required" }, { status: 400 });
 
+  // Spyne API token: PROD forwards it per-request from the host — via the Authorization header or an
+  // `auth_key`/`spyne_token`/`token` query param (the host uses `auth_key`); LOCAL DEV omits it and the
+  // client falls back to SPYNE_API_TOKEN (env). Strip any "Bearer " prefix from whichever source.
+  const tokenSource = request.headers.get("authorization")
+    || searchParams.get("auth_key") || searchParams.get("spyne_token") || searchParams.get("token") || "";
+  const spyneToken = tokenSource.replace(/^Bearer\s+/i, "").trim() || null;
+
+  // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
+  // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).
+  const [timezone, onboardedSlots] = await Promise.all([
+    getStoreTimeZone(teamId, spyneToken),
+    getOnboardedSlots(teamId, spyneToken),
+  ]);
+
+  // Relative buckets resolve to a window in the STORE's timezone (so a Pacific rooftop's "Today" is a
+  // Pacific day, not a UTC day). Explicit start/end (the custom date picker) are taken as-is — they're
+  // already store-local calendar dates.
   const startQ = searchParams.get("start");
   const endQ = searchParams.get("end");
-  const { start, end } = startQ && endQ ? { start: startQ, end: endQ } : rangeFor((searchParams.get("bucket") as Bucket) ?? "last30");
+  const { start, end } = startQ && endQ
+    ? { start: startQ, end: endQ }
+    : rangeFor((searchParams.get("bucket") as Bucket) ?? "last30", timezone ?? undefined);
   const prior = priorWindow(start, end);
+  const meta = { start, end, timezone };
 
   const sb = getSupabase();
   if (!sb) {
     // No backend configured → return mock-shaped result so the UI still renders.
-    return Response.json(buildResult({ daily: [], breakdown: [], priorDaily: [] }));
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots }), ...meta });
   }
 
   // One read = the current window, its breakdowns, and the prior window (delta basis).
@@ -58,7 +79,7 @@ export async function GET(request: Request): Promise<Response> {
     // A read failure must NOT 502 (that blanks the report). Degrade to the same mock-shaped result
     // the no-backend path serves so the UI still renders; flag it so the failure is observable.
     console.error(`[/api/reports] Supabase read failed for team ${teamId}: ${err.message}`);
-    return Response.json(buildResult({ daily: [], breakdown: [], priorDaily: [] }), {
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots }), ...meta }, {
       headers: { "X-Reports-Degraded": "supabase-read-error" },
     });
   }
@@ -82,9 +103,10 @@ export async function GET(request: Request): Promise<Response> {
     appointments,
     callbacks,
     campaigns,
+    onboardedSlots,
   });
 
-  return Response.json(result, {
+  return Response.json({ ...result, ...meta }, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

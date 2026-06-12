@@ -1,8 +1,7 @@
-/* Live data layer — rebuilds the AGENTS[] the reporting UI already consumes, but with real
- * numbers pulled from the 20 Metabase cards (via /api/metabase/data). It OVERLAYS live values
- * onto the existing mock AgentData so the UI renders byte-for-byte the same; fields with no
- * backing card (revenue/cost/deals/showed, the human-baseline story, period deltas) keep their
- * mock values. Used by /reports (Overview) and /reports/agents — no component/JSX changes. */
+/* Live data layer — fetches the materialized report for a team + window in ONE request to
+ * /api/reports (which reads the Supabase aggregate the sync maintains) and returns it as the
+ * AgentData[] the reporting UI already consumes. Replaces the old ~84 Metabase card round-trips.
+ * Used by /reports (Overview) and /reports/agents (By agent) — no component/JSX changes. */
 
 import { type AgentData, type Bucket } from "./data";
 import { type Account } from "./accounts";
@@ -24,24 +23,31 @@ export function agentsForAccount(agents: AgentData[], account: Account | undefin
 
 export const DEFAULT_TEAM_ID = "9923577d07"; // Honda of Downtown LA — overridable per call
 
-// Current UTC date as YYYY-MM-DD. `activity_day` is a UTC date string, so windows anchor to UTC too.
-function todayUTC(): string {
-  return new Date().toISOString().slice(0, 10);
+// Today's calendar date (YYYY-MM-DD). When a store IANA timezone is given, anchor to THAT zone's
+// "today" so a Pacific rooftop's day boundaries are Pacific midnight, not UTC midnight — otherwise a
+// UTC day spans ~5pm-prev-day → ~5pm Pacific and bleeds the previous evening into "today". With no
+// timezone we fall back to UTC (the historical behavior).
+function todayIn(timeZone?: string): string {
+  const now = new Date();
+  if (!timeZone) return now.toISOString().slice(0, 10);
+  // en-CA renders as YYYY-MM-DD; timeZone shifts it to the store's local calendar day.
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 }
-// Shift a YYYY-MM-DD date by n whole days (UTC), returning YYYY-MM-DD.
+// Shift a YYYY-MM-DD date by n whole days, returning YYYY-MM-DD. Date-only math (UTC midnight) so it's
+// timezone-agnostic — it just adds/subtracts whole days to a bare calendar date.
 function shiftDays(iso: string, n: number): string {
   const d = new Date(`${iso}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
 
-/* Date window per the UI's bucket toggle — ROLLING relative to today (UTC). `end` is exclusive and
- * equals today's date, so each window's latest included day is yesterday (the freshest complete day;
- * the sync lags real-time by ~a day). Widths match the original fixed windows: Today = the latest
- * complete day, Yesterday the one before, last7/14/30 trailing N-day windows, Lifetime all history.
- * (With today=2026-06-09 this reproduces the previous hardcoded ranges exactly.) */
-export function rangeFor(bucket: Bucket): { start: string; end: string } {
-  const end = todayUTC(); // exclusive upper bound
+/* Date window per the UI's bucket toggle — ROLLING relative to today in the store's timezone (or UTC
+ * when none is known). `end` is exclusive and equals today's date, so each window's latest included day
+ * is yesterday (the freshest complete day; the sync lags real-time by ~a day). Widths match the
+ * original fixed windows: Today = the latest complete day, Yesterday the one before, last7/14/30
+ * trailing N-day windows, Lifetime all history. */
+export function rangeFor(bucket: Bucket, timeZone?: string): { start: string; end: string } {
+  const end = todayIn(timeZone); // exclusive upper bound, store-local
   switch (bucket) {
     case "today": return { start: shiftDays(end, -1), end };
     case "yesterday": return { start: shiftDays(end, -2), end: shiftDays(end, -1) };
@@ -50,6 +56,18 @@ export function rangeFor(bucket: Bucket): { start: string; end: string } {
     case "last30": return { start: shiftDays(end, -30), end };
     case "lifetime": return { start: "2020-01-01", end };
     default: return { start: shiftDays(end, -30), end };
+  }
+}
+
+/* Short, human label for an IANA timezone (e.g. "America/Los_Angeles" → "PDT"/"PST"). Used to tell the
+ * dealer which timezone the report's days/times are in. Returns "" when unknown/unparseable. */
+export function tzShortLabel(tz?: string | null): string {
+  if (!tz) return "";
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "short" }).formatToParts(new Date());
+    return parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -68,6 +86,7 @@ export interface LiveOpts {
   start?: string;
   end?: string;
   force?: boolean; // bypass the cache (used by the Refresh button)
+  spyneToken?: string; // host-forwarded Spyne API token (prod); omit locally (server uses env)
 }
 
 // Minimal per-agent totals for the prior equal-length window — the basis for real period deltas.
@@ -84,6 +103,11 @@ export interface FetchResult {
   hasData: boolean;
   fetchedAt: number; // epoch ms — drives the "last synced" label
   prior: Record<string, Basis>; // per-agent-id totals for the prior window (for fleet deltas)
+  // The window the server actually resolved (store-local when a timezone was known) + that timezone.
+  // Informational — lets the UI label the period / note the zone. Absent on the mock/error fallback.
+  start?: string;
+  end?: string;
+  timezone?: string | null;
 }
 
 // Live fleet roll-up for the Overview: sums the account's live agents and computes real deltas
@@ -144,17 +168,23 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   };
 }
 
-// Client-side cache so switching back to a team/window doesn't re-hit Metabase. 5-minute TTL.
+// Client-side cache so switching back to a team/window doesn't re-hit the server. 5-minute TTL.
 const CACHE = new Map<string, FetchResult>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+/* Cache key for a team + window. Relative buckets key by the bucket NAME (not a client-computed date
+ * range) because the server now resolves the actual dates in the store's timezone — the client no
+ * longer knows the exact window up front. Custom date-picker ranges key by their explicit dates. */
+function cacheKeyFor(teamId: string, opts: LiveOpts): string {
+  return opts.start && opts.end ? `${teamId}|${opts.start}|${opts.end}` : `${teamId}|b:${opts.bucket ?? "last30"}`;
+}
 
 /* Synchronously read a cached window without touching the network — lets the UI paint instantly when
  * you navigate back to a page (stale-while-revalidate: show what we have, then fetchAgents refreshes
  * in the background per the TTL). Returns whatever is cached regardless of age, or null. */
 export function peekAgents(opts: LiveOpts = {}): FetchResult | null {
   if (!opts.teamId) return null;
-  const { start, end } = opts.start && opts.end ? { start: opts.start, end: opts.end } : rangeFor(opts.bucket ?? "last30");
-  return CACHE.get(`${opts.teamId}|${start}|${end}`) ?? null;
+  return CACHE.get(cacheKeyFor(opts.teamId, opts)) ?? null;
 }
 
 /* Fetch the materialized report for a team + window in ONE request to /api/reports (which reads the
@@ -163,17 +193,26 @@ export function peekAgents(opts: LiveOpts = {}): FetchResult | null {
  * error it falls back to mock agents so the report still renders. */
 export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
   const teamId = opts.teamId || DEFAULT_TEAM_ID;
-  const { start, end } = opts.start && opts.end ? { start: opts.start, end: opts.end } : rangeFor(opts.bucket ?? "last30");
-  const cacheKey = `${teamId}|${start}|${end}`;
+  const cacheKey = cacheKeyFor(teamId, opts);
   if (!opts.force) {
     const cached = CACHE.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached;
   }
 
+  // Relative buckets send the bucket NAME and let the server compute the window in the store's
+  // timezone; custom ranges send explicit (store-local) dates. Either way the server owns the dates,
+  // so they're consistent with the timezone it resolved.
+  const query: Record<string, string> = opts.start && opts.end
+    ? { team_id: teamId, start: opts.start, end: opts.end }
+    : { team_id: teamId, bucket: opts.bucket ?? "last30" };
+
   let result: FetchResult;
   try {
-    const qs = new URLSearchParams({ team_id: teamId, start, end });
-    const r = await fetch(`/api/reports?${qs.toString()}`, { cache: "no-store" });
+    const qs = new URLSearchParams(query);
+    // Forward the host's Spyne token (prod) as a Bearer header so /api/reports can resolve timezone +
+    // onboarded agents. Omitted locally → the server falls back to its env token.
+    const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
+    const r = await fetch(`/api/reports?${qs.toString()}`, { cache: "no-store", headers });
     const j = (await r.json().catch(() => null)) as Partial<FetchResult> | null;
     if (!r.ok || !j || !Array.isArray(j.agents)) throw new Error("bad /api/reports response");
     result = {
@@ -181,6 +220,9 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
       hasData: Boolean(j.hasData),
       fetchedAt: typeof j.fetchedAt === "number" ? j.fetchedAt : Date.now(),
       prior: (j.prior as Record<string, Basis>) ?? {},
+      start: j.start,
+      end: j.end,
+      timezone: j.timezone ?? null,
     };
   } catch {
     // On error, render nothing rather than mock numbers — hasData:false drives the "coming soon" state.
