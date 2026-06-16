@@ -24,3 +24,6 @@ export const REPORT_CALLBACKS = "report_callbacks";
 export const REPORT_CAMPAIGNS = "report_campaigns";
 export const REPORT_OUTCOMES = "report_outcomes";
 export const STL_LEAD_FIRST = "stl_lead_first";
+// Persisted rooftop timezone map (see supabase/migrations/0006_team_tz.sql). Seeded by the sync when a
+// Spyne token is available; read as a fallback so bucketing stays store-local across token outages.
+export const TEAM_TZ = "team_tz";

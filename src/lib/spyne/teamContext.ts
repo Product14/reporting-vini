@@ -3,6 +3,8 @@
  * unconfigured or the call fails. See client.ts for the stubbed-auth note. */
 
 import { spyneGet, cached } from "./client";
+import { getSupabase } from "@/lib/reports/supabase";
+import { loadTeamTz } from "@/lib/reports/tzStore";
 import type { AgentData } from "@/components/reports/data";
 
 type SlotId = AgentData["id"]; // "sales_ib" | "sales_ob" | "service_ib" | "service_ob"
@@ -36,10 +38,15 @@ export async function getWorkingHours(teamId: string, token?: string | null): Pr
   });
 }
 
-/** The rooftop's IANA timezone (e.g. "America/Los_Angeles"), or null when unknown. */
+/* The rooftop's IANA timezone (e.g. "America/Los_Angeles"), or null when unknown. Prefers the live
+ * working-hours API; falls back to the persisted team_tz table (seeded by the sync) so the "Today"
+ * window stays store-local even when the host doesn't forward an admin-scoped token. */
 export async function getStoreTimeZone(teamId: string, token?: string | null): Promise<string | null> {
   const wh = await getWorkingHours(teamId, token);
-  return wh?.timezone || null;
+  if (wh?.timezone) return wh.timezone;
+  const sb = getSupabase();
+  if (!sb) return null;
+  return cached(`tz:${teamId}`, () => loadTeamTz(sb, teamId));
 }
 
 // ───────────────────────── onboarded agents → slot ids ─────────────────────────

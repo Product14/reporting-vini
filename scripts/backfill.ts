@@ -18,6 +18,7 @@ import { createClient } from "@supabase/supabase-js";
 import { aggregate } from "../src/lib/reports/aggregate";
 import { mergeStlEarliest, reconcileHistoricalStl } from "../src/lib/reports/stlSync";
 import { fetchTzMap, storeLocalDay } from "../src/lib/reports/tzMap";
+import { saveTzMap, loadTzMap } from "../src/lib/reports/tzStore";
 import type { RawRow } from "../src/lib/reports/schema";
 
 const RAW_QUESTION = 12227;
@@ -95,13 +96,25 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   const days = daysArg || Number(process.env.SYNC_WINDOW_DAYS) || 3;
   const today = todayUTC();
 
-  // Resolve store timezones up front. Non-empty → re-bucket activity_day by store-local day.
-  const tzMap = await fetchTzMap();
+  const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });
+
+  // Resolve store timezones up front. Prefer the live Spyne working-hours API; when it returns a map,
+  // PERSIST it to team_tz so future token-less runs (and /api/reports) stay store-local. When the live
+  // call comes back empty (no/expired token), fall back to the persisted map. Either non-empty source →
+  // re-bucket activity_day + hour by store-local. Both empty → UTC bucketing (prior behavior).
+  let tzMap = await fetchTzMap();
+  if (tzMap.size > 0) {
+    console.log(`tz: ${tzMap.size} rooftops from live Spyne API`);
+    await saveTzMap(sb, tzMap, new Date().toISOString());
+  } else {
+    tzMap = await loadTzMap(sb);
+    if (tzMap.size > 0) console.log(`tz: live API unavailable → ${tzMap.size} rooftops from persisted team_tz`);
+  }
   const reBucket = tzMap.size > 0;
   const tzOf = (teamId: string) => tzMap.get(teamId);
   const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
   if (reBucket) console.log(`tz: ${tzMap.size} rooftops mapped → store-local re-bucketing ON`);
-  else console.log("tz: SPYNE_API_TOKEN unset or fetch failed → UTC bucketing (no re-bucket)");
+  else console.log("tz: no live token and empty team_tz → UTC bucketing (no re-bucket)");
 
   // windowStart = where we delete-and-replace from (matched on the FINAL, possibly re-bucketed,
   // activity_day). Full/file rebuilds replace everything.
@@ -131,8 +144,6 @@ async function insertAll(sb: any, table: string, rows: object[]) {
 
   console.log("raw rows:", raw.length);
   if (!raw.length) throw new Error("0 raw rows across the window — refusing to wipe the aggregate");
-
-  const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });
 
   let stlEarliest;
   try {

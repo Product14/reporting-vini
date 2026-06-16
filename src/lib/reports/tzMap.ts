@@ -1,4 +1,6 @@
-/* Store-local day bucketing + Spyne working-hours timezone lookup (used by sync/backfill). */
+/* Store-local day bucketing + Spyne working-hours timezone lookup (used by sync/backfill).
+ * Kept dependency-light (no Supabase) so aggregate.ts stays pure/parity-testable — the persisted
+ * team_tz map lives in tzStore.ts. */
 
 import type { RawRow } from "./schema";
 

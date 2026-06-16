@@ -15,11 +15,19 @@ const num = (v: unknown): number => {
 const str = (v: unknown, fallback = ""): string => (v == null ? fallback : String(v));
 const key = (day: string, team: string, type: string) => `${day}|${team}|${type}`;
 
-// UTC hour 0–23 of an ISO timestamp, or null if unparseable.
-function hourOf(ts: string): number | null {
+// Hour-of-day 0–23 of an ISO timestamp, or null if unparseable. In the store's tz when `tz` is given
+// (so the "hourly" 7a–6p chart reflects local call times, not UTC) — else UTC.
+function hourOf(ts: string, tz?: string): number | null {
   const d = new Date(ts);
-  const h = d.getUTCHours();
-  return Number.isFinite(h) ? h : null;
+  if (!Number.isFinite(d.getTime())) return null;
+  if (!tz) return d.getUTCHours();
+  try {
+    const s = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false }).format(d);
+    const h = parseInt(s, 10);
+    return Number.isFinite(h) ? h % 24 : d.getUTCHours(); // some envs render midnight as "24"
+  } catch {
+    return d.getUTCHours();
+  }
 }
 
 export interface AggregateOpts {
@@ -125,7 +133,7 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     if (intent) bump(a, "intent", intent, 1, num(r.query_resolved), num(r.appointment_booked));
     const source = str(r.lead_source);
     if (source) bump(a, "source", source, 1, num(r.qualified), num(r.appointment_booked));
-    const h = hourOf(str(r.activity_ts));
+    const h = hourOf(str(r.activity_ts), opts.tzOf?.(team));
     if (h != null) bump(a, "hour", String(h), isCall || 1, 0, 0);
     if (isSms) {
       const off = dayOffset(str(r.lead_created_at) || null, str(r.activity_ts));

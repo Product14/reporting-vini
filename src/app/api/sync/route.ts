@@ -3,6 +3,7 @@ import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, SYNC_STATE } from "@/l
 import { aggregate } from "@/lib/reports/aggregate";
 import { mergeStlEarliest, reconcileHistoricalStl } from "@/lib/reports/stlSync";
 import { fetchTzMap, storeLocalDay, teamsInRows } from "@/lib/reports/tzMap";
+import { saveTzMap, loadTzMap } from "@/lib/reports/tzStore";
 import type { RawRow } from "@/lib/reports/schema";
 
 /* Pulls Q12227 (event-level raw data), aggregates it into agent_daily + agent_daily_breakdown, and
@@ -68,7 +69,11 @@ async function handle(request: Request): Promise<Response> {
     return Response.json({ ok: false, error: msg }, { status });
   };
 
-  const tzMap = await fetchTzMap();
+  // Live Spyne working-hours map when a token is present (then persist it); otherwise fall back to the
+  // persisted team_tz table — so store-local bucketing survives a token outage instead of reverting to UTC.
+  let tzMap = await fetchTzMap();
+  if (tzMap.size > 0) await saveTzMap(sb, tzMap, new Date().toISOString());
+  else tzMap = await loadTzMap(sb);
   const reBucket = tzMap.size > 0;
   const tzOf = (teamId: string) => tzMap.get(teamId);
   const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
