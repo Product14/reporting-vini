@@ -41,9 +41,18 @@ interface RawMeeting {
   status?: string;
   serviceType?: string;
   createdAt?: string; // when the appointment was booked
+  source?: string; // who booked it: "spyne" = the AI agent, "bdc" = the dealer's own staff, etc.
   proposedVinsData?: RawVin[];
   customerData?: { name?: string; extractedName?: string; mobileNumber?: string } | null;
 }
+
+/* This report attributes value to the AI agent, so every appointment number in it (the tiles, from
+ * Q12227) counts only AI-booked appointments. The meetings endpoint, by contrast, returns the rooftop's
+ * ENTIRE appointment book — including the ones the dealer's own BDC booked (often the majority). Filter
+ * to AI-booked so the drill-down matches the count it sits behind; otherwise the list dwarfs the tile
+ * (e.g. Honda DTLA: 152 meetings booked on a day, but only ~23 by the AI). The API ignores a `source`
+ * query param, so we filter client-side. */
+const AI_SOURCE = "spyne";
 // The endpoint returns the meetings array directly under `data` (NOT data.meetings), with pagination alongside.
 interface MeetingsResp { data?: RawMeeting[]; pagination?: { hasNextPage?: boolean; total?: number } }
 
@@ -108,7 +117,8 @@ async function fetchOne(o: FetchOneOpts): Promise<Meeting[]> {
     const resp = await spyneGet<MeetingsResp>(`/leads/dealer/v3/meetings?${qs.toString()}`, o.token);
     const rows = resp?.data;
     if (!Array.isArray(rows) || rows.length === 0) break;
-    for (const r of rows) out.push(normalize(r));
+    // AI-booked only — drop the dealer's own BDC/CRM appointments so this matches the AI's count.
+    for (const r of rows) if ((r.source || "").toLowerCase() === AI_SOURCE) out.push(normalize(r));
     if (!resp?.pagination?.hasNextPage) break;
   }
   return out;
