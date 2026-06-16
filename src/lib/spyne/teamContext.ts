@@ -4,49 +4,32 @@
 
 import { spyneGet, cached } from "./client";
 import { getSupabase } from "@/lib/reports/supabase";
-import { loadTeamTz } from "@/lib/reports/tzStore";
+import { fetchTeamTz } from "@/lib/reports/tzMap";
+import { loadTeamTz, saveTzMap } from "@/lib/reports/tzStore";
 import type { AgentData } from "@/components/reports/data";
 
 type SlotId = AgentData["id"]; // "sales_ib" | "sales_ob" | "service_ib" | "service_ob"
 
 // ───────────────────────── working hours → timezone ─────────────────────────
 
-interface DayHours { is_working: boolean; start_time?: string; end_time?: string }
-interface WorkingHoursRow {
-  teamId: string;
-  enterpriseName?: string;
-  teamName?: string;
-  sales?: Record<string, DayHours> | "N/A";
-  service?: Record<string, DayHours> | "N/A";
-  timezone?: string;
-}
-interface WorkingHoursResp { data?: WorkingHoursRow[] }
-
-/* The rooftop's working-hours record (timezone + per-day sales/service hours), or null. The endpoint is
- * a paginated search; we search by team_id and match exactly (search is fuzzy and may return neighbours).
- * `token` is the host-forwarded credential (prod); omit it to use the env token (local dev). */
-export async function getWorkingHours(teamId: string, token?: string | null): Promise<WorkingHoursRow | null> {
-  if (!teamId) return null;
-  // Cache by team only — the per-team result is identical regardless of which valid token fetched it.
-  return cached(`wh:${teamId}`, async () => {
-    const resp = await spyneGet<WorkingHoursResp>(
-      `/conversation/admin-tools/working-hours?page=1&limit=10&search=${encodeURIComponent(teamId)}`,
-      token,
-    );
-    const row = resp?.data?.find((r) => r.teamId === teamId);
-    return row ?? null;
-  });
-}
-
-/* The rooftop's IANA timezone (e.g. "America/Los_Angeles"), or null when unknown. Prefers the live
- * working-hours API; falls back to the persisted team_tz table (seeded by the sync) so the "Today"
- * window stays store-local even when the host doesn't forward an admin-scoped token. */
+/* The rooftop's IANA timezone (e.g. "America/Los_Angeles"), or null when unknown.
+ *
+ * Resolution order:
+ *   1. LIVE get-working-days (customer-scoped, keyed by teamId) — works in prod with the dealer's own
+ *      forwarded token, and needs no admin credential, so it resolves ANY rooftop incl. brand-new ones.
+ *      On success we also upsert team_tz, so the token-less sync picks up new rooftops without a backfill.
+ *   2. Persisted team_tz — fallback when the live call can't be reached (endpoint down / network blip).
+ * Both degrade to null → caller keeps prior behavior (UTC window). */
 export async function getStoreTimeZone(teamId: string, token?: string | null): Promise<string | null> {
-  const wh = await getWorkingHours(teamId, token);
-  if (wh?.timezone) return wh.timezone;
+  if (!teamId) return null;
+  const live = await cached(`tz:${teamId}`, () => fetchTeamTz(teamId, token));
+  if (live) {
+    const sb = getSupabase();
+    if (sb) await saveTzMap(sb, new Map([[teamId, live]]), new Date().toISOString()); // self-heal team_tz for the sync
+    return live;
+  }
   const sb = getSupabase();
-  if (!sb) return null;
-  return cached(`tz:${teamId}`, () => loadTeamTz(sb, teamId));
+  return sb ? loadTeamTz(sb, teamId) : null;
 }
 
 // ───────────────────────── onboarded agents → slot ids ─────────────────────────

@@ -2,7 +2,7 @@ import { fetchEmbedRows } from "@/lib/metabase";
 import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, SYNC_STATE } from "@/lib/reports/supabase";
 import { aggregate } from "@/lib/reports/aggregate";
 import { mergeStlEarliest, reconcileHistoricalStl } from "@/lib/reports/stlSync";
-import { fetchTzMap, storeLocalDay, teamsInRows } from "@/lib/reports/tzMap";
+import { fetchTeamTzs, storeLocalDay, teamsInRows } from "@/lib/reports/tzMap";
 import { saveTzMap, loadTzMap } from "@/lib/reports/tzStore";
 import type { RawRow } from "@/lib/reports/schema";
 
@@ -69,21 +69,14 @@ async function handle(request: Request): Promise<Response> {
     return Response.json({ ok: false, error: msg }, { status });
   };
 
-  // Live Spyne working-hours map when a token is present (then persist it); otherwise fall back to the
-  // persisted team_tz table — so store-local bucketing survives a token outage instead of reverting to UTC.
-  let tzMap = await fetchTzMap();
-  if (tzMap.size > 0) await saveTzMap(sb, tzMap, new Date().toISOString());
-  else tzMap = await loadTzMap(sb);
-  const reBucket = tzMap.size > 0;
-  const tzOf = (teamId: string) => tzMap.get(teamId);
-  const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
-
   // Pull raw rows. Q12227's activity_day param is single-date equality (= {{activity_day}}), so the
   // incremental path pulls ONE day per call across the window (each ~3MB) instead of the 382MB full
   // table. Without the param (or ?full=1) it falls back to the full-table pull + client-side filter.
+  // Always widen the incremental start by one UTC day so store-local re-bucketing has full coverage at
+  // windowStart (the output is filtered by windowStart, so the extra day is harmless when not re-bucketing).
   const dateParam = process.env.METABASE_RAW_DATE_PARAM;
   const perDay = Boolean(dateParam && !full);
-  const pullStart = !full && reBucket ? minusDays(windowStart, 1) : windowStart;
+  const pullStart = full ? windowStart : minusDays(windowStart, 1);
   let raw: RawRow[];
   if (perDay) {
     raw = [];
@@ -98,6 +91,16 @@ async function handle(request: Request): Promise<Response> {
     raw = rows as RawRow[];
   }
   if (!raw.length) return fail("Metabase pull returned 0 rows across the window — aborting before delete (pull likely failed).");
+
+  // Resolve store timezones for the teams in this pull via the token-less get-working-days endpoint
+  // (covers brand-new rooftops with no admin credential), persist them, then layer over the cache.
+  const live = await fetchTeamTzs(teamsInRows(raw), process.env.SPYNE_API_TOKEN || null);
+  await saveTzMap(sb, live, new Date().toISOString());
+  const tzMap = await loadTzMap(sb);
+  for (const [k, v] of live) tzMap.set(k, v);
+  const reBucket = tzMap.size > 0;
+  const tzOf = (teamId: string) => tzMap.get(teamId);
+  const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
 
   let stlEarliest;
   let stlHistoricalPatched = 0;

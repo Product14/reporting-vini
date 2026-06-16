@@ -17,7 +17,7 @@ import { Agent } from "undici";
 import { createClient } from "@supabase/supabase-js";
 import { aggregate } from "../src/lib/reports/aggregate";
 import { mergeStlEarliest, reconcileHistoricalStl } from "../src/lib/reports/stlSync";
-import { fetchTzMap, storeLocalDay } from "../src/lib/reports/tzMap";
+import { fetchTeamTzs, storeLocalDay, teamsInRows } from "../src/lib/reports/tzMap";
 import { saveTzMap, loadTzMap } from "../src/lib/reports/tzStore";
 import type { RawRow } from "../src/lib/reports/schema";
 
@@ -98,24 +98,6 @@ async function insertAll(sb: any, table: string, rows: object[]) {
 
   const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });
 
-  // Resolve store timezones up front. Prefer the live Spyne working-hours API; when it returns a map,
-  // PERSIST it to team_tz so future token-less runs (and /api/reports) stay store-local. When the live
-  // call comes back empty (no/expired token), fall back to the persisted map. Either non-empty source →
-  // re-bucket activity_day + hour by store-local. Both empty → UTC bucketing (prior behavior).
-  let tzMap = await fetchTzMap();
-  if (tzMap.size > 0) {
-    console.log(`tz: ${tzMap.size} rooftops from live Spyne API`);
-    await saveTzMap(sb, tzMap, new Date().toISOString());
-  } else {
-    tzMap = await loadTzMap(sb);
-    if (tzMap.size > 0) console.log(`tz: live API unavailable → ${tzMap.size} rooftops from persisted team_tz`);
-  }
-  const reBucket = tzMap.size > 0;
-  const tzOf = (teamId: string) => tzMap.get(teamId);
-  const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
-  if (reBucket) console.log(`tz: ${tzMap.size} rooftops mapped → store-local re-bucketing ON`);
-  else console.log("tz: no live token and empty team_tz → UTC bucketing (no re-bucket)");
-
   // windowStart = where we delete-and-replace from (matched on the FINAL, possibly re-bucketed,
   // activity_day). Full/file rebuilds replace everything.
   let windowStart = "1900-01-01";
@@ -129,10 +111,10 @@ async function insertAll(sb: any, table: string, rows: object[]) {
     raw = await fetchRows({});
   } else {
     windowStart = shiftDays(today, -(days - 1));
-    // When re-bucketing, a store-local day draws from events whose UTC activity_day is ±1 — pull one
-    // extra UTC day back so the store-local windowStart is fully covered (the future edge is the usual
-    // "today lags" tail). The output filter below trims anything that re-buckets before windowStart.
-    const pullStart = reBucket ? shiftDays(windowStart, -1) : windowStart;
+    // Re-bucketing a store-local day draws from events whose UTC activity_day is ±1, so pull one extra
+    // UTC day back to fully cover the store-local windowStart. Harmless when not re-bucketing — the
+    // output filter below trims anything that lands before windowStart.
+    const pullStart = shiftDays(windowStart, -1);
     console.log(`INCREMENTAL pull, ${pullStart}..${today} (param "${DATE_PARAM}", replace from ${windowStart})…`);
     raw = [];
     for (let d = pullStart; d <= today; d = shiftDays(d, 1)) {
@@ -144,6 +126,19 @@ async function insertAll(sb: any, table: string, rows: object[]) {
 
   console.log("raw rows:", raw.length);
   if (!raw.length) throw new Error("0 raw rows across the window — refusing to wipe the aggregate");
+
+  // Resolve store timezones for exactly the teams in this pull, via the token-less get-working-days
+  // endpoint — so even brand-new rooftops bucket store-local without an admin credential. Persist the
+  // result to team_tz, then layer it over the persisted cache (covers any team the live call missed).
+  const live = await fetchTeamTzs(teamsInRows(raw), process.env.SPYNE_API_TOKEN || null);
+  await saveTzMap(sb, live, new Date().toISOString());
+  const tzMap = await loadTzMap(sb);
+  for (const [k, v] of live) tzMap.set(k, v);
+  const reBucket = tzMap.size > 0;
+  const tzOf = (teamId: string) => tzMap.get(teamId);
+  const dayOf = (team: string, activityTs: string, rawDay: string) => storeLocalDay(activityTs, tzOf(team), rawDay);
+  if (reBucket) console.log(`tz: ${live.size} live + ${tzMap.size} total rooftops → store-local re-bucketing ON`);
+  else console.log("tz: get-working-days unreachable and empty team_tz → UTC bucketing (no re-bucket)");
 
   let stlEarliest;
   try {
