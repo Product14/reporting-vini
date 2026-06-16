@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import React, { useEffect, useRef, useState } from "react";
-import { Bucket, BUCKET_LABELS, RAG } from "./data";
+import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
+import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
 
 export * from "./data";
 
@@ -1382,6 +1383,140 @@ export function HighlightRow({ kind, text, value }: { kind: "win" | "miss"; text
       </span>
       <p className="text-[12.5px] text-[#374151] flex-1">{text}</p>
       {value && <span className="text-[12.5px] font-bold tabular-nums text-[#111] flex-none">{value}</span>}
+    </div>
+  );
+}
+
+/* ── live appointments/meetings (Spyne leads/dealer/v3/meetings) ──────────────────────────────────
+ * The list of leads behind an appointment count, and the upcoming-bookings card. `MeetingsList` is the
+ * shared row renderer; `MeetingsModal` is the click-through that self-fetches via /api/meetings. */
+
+// Format a meeting's ISO start time in the meeting's own timezone, e.g. "Mon, Jun 16 · 2:30 PM".
+function formatMeetingWhen(iso: string, tz?: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const opts: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  try {
+    return new Intl.DateTimeFormat("en-US", { ...opts, timeZone: tz || undefined }).format(d);
+  } catch {
+    return new Intl.DateTimeFormat("en-US", opts).format(d);
+  }
+}
+function meetingStatusColor(s: string): string {
+  const v = (s || "").toLowerCase();
+  if (v.includes("cancel") || v.includes("no-show") || v.includes("no_show") || v.includes("no show")) return "#dc2626";
+  if (v.includes("complete") || v.includes("confirm") || v.includes("show")) return "#10b981";
+  return "#6366f1"; // scheduled / default
+}
+
+export function MeetingsList({ meetings }: { meetings: Meeting[] }) {
+  return (
+    <div className="divide-y divide-[#f3f4f6]">
+      {meetings.map((m, i) => (
+        <div key={m.id || i} className="flex items-center justify-between gap-3 px-6 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-[13px] font-semibold text-[#111]">{m.customer || "—"}</p>
+            <p className="truncate text-[11px] text-[#6b7280]">
+              {m.vehicle || "Vehicle TBD"}
+              {m.phone && <span className="text-[#9ca3af]"> · {m.phone}</span>}
+            </p>
+          </div>
+          <div className="flex-none text-right">
+            <p className="text-[12px] font-medium text-[#111]">{formatMeetingWhen(m.when, m.tz)}</p>
+            <span className="inline-flex items-center gap-1.5">
+              {m.serviceType && (
+                <span className="text-[9px] font-semibold uppercase tracking-wide text-[#9ca3af]">{m.serviceType}</span>
+              )}
+              <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: meetingStatusColor(m.status) }}>{m.status || "—"}</span>
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* A self-fetching, scrollable list of meetings in a centered modal. Refetches whenever it opens or its
+ * fetch params change; shows loading / error / empty / list. Used for the click-through behind an
+ * appointment count. */
+export function MeetingsModal({
+  open,
+  onClose,
+  title,
+  sub,
+  fetchOpts,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  sub?: string;
+  fetchOpts: MeetingFetchOpts;
+}) {
+  const [state, setState] = useState<{ loading: boolean; meetings: Meeting[]; error: boolean }>({ loading: true, meetings: [], error: false });
+  // Refetch only when the actual params change (object identity would refetch every render).
+  const key = JSON.stringify([fetchOpts.teamId, fetchOpts.service, fetchOpts.scope, fetchOpts.bucket, fetchOpts.start, fetchOpts.end]);
+
+  useEffect(() => {
+    if (!open) return;
+    let on = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setState({ loading: true, meetings: [], error: false });
+    fetchMeetings(fetchOpts)
+      .then((r) => { if (on) setState({ loading: false, meetings: r.meetings, error: Boolean(r.error) }); })
+      .catch(() => { if (on) setState({ loading: false, meetings: [], error: true }); });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, key]);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={onClose} aria-hidden />
+      <div className="relative flex max-h-[80vh] w-full max-w-[520px] flex-col overflow-hidden rounded-3xl border border-[#ece6fb] bg-white shadow-[0_24px_70px_rgba(16,24,40,0.3)]">
+        <div className="flex items-start justify-between gap-3 border-b border-[#f0f0f0] px-6 py-4">
+          <div className="min-w-0">
+            <p className="text-[15px] font-extrabold tracking-[-0.01em] text-[#111]">{title}</p>
+            {sub && <p className="mt-0.5 text-[11.5px] text-[#6b7280]">{sub}</p>}
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-7 w-7 flex-none items-center justify-center rounded-full text-[18px] leading-none text-[#9ca3af] transition-colors hover:bg-[#f3f4f6] hover:text-[#111]"
+          >
+            ×
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {state.loading ? (
+            <div className="flex items-center justify-center py-16">
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-[#e5e7eb] border-t-[#813fed]" role="status" aria-label="Loading" />
+            </div>
+          ) : state.error ? (
+            <div className="p-6">
+              <EmptyState icon="⚠️" title="Couldn't load appointments" body="We couldn't reach the appointments service just now. Close this and try again in a moment." />
+            </div>
+          ) : state.meetings.length ? (
+            <MeetingsList meetings={state.meetings} />
+          ) : (
+            <div className="p-6">
+              <EmptyState icon="📅" title="No appointments to show" body="No booked appointments fall in this period for this rooftop." />
+            </div>
+          )}
+        </div>
+        {!state.loading && !state.error && state.meetings.length > 0 && (
+          <div className="border-t border-[#f0f0f0] px-6 py-2.5 text-[11px] text-[#9ca3af]">
+            {state.meetings.length} appointment{state.meetings.length === 1 ? "" : "s"}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

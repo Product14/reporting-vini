@@ -9,7 +9,7 @@
 
 import { AGENTS as MOCK_AGENTS, type AgentData } from "@/components/reports/data";
 import type { FetchResult, Basis } from "@/components/reports/liveData";
-import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow } from "./schema";
+import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow } from "./schema";
 
 const AGENT_TYPE_BY_ID: Record<AgentData["id"], string> = {
   sales_ib: "Sales Inbound",
@@ -56,11 +56,22 @@ export interface BuildInput {
   appointments?: AppointmentRow[];
   callbacks?: CallbackRow[];
   campaigns?: CampaignRow[];
+  // Outbound disposition mix (from card 12231 via report_outcomes); attached to the matching outbound
+  // agent. Replaces the dead Q12227 `outbound_outcome` path (that column never existed in Q12227).
+  outcomes?: OutcomeRow[];
   // Slot ids the dealer has actually onboarded (from the Spyne onboarded-agents API). When provided,
   // the report is GATED to these slots — agents the dealer hasn't paid for are dropped (personas kept
   // as-is). null/undefined → don't gate (show all four), the previous behavior.
   onboardedSlots?: Set<AgentData["id"]> | null;
+  // EXACT window-distinct lead counts per agent_type (from report_lead_counts). When present, used for
+  // "Leads dialed" (= unique leads contacted) + distinct appointments instead of summing per-day
+  // distincts (which over-counts cross-day leads). undefined → fall back to the daily sum.
+  leadCounts?: LeadCounts;
+  priorLeadCounts?: LeadCounts;
 }
+
+// Per-agent_type window-distinct lead counts (keyed by agent_type label, e.g. "Sales Outbound").
+export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number }>;
 
 // Format an ISO timestamp as a short, locale-stable "when" label (e.g. "Jun 11 · 9:30 AM" UTC).
 function fmtWhen(iso: string | null): string {
@@ -90,7 +101,7 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, onboardedSlots }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, onboardedSlots, leadCounts, priorLeadCounts }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
   // Rooftop-level detail mapped once into the UI shapes. Appointments/callbacks attach to inbound
@@ -107,16 +118,24 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     agentType: c.agent_type, name: c.campaign, useCase: c.use_case ?? "", enrolled: c.enrolled, appts: c.appointments,
     apptRate: c.appt_rate_pct ?? 0, warmLeads: c.warm_leads, optOuts: c.opt_outs, noReach: c.no_reach,
   }));
+  // Outbound disposition slices — strip the numeric sort-prefix ("1 No reach" → "No reach") for display.
+  const outcomeItems = (outcomes ?? []).map((o) => ({
+    agentType: o.agent_type, label: o.outcome_bucket.replace(/^\d+\s+/, ""), value: o.mappings,
+  }));
 
   // prior-window per-agent basis (drives report.deltas + fleet deltas)
   const prior: Record<string, Basis> = {};
   for (const base of MOCK_AGENTS) {
-    const pr = priorDaily.filter((r) => r.agent_type === AGENT_TYPE_BY_ID[base.id]);
+    const type = AGENT_TYPE_BY_ID[base.id];
+    const pr = priorDaily.filter((r) => r.agent_type === type);
+    const plc = priorLeadCounts?.[type];
     prior[base.id] = {
       calls: sum(pr, (r) => r.calls),
-      qualified: sum(pr, (r) => r.qualified),
-      appointments: sum(pr, (r) => r.appointments),
-      leads: sum(pr, (r) => r.leads_attempted),
+      // unique-lead basis when available (matches the displayed conversations/qualified), else daily sum
+      conversations: plc ? plc.connected : sum(pr, (r) => r.connected),
+      qualified: plc ? plc.qualified : sum(pr, (r) => r.qualified),
+      appointments: plc ? plc.apptLeads : sum(pr, (r) => r.appointments),
+      leads: plc ? plc.contacted : sum(pr, (r) => r.leads_attempted),
       sms: sum(pr, (r) => r.sms_sent),
     };
   }
@@ -137,10 +156,12 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     // residual mock visuals are cleared at the end of the loop.
 
     const inbound = base.dir === "Inbound";
+    const lc = leadCounts?.[type]; // exact window-distinct counts for this agent_type (if available)
     const calls = sum(rows, (r) => r.calls);
     const connected = sum(rows, (r) => r.connected);
     const qualified = sum(rows, (r) => r.qualified);
-    const appointments = sum(rows, (r) => r.appointments);
+    // distinct booked leads over the window (exact); fall back to the per-day-distinct sum (overcounts)
+    const appointments = lc ? lc.apptLeads : sum(rows, (r) => r.appointments);
     const smsSent = sum(rows, (r) => r.sms_sent);
     const smsThreads = sum(rows, (r) => r.sms_threads);
     const afterHours = sum(rows, (r) => r.after_hours);
@@ -149,9 +170,15 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     const callbacks = sum(rows, (r) => r.callbacks);
     const queryResolved = sum(rows, (r) => r.query_resolved);
     const optOuts = sum(rows, (r) => r.opt_outs);
-    const leadsAttempted = sum(rows, (r) => r.leads_attempted);
+    // "Leads dialed/attempted" = unique leads CONTACTED over the window (distinct lead_id, any touch).
+    // The daily sum double-counts a lead touched on multiple days; window-distinct fixes that.
+    const leadsAttempted = lc ? lc.contacted : sum(rows, (r) => r.leads_attempted);
     const connectRate = calls ? Math.round((connected / calls) * 100) : 0;
     const aht = connected ? talkSeconds / connected : 0;
+    // Unique-lead funnel stages (distinct leads over the window). Falls back to event counts when the
+    // lead-day counts are unavailable so the funnel still renders. contacted ≥ connected ≥ qualified ≥ appt.
+    const leadConnected = lc ? lc.connected : connected;
+    const leadQualified = lc ? lc.qualified : qualified;
 
     // ── metrics: live-backed fields only, real 0 stays 0. Fields with NO Q12227 source
     //    (showed/deals/revenue/cost) are zeroed — never fabricated — and surfaced as "coming soon"
@@ -172,6 +199,10 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       smsSent,
       optOuts,
     };
+
+    // ── unique-lead funnel (distinct leads at each stage) → fleet + per-agent "Outreach → conversation
+    //    → qualified → appointment" funnels. Every stage is window-distinct, so no lead is counted twice. ──
+    a.leadFunnel = { contacted: leadsAttempted, connected: leadConnected, qualified: leadQualified, appt: appointments };
 
     // ── quality: only the live-backed bits. csat/sentiment have no Q12227 column → zeroed (the UI
     //    hides them); handleTime is "—" when there's no talk time, never a mock value. ──
@@ -204,8 +235,9 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     a.report = {
       ...a.report,
       leadsAttempted,
-      abr: qualified ? Math.round((appointments / qualified) * 100) : 0,
-      qualifiedPct: connected ? Math.round((qualified / connected) * 100) : 0,
+      // conversion rates on a consistent unique-lead basis (appt-leads / qualified-leads / connected-leads)
+      abr: leadQualified ? Math.round((appointments / leadQualified) * 100) : 0,
+      qualifiedPct: leadConnected ? Math.round((leadQualified / leadConnected) * 100) : 0,
       callFlow: {
         total: calls,
         answered: connected,
@@ -232,15 +264,13 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
         ...a.report.summary,
         conversations: connected,
         apptsBooked: appointments,
-        bookingRate: qualified ? Math.round((appointments / qualified) * 100) : 0,
+        bookingRate: leadQualified ? Math.round((appointments / leadQualified) * 100) : 0,
       },
     };
 
-    // ── outbound-only: disposition mix (from outbound_outcome) → "Outbound outcomes" widget ──
-    if (!inbound) {
-      const outcomes = rollupDim(bd, "outcome");
-      if (outcomes.length) a.report.outcomes = outcomes.slice(0, 8).map((o) => ({ label: o.value, value: o.count }));
-    }
+    // ── outbound disposition mix → "Outbound outcomes" widget. Sourced from card 12231
+    //    (report_outcomes), attached in the cumulative-detail block below (it's rooftop-wide, not
+    //    window-scoped, so it must survive the quiet-agent zeroing — like campaigns). ──
 
     // ── inbound-only: leads by source + speed to lead. Always assigned from live data (or cleared) —
     //    never left as the cloned mock when there's nothing live to show. ──
@@ -284,7 +314,8 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       const abrPrev = pb.qualified ? Math.round((pb.appointments / pb.qualified) * 100) : 0;
       a.report.deltas = {
         leadsAttempted: pctDelta(leadsAttempted, pb.leads),
-        leadsQualified: pctDelta(qualified, pb.qualified),
+        // unique-lead basis (matches the funnel's qualified stage), not the qualified-events flag-sum
+        leadsQualified: pctDelta(leadQualified, pb.qualified),
         appointments: pctDelta(appointments, pb.appointments),
         totalCalls: pctDelta(calls, pb.calls),
         totalSms: pctDelta(smsSent, pb.sms),
@@ -310,6 +341,11 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       const mine = campaignItems.filter((c) => c.agentType === type);
       a.report.activeCampaigns = mine.length
         ? mine.map((c) => ({ name: c.name, useCase: c.useCase, enrolled: c.enrolled, appts: c.appts, apptRate: c.apptRate, warmLeads: c.warmLeads, optOuts: c.optOuts, noReach: c.noReach }))
+        : undefined;
+      // Disposition mix, biggest slice first (the widget computes its own percentages from value).
+      const mineOutcomes = outcomeItems.filter((o) => o.agentType === type);
+      a.report.outcomes = mineOutcomes.length
+        ? [...mineOutcomes].sort((x, y) => y.value - x.value).slice(0, 8).map((o) => ({ label: o.label, value: o.value }))
         : undefined;
     }
 

@@ -3,7 +3,7 @@
  * AgentData[] the reporting UI already consumes. Replaces the old ~84 Metabase card round-trips.
  * Used by /reports (Overview) and /reports/agents (By agent) — no component/JSX changes. */
 
-import { type AgentData, type Bucket } from "./data";
+import { type AgentData, type Bucket, type Meeting, type MeetingsResult } from "./data";
 import { type Account } from "./accounts";
 
 // Maps the CSM sheet's agent-type labels to this report's agent ids.
@@ -80,6 +80,10 @@ export function addDay(iso: string): string {
 
 const pctDelta = (curr: number, prev: number): number => (prev ? Math.round(((curr - prev) / prev) * 100) : 0);
 
+/* "Value created" = appointments × cost-per-appointment. Single source of truth so the Overview (fleet)
+ * and per-agent pages compute it identically. apptCost is UI state (localStorage), passed in. */
+export const appointmentValue = (appointments: number, apptCost: number): number => appointments * apptCost;
+
 export interface LiveOpts {
   teamId?: string;
   bucket?: Bucket;
@@ -92,6 +96,7 @@ export interface LiveOpts {
 // Minimal per-agent totals for the prior equal-length window — the basis for real period deltas.
 export interface Basis {
   calls: number;
+  conversations: number;
   qualified: number;
   appointments: number;
   leads: number;
@@ -124,23 +129,48 @@ export interface FleetLive {
   csat: number;
   sentiment: number;
   connectRate: number;
-  deltas: { appointments: number; calls: number; qualified: number; sms: number };
+  deltas: { appointments: number; calls: number; conversations: number; qualified: number; sms: number };
   funnel: { label: string; value: number }[];
 }
 
 export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>): FleetLive {
   const sum = (f: (a: AgentData) => number) => agents.reduce((s, a) => s + f(a), 0);
   const calls = sum((a) => a.metrics.calls);
-  const conversations = sum((a) => a.metrics.conversations);
-  const qualified = sum((a) => a.metrics.qualified);
-  const appointments = sum((a) => a.metrics.appointments);
+  const connectedCalls = sum((a) => a.metrics.conversations); // connected CALLS — the answer-rate basis
   const smsSent = sum((a) => a.metrics.smsSent);
   const afterHours = sum((a) => a.metrics.afterHours);
   const talkMinutes = sum((a) => a.metrics.talkMinutes);
   const optOuts = sum((a) => a.metrics.optOuts);
+
+  // Unique-lead stages (distinct leads, summed across agents). The displayed "Conversations"/"Qualified"
+  // counts + the funnel all use these, so a given label shows ONE number everywhere. connectRate stays on
+  // connected CALLS (it's an answer rate). Falls back to event counts when no agent carries leadFunnel.
+  const hasLeadFunnel = agents.some((a) => a.leadFunnel);
+  const lf = (pick: (f: NonNullable<AgentData["leadFunnel"]>) => number) =>
+    agents.reduce((s, a) => s + (a.leadFunnel ? pick(a.leadFunnel) : 0), 0);
+  const conversations = hasLeadFunnel ? lf((f) => f.connected) : connectedCalls; // unique connected leads
+  const qualified = hasLeadFunnel ? lf((f) => f.qualified) : sum((a) => a.metrics.qualified); // unique qualified leads
+  const appointments = sum((a) => a.metrics.appointments); // already lead-based (build sets metrics.appointments = apptLeads)
+
   // call-weighted quality so a low-volume agent can't swing the fleet number
   const wAvg = (f: (a: AgentData) => number) => (calls ? agents.reduce((s, a) => s + f(a) * a.metrics.calls, 0) / calls : 0);
   const pSum = (f: (b: Basis) => number) => agents.reduce((s, a) => s + (prior?.[a.id] ? f(prior[a.id]) : 0), 0);
+
+  // Funnel: every stage is distinct leads (monotonic: contacted ≥ connected ≥ qualified ≥ appt). Falls
+  // back to activity volumes only when no agent carries leadFunnel (pure-mock / no-backend).
+  const funnel = hasLeadFunnel
+    ? [
+        { label: "Leads reached", value: lf((f) => f.contacted) },
+        { label: "Conversations", value: conversations },
+        { label: "Qualified", value: qualified },
+        { label: "Appointments", value: appointments },
+      ]
+    : [
+        { label: "Outreach & calls", value: calls + smsSent },
+        { label: "Conversations", value: connectedCalls },
+        { label: "Qualified / engaged", value: qualified },
+        { label: "Appointments set", value: appointments },
+      ];
   return {
     calls,
     conversations,
@@ -152,19 +182,15 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     optOuts,
     csat: +wAvg((a) => a.quality.csat).toFixed(1),
     sentiment: Math.round(wAvg((a) => a.quality.sentiment)),
-    connectRate: calls ? Math.round((conversations / calls) * 100) : 0,
+    connectRate: calls ? Math.round((connectedCalls / calls) * 100) : 0,
     deltas: {
       appointments: pctDelta(appointments, pSum((b) => b.appointments)),
       calls: pctDelta(calls, pSum((b) => b.calls)),
+      conversations: pctDelta(conversations, pSum((b) => b.conversations)),
       qualified: pctDelta(qualified, pSum((b) => b.qualified)),
       sms: pctDelta(smsSent, pSum((b) => b.sms)),
     },
-    funnel: [
-      { label: "Outreach & calls", value: calls + smsSent },
-      { label: "Conversations", value: conversations },
-      { label: "Qualified / engaged", value: qualified },
-      { label: "Appointments set", value: appointments },
-    ],
+    funnel,
   };
 }
 
@@ -231,4 +257,39 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
 
   CACHE.set(cacheKey, result);
   return result;
+}
+
+export interface MeetingFetchOpts {
+  teamId: string;
+  enterpriseId?: string; // host-forwarded on the iframe URL; else the server decodes it from the token
+  service?: "sales" | "service" | "both"; // default "both" (rooftop-wide)
+  scope?: "window" | "upcoming"; // "upcoming" = from now forward; "window" = the report's date range
+  bucket?: Bucket;
+  start?: string;
+  end?: string;
+  spyneToken?: string; // host-forwarded Spyne token (prod); omit locally (server uses env)
+}
+
+/* Fetch the meeting/appointment records behind an appointment count (scope:"window") or the upcoming
+ * bookings (scope:"upcoming") via /api/meetings, which proxies the Spyne product API server-side so the
+ * token never reaches the browser. Returns an empty list on any error → the card/modal shows its empty
+ * state rather than breaking. */
+export async function fetchMeetings(opts: MeetingFetchOpts): Promise<MeetingsResult> {
+  const { teamId, enterpriseId, service = "both", scope = "window", bucket, start, end, spyneToken } = opts;
+  const query: Record<string, string> = { team_id: teamId, serviceType: service, scope };
+  if (enterpriseId) query.enterprise_id = enterpriseId;
+  if (scope === "window") {
+    if (start && end) { query.start = start; query.end = end; }
+    else query.bucket = bucket ?? "last30";
+  }
+  try {
+    const qs = new URLSearchParams(query);
+    const headers = spyneToken ? { Authorization: `Bearer ${spyneToken}` } : undefined;
+    const r = await fetch(`/api/meetings?${qs.toString()}`, { cache: "no-store", headers });
+    const j = (await r.json().catch(() => null)) as Partial<MeetingsResult> | null;
+    if (!r.ok || !j || !Array.isArray(j.meetings)) return { meetings: [], total: 0 };
+    return { meetings: j.meetings as Meeting[], total: typeof j.total === "number" ? j.total : j.meetings.length };
+  } catch {
+    return { meetings: [], total: 0 };
+  }
 }

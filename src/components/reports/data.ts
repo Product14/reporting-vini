@@ -84,6 +84,10 @@ export interface AgentData {
   activityRows: string[][];
   trend7: number[]; // last 7 days of the headline volume (oldest → newest)
   report: AgentReport; // everything the agent-wise mockups (Sales IB / Sales OB) call for
+  // Unique-lead funnel stages (distinct leads over the window) — drives the Outreach→conversation→
+  // qualified→appointment funnel on both the Overview (fleet sum) and per-agent pages. Set live by
+  // build.ts; absent on mock agents (those funnels fall back to event-count metrics).
+  leadFunnel?: { contacted: number; connected: number; qualified: number; appt: number };
 }
 
 /* ────────────── Agent-wise report blocks (from the IB / OB mockups) ────────────── */
@@ -175,6 +179,28 @@ export interface UpcomingAppt {
   vehicle: string;
   status: string; // booked / confirmed / cancelled …
 }
+/* A single appointment/meeting record from the Spyne meetings API (leads/dealer/v3/meetings),
+ * normalized for display + drill-down. Powers the "Upcoming appointments" card and the list of
+ * leads behind any appointment count. `when` is the raw ISO start time — the UI formats it in `tz`. */
+export interface Meeting {
+  id: string;
+  leadId: string | null;
+  customer: string;
+  phone: string | null;
+  vehicle: string; // "2026 Mercedes-Benz C-Class C 300", or "" when the API has no vehicle data
+  when: string; // meetingStartTime, ISO 8601 (UTC)
+  tz: string | null; // IANA timezone the meeting is scheduled in
+  status: string; // scheduled / confirmed / cancelled / completed / no_show …
+  serviceType: string; // "sales" | "service"
+  assignedTo: string | null;
+  intent: string | null;
+  bookedAt: string | null; // createdAt — when the appointment was booked (ISO 8601, UTC)
+}
+export interface MeetingsResult {
+  meetings: Meeting[];
+  total: number;
+  error?: string;
+}
 export interface FollowUp {
   customer: string; // customer_name
   due: string; // callback_due (formatted)
@@ -241,7 +267,7 @@ export interface AgentReport {
   // outbound-only
   activeCampaigns?: ActiveCampaign[];
   noInteraction?: NoInteraction;
-  outcomes?: OutcomeSlice[]; // outbound disposition mix (from outbound_outcome), biggest first
+  outcomes?: OutcomeSlice[]; // outbound disposition mix (from card 12231 / report_outcomes), biggest first
 
   // inbound-only — the 3-pitch story (vs industry) + month-on-month before/after
   benchmarks?: Benchmark[];

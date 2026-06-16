@@ -15,7 +15,7 @@
 const BASE = process.env.SPYNE_API_BASE || "https://api.spyne.ai";
 
 // Per-request token wins (prod, host-forwarded); env token is the local-dev fallback.
-function resolveToken(override?: string | null): string | null {
+export function resolveToken(override?: string | null): string | null {
   const t = (override && override.trim()) || process.env.SPYNE_API_TOKEN;
   return t && t.trim() ? t.trim() : null;
 }

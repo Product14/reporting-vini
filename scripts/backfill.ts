@@ -155,14 +155,16 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   const agg = aggregate(raw, { tzOf: reBucket ? tzOf : undefined, stlEarliest });
   const daily = agg.daily.filter((r) => r.activity_day >= windowStart);
   const breakdown = agg.breakdown.filter((r) => r.activity_day >= windowStart);
-  console.log("daily:", daily.length, " breakdown:", breakdown.length);
+  const leadDays = agg.leadDays.filter((r) => r.activity_day >= windowStart);
+  console.log("daily:", daily.length, " breakdown:", breakdown.length, " lead_days:", leadDays.length);
 
-  for (const t of ["agent_daily", "agent_daily_breakdown"]) {
+  for (const t of ["agent_daily", "agent_daily_breakdown", "agent_lead_days"]) {
     const { error } = await sb.from(t).delete().gte("activity_day", windowStart);
     if (error) throw new Error(`${t} delete: ${error.message}`);
   }
   await insertAll(sb, "agent_daily", daily);
   await insertAll(sb, "agent_daily_breakdown", breakdown);
+  await insertAll(sb, "agent_lead_days", leadDays);
 
   // ── rooftop-level detail: appointments (12233) + callbacks (12234) + campaigns (12232) → detail
   //    tables. 12233/12234 carry a rooftop NAME (mapped to team_id via the map Q12227 carries);
@@ -199,12 +201,27 @@ async function insertAll(sb: any, table: string, rows: object[]) {
       }
     }
 
-    for (const [t, rows] of [["report_appointments", apptRows], ["report_callbacks", cbRows], ["report_campaigns", campRows]] as const) {
+    // 12231 (outbound-outcomes-bucketed): same shape as 12232 — filter per outbound agent_type, expect
+    // a team_id column (the card must GROUP BY team_id), TAG with the agent_type we filtered on. Rows
+    // without a team_id are dropped, so until 12231 emits team_id the table stays empty (widget keeps
+    // its empty state). pct is recomputed downstream; we store only the raw `mappings` count.
+    let outs: Record<string, unknown>[] = [];
+    const outcomeRows: object[] = [];
+    for (const at of ["Sales Outbound", "Service Outbound"]) {
+      const rows = await fetchCard(12231, { agent_type: at });
+      outs = outs.concat(rows);
+      for (const o of rows) {
+        const team = String(o.team_id ?? ""), bucket = String(o.outcome_bucket ?? "");
+        if (team && bucket) outcomeRows.push({ team_id: team, agent_type: at, outcome_bucket: bucket, mappings: n(o.mappings) });
+      }
+    }
+
+    for (const [t, rows] of [["report_appointments", apptRows], ["report_callbacks", cbRows], ["report_campaigns", campRows], ["report_outcomes", outcomeRows]] as const) {
       const { error: delErr } = await sb.from(t).delete().gte("synced_at", "1900-01-01");
       if (delErr) throw new Error(`${t} delete: ${delErr.message}`);
       await insertAll(sb, t, rows);
     }
-    console.log(`detail: ${apptRows.length}/${appts.length} appointments + ${cbRows.length}/${cbs.length} callbacks + ${campRows.length}/${camps.length} campaigns synced.`);
+    console.log(`detail: ${apptRows.length}/${appts.length} appointments + ${cbRows.length}/${cbs.length} callbacks + ${campRows.length}/${camps.length} campaigns + ${outcomeRows.length}/${outs.length} outcomes synced.`);
   } catch (e) {
     console.warn(`detail sync skipped: ${(e as Error).message} — has migration 0002 been applied?`);
   }

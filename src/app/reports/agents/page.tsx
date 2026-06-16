@@ -9,7 +9,8 @@ import {
   agentById,
   Bucket,
   FollowUp,
-  UpcomingAppt,
+  Meeting,
+  MeetingsList,
   BUCKET_LABELS,
   CalibratingBanner,
   Card,
@@ -23,6 +24,7 @@ import {
   GhostPreview,
   HOUR_LABELS,
   DayTrend,
+  MeetingsModal,
   ProgressBar,
   QueryBars,
   RAG_STYLE,
@@ -36,7 +38,7 @@ import {
   TrendBars,
 } from "@/components/reports/kit";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, addDay, peekAgents, tzShortLabel, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, fetchMeetings, agentsForAccount, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult } from "@/components/reports/liveData";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 
 // Palette for the outbound-outcomes SplitBar — outcomes are ranked by volume, so colors are positional.
@@ -65,6 +67,8 @@ function AgentReportsView() {
   const [showDetail, setShowDetail] = useState<boolean>(true);
   // when set, the rooftop doesn't run this agent → show the upsell pitch instead of a report
   const [upsellId, setUpsellId] = useState<string | null>(null);
+  // when set, the appointment-count drill-down modal is open (lists the leads behind the number)
+  const [apptModal, setApptModal] = useState<{ service: "sales" | "service"; title: string; sub: string } | null>(null);
 
   useEffect(() => {
     const stored = typeof window !== "undefined" ? window.localStorage.getItem("vini.apptCost") : null;
@@ -76,7 +80,7 @@ function AgentReportsView() {
     if (typeof window !== "undefined") window.localStorage.setItem("vini.apptCost", String(v));
     setCostModalOpen(false);
   };
-  const { scenario, view, teamId, account, spyneToken } = useScenario();
+  const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
   // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
   const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
@@ -142,24 +146,40 @@ function AgentReportsView() {
   const factor = live ? 1 : 0;
   const scale = (n: number) => Math.round(n * factor);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
+  // Window for the appointment drill-down — the same range the report shows (the server-resolved
+  // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
+  const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
+    feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
+  const openApptDrill = () =>
+    setApptModal({
+      service: a.id.startsWith("service") ? "service" : "sales",
+      title: `Appointments · ${periodLabel}`,
+      sub: `${r.summary.person} · ${a.name} — the leads behind this number`,
+    });
+  // only offer the drill-down when there's a non-zero count to drill into
+  const canDrill = live && scale(m.appointments) > 0;
   const agentEmpty = live && hasTeam && !!feed?.hasData && Math.round(scale(m.calls)) === 0;
-  // turn rate is derivable from live volume (qualified / connected), so it stays live
-  const turnRate = m.conversations > 0 ? Math.round((m.qualified / m.conversations) * 100) : 0;
+  // "Turn rate" = qualified / connected. Use the CENTRAL value (build.ts report.qualifiedPct, computed
+  // on the unique-lead basis) rather than recomputing inline — keeps it identical to the funnel's
+  // qualified→connected step and de-duplicated (was an inline qualified-events / connected-events ratio).
+  const turnRate = r.qualifiedPct;
 
-  // Call & intent flow (Sankey) — derived from real metrics so the flow conserves end-to-end.
+  // Lead journey (Sankey) — UNIQUE LEADS at each stage (same basis as the funnel above), so "Connected"
+  // and "Qualified" mean the same thing everywhere on the page. Falls back to event metrics when
+  // leadFunnel is absent (mock/no-backend). Flow conserves end-to-end via min/max.
   const sankey = useMemo(() => {
-    const total = scale(m.calls);
-    const connected = Math.min(total, scale(m.conversations));
-    const missed = Math.max(0, total - connected);
-    const qualified = Math.min(connected, scale(m.qualified));
+    const total = scale(a.leadFunnel?.contacted ?? r.leadsAttempted);
+    const connected = Math.min(total, scale(a.leadFunnel?.connected ?? m.conversations));
+    const noConvo = Math.max(0, total - connected);
+    const qualified = Math.min(connected, scale(a.leadFunnel?.qualified ?? m.qualified));
     const notQualified = Math.max(0, connected - qualified);
-    const booked = Math.min(qualified, scale(m.appointments));
+    const booked = Math.min(qualified, scale(a.leadFunnel?.appt ?? m.appointments));
     const nurture = Math.max(0, qualified - booked);
     const columns = [
-      [{ id: "total", label: inbound ? "Calls handled" : "Dispatched", color: "#813fed" }],
+      [{ id: "total", label: inbound ? "Leads attempted" : "Leads dialed", color: "#813fed" }],
       [
         { id: "connected", label: "Connected", color: "#6366f1" },
-        { id: "missed", label: inbound ? "Missed" : "No answer", color: "#dc2626" },
+        { id: "missed", label: "No conversation", color: "#dc2626" },
       ],
       [
         { id: "qualified", label: "Qualified", color: "#10b981" },
@@ -173,7 +193,7 @@ function AgentReportsView() {
     ];
     const links = [
       { from: "total", to: "connected", value: connected },
-      { from: "total", to: "missed", value: missed },
+      { from: "total", to: "missed", value: noConvo },
       { from: "connected", to: "qualified", value: qualified },
       { from: "connected", to: "notq", value: notQualified },
       { from: "qualified", to: "booked", value: booked },
@@ -181,8 +201,8 @@ function AgentReportsView() {
       { from: "notq", to: "lost", value: notQualified },
     ];
     return { columns, links };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [a.id, factor, inbound]);
+    // depend on `a` (not a.id) so the flow recomputes when the feed refreshes with new lead counts
+  }, [a, factor, inbound]);
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -325,10 +345,21 @@ function AgentReportsView() {
                         {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
                       </div>
                       <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">
-                        {fmtMoneyFull(scale(m.appointments) * apptCost)}
+                        {fmtMoneyFull(appointmentValue(scale(m.appointments), apptCost))}
                       </p>
                       <p className="mt-2 text-[12px] text-[#6b7280]">
-                        <b className="text-[#111]">{fmtInt(scale(m.appointments))}</b> appointments ×{" "}
+                        {canDrill ? (
+                          <button
+                            onClick={openApptDrill}
+                            className="font-bold text-[#059669] underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                            title="See the appointments behind this number"
+                          >
+                            {fmtInt(scale(m.appointments))} appointments
+                          </button>
+                        ) : (
+                          <b className="text-[#111]">{fmtInt(scale(m.appointments))} appointments</b>
+                        )}{" "}
+                        ×{" "}
                         <b className="text-[#111]">{fmtMoneyFull(apptCost)}</b> per appointment{" "}
                         <button
                           onClick={() => setCostModalOpen(true)}
@@ -351,11 +382,22 @@ function AgentReportsView() {
                       </p>
                       {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
                     </div>
-                    <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">
-                      {fmtInt(scale(m.appointments))}
-                    </p>
+                    {canDrill ? (
+                      <button
+                        onClick={openApptDrill}
+                        className="group/appt mt-1 block text-left"
+                        title="See the appointments behind this number"
+                      >
+                        <span className="text-[42px] font-extrabold tabular-nums leading-none text-[#059669] underline decoration-dotted decoration-[#059669]/40 underline-offset-[6px] group-hover/appt:decoration-[#059669]">
+                          {fmtInt(scale(m.appointments))}
+                        </span>
+                        <span className="ml-2 align-middle text-[11px] font-semibold text-[#059669]">view leads ↗</span>
+                      </button>
+                    ) : (
+                      <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">{fmtInt(scale(m.appointments))}</p>
+                    )}
                     <p className="mt-2 max-w-[520px] text-[12px] text-[#6b7280]">
-                      From <b className="text-[#111]">{fmtInt(scale(m.conversations))}</b> conversations · <b className="text-[#111]">{fmtInt(scale(m.qualified))}</b> qualified. Dollar value appears once revenue tracking is on.
+                      From <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.connected ?? m.conversations))}</b> conversations · <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.qualified ?? m.qualified))}</b> qualified. Dollar value appears once revenue tracking is on.
                     </p>
                   </div>
                 )}
@@ -401,10 +443,15 @@ function AgentReportsView() {
             <div className="px-6 py-6">
               <PerfFunnel
                 stages={[
+                  // Every stage is a window-DISTINCT lead count (from leadFunnel) so the funnel stays
+                  // monotonic (contacted ≥ connected ≥ qualified ≥ appointments) and never double-counts a
+                  // lead touched on multiple days. Falls back to event counts only if leadFunnel is absent.
                   { label: inbound ? "Leads attempted" : "Leads dialed", value: scale(r.leadsAttempted), delta: r.deltas.leadsAttempted },
-                  { label: "Leads qualified", value: scale(m.qualified), delta: r.deltas.leadsQualified },
+                  { label: "Conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
+                  { label: "Leads qualified", value: scale(a.leadFunnel?.qualified ?? m.qualified), delta: r.deltas.leadsQualified },
                   { label: "Appointments booked", value: scale(m.appointments), delta: r.deltas.appointments },
                 ]}
+                appointmentsDrill={live && scale(m.appointments) > 0 ? openApptDrill : undefined}
               />
             </div>
 
@@ -422,8 +469,10 @@ function AgentReportsView() {
                 {[
                   { label: "During hours", value: Math.max(0, m.calls - m.afterHours) },
                   { label: "After hours", value: m.afterHours },
-                  { label: "Connected", value: m.conversations },
-                  { label: "Qualified", value: m.qualified },
+                  // Connected/Qualified are UNIQUE LEADS (same basis as the funnel + Sankey) so each label
+                  // reads one consistent number across the page; the other tiles stay call-activity counts.
+                  { label: "Connected", value: a.leadFunnel?.connected ?? m.conversations },
+                  { label: "Qualified", value: a.leadFunnel?.qualified ?? m.qualified },
                   // Transferred / Callbacks are an inbound concept — outbound agents (Sales/Service OB) don't show them.
                   ...(inbound
                     ? [
@@ -448,10 +497,10 @@ function AgentReportsView() {
 
           <SectionLabel hint={`${r.qualifiedPct}% qualified`}>Conversations &amp; outcomes</SectionLabel>
 
-          {/* call & intent flow — Sankey centerpiece */}
+          {/* lead journey — Sankey centerpiece (unique leads, same basis as the funnel) */}
           <Card
-            title="Call & intent flow"
-            sub={`How ${inbound ? "calls" : "dials"} move: contact → connect → qualify → booked. Ribbon width = volume.`}
+            title="Lead journey"
+            sub="How unique leads move: reached → connected → qualified → booked. Ribbon width = leads."
           >
             <Sankey columns={sankey.columns} links={sankey.links} height={300} fmt={(n) => fmtInt(n)} />
           </Card>
@@ -525,11 +574,7 @@ function AgentReportsView() {
           {/* ── Upcoming appointments + priority follow-ups (rooftop-wide → shown on every agent) ── */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card title="Upcoming appointments" sub="Every booking the agent set, with customer and vehicle" pad={false}>
-                {r.upcomingAppointments?.length ? (
-                  <AppointmentsList items={r.upcomingAppointments} />
-                ) : (
-                  <EmptyState icon="📅" title="No upcoming appointments" body="No booked appointments for this rooftop yet — they'll appear here as the agent books them." />
-                )}
+                <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} />
               </Card>
               <Card title="Priority follow-ups" sub="Callbacks the agent flagged" pad={false}>
                 {r.followUps?.length ? (
@@ -647,6 +692,13 @@ function AgentReportsView() {
         </main>
       </div>
       {costModalOpen && <CostModal initial={apptCost} onSave={saveApptCost} />}
+      <MeetingsModal
+        open={apptModal !== null}
+        onClose={() => setApptModal(null)}
+        title={apptModal?.title ?? "Appointments"}
+        sub={apptModal?.sub}
+        fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", scope: "window", ...meetingWindow, spyneToken }}
+      />
     </div>
   );
 }
@@ -713,7 +765,7 @@ function CostModal({ initial, onSave }: { initial: number; onSave: (v: number) =
 /* ── Performance helpers ── */
 /* Lead → qualified → appointment funnel: narrowing proportional bars with per-stage deltas and the
  * step-to-step conversion rate, so the drop-off reads at a glance. */
-function PerfFunnel({ stages }: { stages: { label: string; value: number; delta: number }[] }) {
+function PerfFunnel({ stages, appointmentsDrill }: { stages: { label: string; value: number; delta?: number }[]; appointmentsDrill?: () => void }) {
   const max = Math.max(1, stages[0]?.value ?? 1);
   return (
     <div className="flex flex-col gap-2.5">
@@ -722,14 +774,27 @@ function PerfFunnel({ stages }: { stages: { label: string; value: number; delta:
         const prev = i > 0 ? stages[i - 1].value : null;
         const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
         const isLast = i === stages.length - 1;
+        // The appointments stage (last) drills into the leads behind the number.
+        const drillable = isLast && !!appointmentsDrill;
         return (
           <div key={s.label} className="flex items-center gap-3 sm:gap-4">
             {/* number + label */}
             <div className="w-[120px] flex-none sm:w-[150px]">
-              <p className={`text-[24px] font-extrabold tabular-nums leading-none sm:text-[26px] ${isLast ? "text-[#10b981]" : "text-[#111]"}`}>
-                {fmtInt(s.value)}
-              </p>
-              <p className="mt-1 text-[11px] leading-tight text-[#6b7280]">{s.label}</p>
+              {drillable ? (
+                <button onClick={appointmentsDrill} className="group/appt block text-left" title="See the appointments behind this number">
+                  <p className="text-[24px] font-extrabold tabular-nums leading-none text-[#10b981] underline decoration-dotted decoration-[#10b981]/40 underline-offset-4 group-hover/appt:decoration-[#10b981] sm:text-[26px]">
+                    {fmtInt(s.value)}
+                  </p>
+                  <p className="mt-1 text-[11px] font-semibold leading-tight text-[#10b981]">{s.label} · view leads ↗</p>
+                </button>
+              ) : (
+                <>
+                  <p className={`text-[24px] font-extrabold tabular-nums leading-none sm:text-[26px] ${isLast ? "text-[#10b981]" : "text-[#111]"}`}>
+                    {fmtInt(s.value)}
+                  </p>
+                  <p className="mt-1 text-[11px] leading-tight text-[#6b7280]">{s.label}</p>
+                </>
+              )}
             </div>
             {/* step conversion (from the stage above) */}
             <div className="w-[40px] flex-none text-right sm:w-[46px]">
@@ -751,9 +816,9 @@ function PerfFunnel({ stages }: { stages: { label: string; value: number; delta:
                 }}
               />
             </div>
-            {/* period-over-period delta */}
+            {/* period-over-period delta (omitted for stages without a prior-window basis, e.g. Conversations) */}
             <div className="w-[92px] flex-none text-right sm:w-[104px]">
-              <DeltaPill delta={s.delta} />
+              {s.delta !== undefined && <DeltaPill delta={s.delta} />}
             </div>
           </div>
         );
@@ -952,30 +1017,36 @@ function QCell({ label, value, status }: { label: string; value: string; status?
   );
 }
 
-/* ── Upcoming appointments (Supabase ← card 12233) ── */
-function AppointmentsList({ items }: { items: UpcomingAppt[] }) {
-  return (
-    <div className="max-h-[320px] divide-y divide-[#f3f4f6] overflow-y-auto">
-      {items.map((a, i) => (
-        <div key={i} className="flex items-center justify-between gap-3 px-6 py-3">
-          <div className="min-w-0">
-            <p className="truncate text-[13px] font-semibold text-[#111]">{a.customer || "—"}</p>
-            <p className="truncate text-[11px] text-[#6b7280]">{a.vehicle || "Vehicle TBD"}</p>
-          </div>
-          <div className="flex-none text-right">
-            <p className="text-[12px] font-medium text-[#111]">{a.when}</p>
-            <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: apptStatusColor(a.status) }}>{a.status}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-function apptStatusColor(s: string): string {
-  const v = (s || "").toLowerCase();
-  if (v.includes("cancel") || v.includes("no-show") || v.includes("no show")) return "#dc2626";
-  if (v.includes("confirm") || v.includes("show")) return "#10b981";
-  return "#6b7280";
+/* ── Upcoming appointments (live ← Spyne leads/dealer/v3/meetings) ──
+ * Rooftop-wide (sales + service), from now forward. Self-fetches so the card stays live regardless of
+ * the Q12227 aggregate; degrades to the empty state on no-data / error. */
+function UpcomingAppointments({ teamId, enterpriseId, spyneToken }: { teamId: string; enterpriseId: string; spyneToken: string }) {
+  const [state, setState] = useState<{ loading: boolean; meetings: Meeting[] }>({ loading: true, meetings: [] });
+  useEffect(() => {
+    let on = true;
+    // reset to the loading state whenever the rooftop/token changes, then refetch (stale-while-revalidate
+    // isn't worth it here — upcoming bookings are small and change rarely)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!teamId) { setState({ loading: false, meetings: [] }); return; }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setState({ loading: true, meetings: [] });
+    fetchMeetings({ teamId, enterpriseId, service: "both", scope: "upcoming", spyneToken })
+      .then((r) => { if (on) setState({ loading: false, meetings: r.meetings }); })
+      .catch(() => { if (on) setState({ loading: false, meetings: [] }); });
+    return () => { on = false; };
+  }, [teamId, enterpriseId, spyneToken]);
+
+  if (state.loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#e5e7eb] border-t-[#813fed]" role="status" aria-label="Loading" />
+      </div>
+    );
+  }
+  if (!state.meetings.length) {
+    return <div className="p-6"><EmptyState icon="📅" title="No upcoming appointments" body="No booked appointments for this rooftop yet — they'll appear here as the agent books them." /></div>;
+  }
+  return <div className="max-h-[360px] overflow-y-auto"><MeetingsList meetings={state.meetings} /></div>;
 }
 
 /* ── Priority follow-ups / callbacks (Supabase ← card 12234) ── */

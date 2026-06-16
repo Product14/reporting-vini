@@ -37,7 +37,6 @@ export interface RawRow {
   opted_out_sms: number;
   opted_out_call: number;
   after_hours: number;
-  outbound_outcome: string | null; // outbound disposition: "Not Connected" | "Opt Out" | "Not Interested" | …
   is_speed_to_lead: number; // 1 = speed-to-lead SMS (smsFlowJourneySource = speed_to_lead)
   speed_to_lead_response_time: number | null; // seconds: lead.external_created_at → conversation.createdAt
   [k: string]: unknown;
@@ -81,7 +80,7 @@ export interface AgentDailyRow {
   stl_within5_appts: number; // instantly-touched STL leads that booked on the earliest STL row
 }
 
-export type BreakdownDim = "intent" | "source" | "hour" | "reply_offset" | "outcome";
+export type BreakdownDim = "intent" | "source" | "hour" | "reply_offset";
 
 // Tall distribution row. e.g. (dim="intent", dim_value="Pricing / payment", count=95, qualified=72).
 export interface BreakdownRow {
@@ -95,9 +94,24 @@ export interface BreakdownRow {
   appts: number;
 }
 
+// One row per (team_id, agent_type, lead_id, activity_day). Retains lead identity so window-distinct
+// counts are EXACT (COUNT(DISTINCT lead_id) over the range) instead of summing per-day distincts —
+// which over-counts any lead touched on multiple days (e.g. an outbound lead redialed across a week).
+export interface LeadDayRow {
+  team_id: string;
+  agent_type: string;
+  lead_id: string;
+  activity_day: string;
+  dialed: boolean; // had ≥1 call (is_call) that day
+  connected: boolean; // had a two-way conversation that day (talk_seconds>0 OR sms_replied>0)
+  qualified: boolean; // was qualified that day
+  appointment: boolean; // booked an appointment that day
+}
+
 export interface AggregateResult {
   daily: AgentDailyRow[];
   breakdown: BreakdownRow[];
+  leadDays: LeadDayRow[];
 }
 
 // ── Per-row detail tables (rooftop-level; keyed by team_id). Populated by the sync from the dedicated
@@ -131,6 +145,14 @@ export interface CampaignRow {
   opt_outs: number;
   no_reach: number;
   appt_rate_pct: number | null;
+}
+// Outbound disposition mix (card 12231) → the "Outbound outcomes" widget. One row per
+// (team_id, agent_type, outcome_bucket). pct is derived downstream from mappings, not stored.
+export interface OutcomeRow {
+  team_id: string;
+  agent_type: string | null; // "Sales Outbound" | "Service Outbound" — which outbound agent owns it
+  outcome_bucket: string; // e.g. "1 No reach" … "9 Other"; numeric prefix is sort order only
+  mappings: number;
 }
 
 // Single-row sync bookkeeping table (id = 1).

@@ -3,7 +3,7 @@
  * (activity_day, team_id, agent_type). Pure + dependency-free so it can be unit/parity-tested
  * against a real Q12227 pull without touching Supabase. See schema.ts for the column→field mapping. */
 
-import type { RawRow, AgentDailyRow, BreakdownRow, AggregateResult, BreakdownDim } from "./schema";
+import type { RawRow, AgentDailyRow, BreakdownRow, AggregateResult, BreakdownDim, LeadDayRow } from "./schema";
 import { collectEarliestStl, stlCountsForGroup, type StlLeadEntry } from "./stl";
 import { storeLocalDay } from "./tzMap";
 
@@ -68,6 +68,7 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
 
   const groups = new Map<string, Acc>();
   const breaks = new Map<string, BAcc>();
+  const leadMap = new Map<string, LeadDayRow>(); // key: day|team|type|lead — one row per lead per day
 
   const bump = (g: { activity_day: string; team_id: string; agent_type: string }, dim: BreakdownDim, val: string, count: number, qualified: number, appts: number) => {
     if (!val) return;
@@ -107,6 +108,14 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     if (lead) {
       a._leads.add(lead);
       if (num(r.appointment_booked)) a._apptLeads.add(lead);
+      // lead-day grain → exact window-distinct counts at read time (vs summing daily distincts)
+      const lk = `${day}|${team}|${type}|${lead}`;
+      let ld = leadMap.get(lk);
+      if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, dialed: false, connected: false, qualified: false, appointment: false }; leadMap.set(lk, ld); }
+      if (num(r.is_call) > 0) ld.dialed = true;
+      if (num(r.talk_seconds) > 0 || num(r.sms_replied) > 0) ld.connected = true; // two-way conversation
+      if (num(r.qualified) > 0) ld.qualified = true;
+      if (num(r.appointment_booked) > 0) ld.appointment = true;
     }
 
     const q = r.quality_score;
@@ -118,8 +127,6 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     if (source) bump(a, "source", source, 1, num(r.qualified), num(r.appointment_booked));
     const h = hourOf(str(r.activity_ts));
     if (h != null) bump(a, "hour", String(h), isCall || 1, 0, 0);
-    const outcome = str(r.outbound_outcome);
-    if (outcome) bump(a, "outcome", outcome, 1, num(r.qualified), num(r.appointment_booked));
     if (isSms) {
       const off = dayOffset(str(r.lead_created_at) || null, str(r.activity_ts));
       if (off != null) bump(a, "reply_offset", offsetBucket(off), 1, num(r.sms_replied), 0);
@@ -138,5 +145,5 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     const { _leads, _apptLeads, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
     daily.push(row);
   }
-  return { daily, breakdown: Array.from(breaks.values()) };
+  return { daily, breakdown: Array.from(breaks.values()), leadDays: Array.from(leadMap.values()) };
 }

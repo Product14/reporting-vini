@@ -107,6 +107,16 @@ classic write-path / read-path split:
   from the per-agent upsell flow. Always logs the lead server-side; if
   `AGENT_INTEREST_WEBHOOK_URL` is set, also forwards a message to a Slack-compatible
   webhook.
+- **`GET /api/meetings?team_id&serviceType&scope&{start,end|bucket}`** — proxies the Spyne
+  product API (`leads/dealer/v3/meetings`) server-side (token never reaches the browser),
+  returning normalized `Meeting` rows (customer / vehicle / time / status / phone). Powers
+  the **"Upcoming appointments"** card (`scope=upcoming`, rooftop-wide) and the **drill-down
+  behind any appointment count** (`scope=window` → the leads behind "N appts" for the shown
+  window). `enterpriseId` comes from the iframe URL (`?enterprise_id=`, forwarded by
+  `ScenarioProvider`), falling back to decoding it from the token; `serviceType=both` merges
+  sales + service. Degrades to an empty list — never blanks the card. See `src/lib/spyne/meetings.ts`.
+  NOTE: locally the single `SPYNE_API_TOKEN` authenticates, but the data is scoped by the
+  `enterprise_id`/`team_id` on the URL — so pass both to drill into any rooftop the token can read.
 
 ### Data model (Supabase / Postgres)
 | Table | Grain | Role |

@@ -63,6 +63,7 @@ function resolveAccount(teamId: string | null | undefined): Account {
 interface Ctx {
   account: Account;
   spyneToken: string; // host-forwarded Spyne API token from the URL (prod); "" locally → server uses env
+  enterpriseId: string; // host-forwarded ?enterprise_id= (scopes the live meetings API); "" → decode from token
 }
 const ScenarioCtx = createContext<Ctx | null>(null);
 
@@ -88,6 +89,7 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
   // switching, so this resolves once and then never changes (the iframe reloads to rescope).
   const [account, setAccount] = useState<Account | null>(null);
   const [spyneToken, setSpyneToken] = useState("");
+  const [enterpriseId, setEnterpriseId] = useState("");
   useEffect(() => {
     // intentional: read the browser-only URL after mount, then render children for the first time
     const sp = new URLSearchParams(window.location.search);
@@ -97,12 +99,14 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
     const rawToken = sp.get("auth_key") || sp.get("spyne_token") || sp.get("token") || "";
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSpyneToken(rawToken.replace(/^Bearer\s+/i, "").trim());
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // The host also scopes the rooftop's enterprise via ?enterprise_id= — used by the live meetings API
+    // (the count drill-down + upcoming card). Empty → the server decodes it from the token.
+    setEnterpriseId((sp.get("enterprise_id") || "").trim());
     setAccount(resolveAccount(sp.get("team_id")));
   }, []);
 
   if (account === null) return <ScenarioResolving />;
-  return <ScenarioCtx.Provider value={{ account, spyneToken }}>{children}</ScenarioCtx.Provider>;
+  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId }}>{children}</ScenarioCtx.Provider>;
 }
 
 export function useScenario(): {
@@ -110,6 +114,7 @@ export function useScenario(): {
   scenario: Scenario;
   teamId: string;
   spyneToken: string;
+  enterpriseId: string;
   view: ScenarioView;
 } {
   const c = useContext(ScenarioCtx);
@@ -120,6 +125,7 @@ export function useScenario(): {
     scenario,
     teamId: account.teamId,
     spyneToken: c?.spyneToken ?? "",
+    enterpriseId: c?.enterpriseId ?? "",
     view: scenarioView(scenario),
   };
 }

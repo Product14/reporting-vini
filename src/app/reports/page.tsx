@@ -15,6 +15,7 @@ import {
   ActiveCampaign,
   GhostPreview,
   InlineBar,
+  MeetingsModal,
   RAG_STYLE,
   ReportTopBar,
   SectionLabel,
@@ -23,7 +24,7 @@ import {
   StepList,
 } from "@/components/reports/kit";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult } from "@/components/reports/liveData";
 
 const AGENT_COLOR: Record<string, string> = {
   sales_ib: "#6366f1",
@@ -36,7 +37,7 @@ export default function OverviewReportPage() {
   const router = useRouter();
   const [bucket, setBucket] = useState<Bucket>("last30");
   const [custom, setCustom] = useState<{ start: string; end: string } | null>(null);
-  const { scenario, view, teamId, account, spyneToken } = useScenario();
+  const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
 
   // cost per appointment — set on the Agents tab; read once from localStorage (same initializer
   // pattern ScenarioProvider uses to seed the rooftop), so there's no setState-in-effect.
@@ -84,7 +85,12 @@ export default function OverviewReportPage() {
 
   const hasTeam = teamId !== "";
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
-  const valueCreated = fleet.appointments * apptCost;
+  const valueCreated = appointmentValue(fleet.appointments, apptCost);
+  // Appointment drill-down — clicking the headline count lists the rooftop's appointments (sales +
+  // service) for the shown window. Window = the server-resolved dates when we have them, else the bucket.
+  const [apptModalOpen, setApptModalOpen] = useState(false);
+  const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
+    feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
   // ROI gate: only surface a $ "value created" when real revenue exceeds run cost. Both are zeroed today
   // (no Q12227 source), so this is false → we show appointments (real value delivered) instead of a
   // break-even $ that would read as "no ROI" and risk churn. Flips on automatically once revenue/cost wire.
@@ -174,16 +180,34 @@ export default function OverviewReportPage() {
                       <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white">{fmtMoneyFull(valueCreated)}</span>
                     </div>
                     <p className="mt-3 max-w-[560px] text-[14px] leading-snug text-[#d6cdf0]">
-                      From <b className="text-white">{fmtInt(fleet.appointments)} appointments</b> booked across your live agents, at{" "}
-                      <b className="text-white">{fmtMoneyFull(apptCost)}</b> per appointment.
+                      From{" "}
+                      {fleet.appointments > 0 ? (
+                        <button onClick={() => setApptModalOpen(true)} className="font-bold text-white underline decoration-dotted underline-offset-2 hover:decoration-solid" title="See the appointments behind this number">
+                          {fmtInt(fleet.appointments)} appointments
+                        </button>
+                      ) : (
+                        <b className="text-white">{fmtInt(fleet.appointments)} appointments</b>
+                      )}{" "}
+                      booked across your live agents, at <b className="text-white">{fmtMoneyFull(apptCost)}</b> per appointment.
                     </p>
                   </>
                 ) : (
                   <>
                     <p className="text-[10.5px] font-bold uppercase tracking-[0.16em] text-[#c4b5fd]">Appointments booked · {periodLabel}</p>
                     <div className="mt-3 flex items-end gap-4">
-                      <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white">{fmtInt(fleet.appointments)}</span>
-                      <span className="pb-2.5 text-[15px] font-semibold text-[#c4b5fd]">booked this period</span>
+                      {fleet.appointments > 0 ? (
+                        <>
+                          <button onClick={() => setApptModalOpen(true)} className="group/appt text-left" title="See the appointments behind this number">
+                            <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white underline decoration-dotted decoration-white/40 underline-offset-[8px] group-hover/appt:decoration-white">{fmtInt(fleet.appointments)}</span>
+                          </button>
+                          <span className="pb-2.5 text-[15px] font-semibold text-[#c4b5fd]">booked · view leads ↗</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white">{fmtInt(fleet.appointments)}</span>
+                          <span className="pb-2.5 text-[15px] font-semibold text-[#c4b5fd]">booked this period</span>
+                        </>
+                      )}
                     </div>
                     <p className="mt-3 max-w-[560px] text-[14px] leading-snug text-[#d6cdf0]">
                       From <b className="text-white">{fmtInt(fleet.conversations)} conversations</b> across your live agents, with <b className="text-white">{fmtInt(fleet.qualified)} qualified</b>. Dollar value appears once revenue tracking is on.
@@ -195,7 +219,7 @@ export default function OverviewReportPage() {
             </div>
             <div className="grid grid-cols-2 divide-x divide-white/10 border-t border-white/10 bg-black/15 sm:grid-cols-4">
               <HeroTile label="Appointments" value={fmtInt(fleet.appointments)} delta={fleet.deltas.appointments} />
-              <HeroTile label="Conversations" value={fmtInt(fleet.conversations)} delta={fleet.deltas.qualified} />
+              <HeroTile label="Conversations" value={fmtInt(fleet.conversations)} delta={fleet.deltas.conversations} />
               <HeroTile label="Calls handled" value={fmtInt(fleet.calls)} delta={fleet.deltas.calls} />
               <HeroTile label="After-hours captured" value={fmtInt(fleet.afterHours)} />
             </div>
@@ -232,7 +256,7 @@ export default function OverviewReportPage() {
                   </div>
                   <div className="w-[170px] flex-none">
                     <div className="flex items-baseline justify-between">
-                      <span className="text-[19px] font-extrabold tabular-nums text-[#10b981]">{showDollarValue ? fmtMoney(a.metrics.appointments * apptCost) : fmtInt(a.metrics.appointments)}</span>
+                      <span className="text-[19px] font-extrabold tabular-nums text-[#10b981]">{showDollarValue ? fmtMoney(appointmentValue(a.metrics.appointments, apptCost)) : fmtInt(a.metrics.appointments)}</span>
                       <span className="text-[10px] text-[#9ca3af]">{showDollarValue ? "value" : "appts"}</span>
                     </div>
                     <div className="mt-1.5"><InlineBar pct={(a.metrics.appointments / maxAppts) * 100} color={AGENT_COLOR[a.id]} /></div>
@@ -276,7 +300,7 @@ export default function OverviewReportPage() {
           {/* ─────────── 4 · The pipeline — how the machine works ─────────── */}
           <div className="flex flex-col gap-3.5">
             <SectionLabel hint={periodLabel}>The pipeline — whole dealership</SectionLabel>
-            <Card title="Outreach → conversation → qualified → appointment" sub="Each step's height is its volume; the pill is its conversion from the step before">
+            <Card title="Outreach → conversation → qualified → appointment" sub="Each step is the unique leads that reached that stage; the pill is conversion from the step before">
               <StepFunnel stages={fleet.funnel} />
               <div className="mt-5 grid grid-cols-2 gap-2.5 border-t border-[#f3f4f6] pt-4 sm:grid-cols-4">
                 <ContextChip label="Connect / answer" value={`${fleet.connectRate}%`} />
@@ -309,6 +333,13 @@ export default function OverviewReportPage() {
           )}
         </main>
       </div>
+      <MeetingsModal
+        open={apptModalOpen}
+        onClose={() => setApptModalOpen(false)}
+        title={`Appointments · ${periodLabel}`}
+        sub="Every booked appointment across this rooftop — sales & service"
+        fetchOpts={{ teamId, enterpriseId, service: "both", scope: "window", ...meetingWindow, spyneToken }}
+      />
     </div>
   );
 }

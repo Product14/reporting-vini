@@ -1,6 +1,6 @@
-import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_APPOINTMENTS, REPORT_CALLBACKS, REPORT_CAMPAIGNS } from "@/lib/reports/supabase";
+import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_APPOINTMENTS, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES } from "@/lib/reports/supabase";
 import { buildResult } from "@/lib/reports/build";
-import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow } from "@/lib/reports/schema";
+import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots } from "@/lib/spyne/teamContext";
@@ -18,6 +18,33 @@ function priorWindow(start: string, end: string): { start: string; end: string }
   const ps = new Date(s);
   ps.setUTCDate(ps.getUTCDate() - days);
   return { start: ps.toISOString().slice(0, 10), end: start };
+}
+
+export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number }>;
+
+/* EXACT window-distinct lead counts per agent_type via the report_lead_counts() SQL function (counts
+ * DISTINCT lead_id over the range, so a lead touched on N days counts once — not N times). Returns
+ * undefined when the function/table is absent or errors, so buildResult falls back to summing the
+ * per-day distincts (the previous, inflated behavior) rather than breaking. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function leadCountsFor(sb: any, teamId: string, start: string, end: string): Promise<LeadCounts | undefined> {
+  try {
+    const { data, error } = await sb.rpc("report_lead_counts", { p_team: teamId, p_start: start, p_end: end });
+    if (error || !Array.isArray(data)) return undefined;
+    const m: LeadCounts = {};
+    for (const r of data as Array<Record<string, unknown>>) {
+      m[String(r.agent_type)] = {
+        contacted: Number(r.leads_contacted) || 0,
+        dialed: Number(r.leads_dialed) || 0,
+        connected: Number(r.leads_connected) || 0,
+        qualified: Number(r.leads_qualified) || 0,
+        apptLeads: Number(r.appt_leads) || 0,
+      };
+    }
+    return m;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -90,10 +117,13 @@ export async function GET(request: Request): Promise<Response> {
   const safe = async <T,>(p: PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> => {
     try { const { data, error } = await p; return error ? [] : ((data ?? []) as T[]); } catch { return []; }
   };
-  const [appointments, callbacks, campaigns] = await Promise.all([
+  const [appointments, callbacks, campaigns, outcomes, leadCounts, priorLeadCounts] = await Promise.all([
     safe<AppointmentRow>(sb.from(REPORT_APPOINTMENTS).select("*").eq("team_id", teamId)),
     safe<CallbackRow>(sb.from(REPORT_CALLBACKS).select("*").eq("team_id", teamId)),
     safe<CampaignRow>(sb.from(REPORT_CAMPAIGNS).select("*").eq("team_id", teamId)),
+    safe<OutcomeRow>(sb.from(REPORT_OUTCOMES).select("*").eq("team_id", teamId)),
+    leadCountsFor(sb, teamId, start, end),
+    leadCountsFor(sb, teamId, prior.start, prior.end),
   ]);
 
   const result = buildResult({
@@ -103,7 +133,10 @@ export async function GET(request: Request): Promise<Response> {
     appointments,
     callbacks,
     campaigns,
+    outcomes,
     onboardedSlots,
+    leadCounts,
+    priorLeadCounts,
   });
 
   return Response.json({ ...result, ...meta }, {
