@@ -267,6 +267,7 @@ export interface MeetingFetchOpts {
   bucket?: Bucket;
   start?: string;
   end?: string;
+  agentType?: string; // report slot id (sales_ib/…) — scopes the drill to that agent's booked leads
   spyneToken?: string; // host-forwarded Spyne token (prod); omit locally (server uses env)
 }
 
@@ -275,12 +276,13 @@ export interface MeetingFetchOpts {
  * token never reaches the browser. Returns an empty list on any error → the card/modal shows its empty
  * state rather than breaking. */
 export async function fetchMeetings(opts: MeetingFetchOpts): Promise<MeetingsResult> {
-  const { teamId, enterpriseId, service = "both", scope = "window", bucket, start, end, spyneToken } = opts;
+  const { teamId, enterpriseId, service = "both", scope = "window", bucket, start, end, agentType, spyneToken } = opts;
   const query: Record<string, string> = { team_id: teamId, serviceType: service, scope };
   if (enterpriseId) query.enterprise_id = enterpriseId;
   if (scope === "window") {
     if (start && end) { query.start = start; query.end = end; }
     else query.bucket = bucket ?? "last30";
+    if (agentType) query.agent_type = agentType;
   }
   try {
     const qs = new URLSearchParams(query);

@@ -1455,7 +1455,7 @@ export function MeetingsModal({
 }) {
   const [state, setState] = useState<{ loading: boolean; meetings: Meeting[]; error: boolean }>({ loading: true, meetings: [], error: false });
   // Refetch only when the actual params change (object identity would refetch every render).
-  const key = JSON.stringify([fetchOpts.teamId, fetchOpts.service, fetchOpts.scope, fetchOpts.bucket, fetchOpts.start, fetchOpts.end]);
+  const key = JSON.stringify([fetchOpts.teamId, fetchOpts.service, fetchOpts.scope, fetchOpts.bucket, fetchOpts.start, fetchOpts.end, fetchOpts.agentType]);
 
   useEffect(() => {
     if (!open) return;

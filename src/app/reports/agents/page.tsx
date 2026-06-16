@@ -68,7 +68,7 @@ function AgentReportsView() {
   // when set, the rooftop doesn't run this agent → show the upsell pitch instead of a report
   const [upsellId, setUpsellId] = useState<string | null>(null);
   // when set, the appointment-count drill-down modal is open (lists the leads behind the number)
-  const [apptModal, setApptModal] = useState<{ service: "sales" | "service"; title: string; sub: string } | null>(null);
+  const [apptModal, setApptModal] = useState<{ service: "sales" | "service"; agentType: string; title: string; sub: string } | null>(null);
 
   useEffect(() => {
     const stored = typeof window !== "undefined" ? window.localStorage.getItem("vini.apptCost") : null;
@@ -153,6 +153,7 @@ function AgentReportsView() {
   const openApptDrill = () =>
     setApptModal({
       service: a.id.startsWith("service") ? "service" : "sales",
+      agentType: a.id,
       title: `Appointments · ${periodLabel}`,
       sub: `${r.summary.person} · ${a.name} — the leads behind this number`,
     });
@@ -697,7 +698,7 @@ function AgentReportsView() {
         onClose={() => setApptModal(null)}
         title={apptModal?.title ?? "Appointments"}
         sub={apptModal?.sub}
-        fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", scope: "window", ...meetingWindow, spyneToken }}
+        fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", agentType: apptModal?.agentType, scope: "window", ...meetingWindow, spyneToken }}
       />
     </div>
   );

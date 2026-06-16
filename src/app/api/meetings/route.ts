@@ -1,7 +1,35 @@
 import { fetchMeetings, type ServiceType } from "@/lib/spyne/meetings";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
+import { getSupabase, AGENT_LEAD_DAYS } from "@/lib/reports/supabase";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
+
+// Report slot id → the agent_type string the aggregate stores. The meetings API has no inbound/outbound
+// field, so we recover that split by looking up which leads each agent_type booked in agent_lead_days.
+const SLOT_TO_AGENT_TYPE: Record<string, string> = {
+  sales_ib: "Sales Inbound",
+  sales_ob: "Sales Outbound",
+  service_ib: "Service Inbound",
+  service_ob: "Service Outbound",
+};
+
+/* The distinct leads this agent (or the whole rooftop, when agentType is omitted) booked an appointment
+ * with in [start, end) — i.e. exactly the leads behind the "Appointments booked" tile. Returns null when
+ * the table/query is unavailable, so the caller falls back to the booking-date meeting filter. */
+async function bookedLeadIds(teamId: string, agentType: string | undefined, start: string, end: string): Promise<string[] | null> {
+  const sb = getSupabase();
+  if (!sb) return null;
+  try {
+    let q = sb.from(AGENT_LEAD_DAYS).select("lead_id").eq("team_id", teamId).eq("appointment", true)
+      .gte("activity_day", start).lt("activity_day", end);
+    if (agentType) q = q.eq("agent_type", agentType);
+    const { data, error } = await q;
+    if (error || !Array.isArray(data)) return null;
+    return [...new Set(data.map((r) => String((r as { lead_id?: string }).lead_id || "")).filter(Boolean))];
+  } catch {
+    return null;
+  }
+}
 
 /* Lists the actual appointment/meeting records behind an appointment count, straight from the Spyne
  * product API (leads/dealer/v3/meetings) — the token never reaches the browser. Used by:
@@ -38,12 +66,16 @@ export async function GET(request: Request): Promise<Response> {
   const scope = (searchParams.get("scope") || "window").toLowerCase();
   // The host scopes the iframe with ?enterprise_id=&team_id=. Honor it; else the lib decodes it from the token.
   const enterpriseId = searchParams.get("enterprise_id") || undefined;
+  // Drill-down agent (report slot id). Maps to the agent_type whose booked leads we list, so an inbound
+  // agent's modal shows only inbound appointments. Omitted on the rooftop-wide (Overview) drill.
+  const agentType = SLOT_TO_AGENT_TYPE[searchParams.get("agent_type") || ""];
 
   let startISO: string;
   let endISO: string;
   let sortOrder: "asc" | "desc";
   let bookedStartISO: string | undefined;
   let bookedEndISO: string | undefined;
+  let leadIds: string[] | undefined;
 
   if (scope === "upcoming") {
     // From now forward — soonest first. (new Date() is fine in a route; not a workflow.)
@@ -69,14 +101,23 @@ export async function GET(request: Request): Promise<Response> {
       const timezone = await getStoreTimeZone(teamId, spyneToken);
       ({ start, end } = rangeFor((searchParams.get("bucket") as Bucket) ?? "last30", timezone ?? undefined));
     }
-    bookedStartISO = dayToISO(start);
-    bookedEndISO = dayToISO(end);
-    startISO = bookedStartISO;
+    startISO = dayToISO(start);
     endISO = new Date(Date.now() + BOOKED_LOOKAHEAD_DAYS * 86_400_000).toISOString();
     sortOrder = "asc";
+
+    // Preferred: list exactly the leads behind the tile (from agent_lead_days) so the count matches and
+    // the inbound/outbound split is honored. Fall back to filtering meetings by booking date when the
+    // aggregate is unavailable (older deploy / table missing).
+    const booked = await bookedLeadIds(teamId, agentType, start, end);
+    if (booked) {
+      leadIds = booked;
+    } else {
+      bookedStartISO = dayToISO(start);
+      bookedEndISO = dayToISO(end);
+    }
   }
 
-  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, enterpriseId, token: spyneToken });
+  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId, token: spyneToken });
   return Response.json(result, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });

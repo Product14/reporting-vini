@@ -142,22 +142,36 @@ export async function fetchMeetings(opts: {
   sortOrder?: "asc" | "desc";
   bookedStartISO?: string;
   bookedEndISO?: string;
+  leadIds?: string[]; // when set, return one meeting per lead for exactly these leads (the leads the tile counted)
   enterpriseId?: string | null; // explicit override (host-forwarded on the URL); else decoded from token
   token?: string | null;
 }): Promise<MeetingsResult> {
-  const { teamId, service, startISO, endISO, sortOrder = "asc", bookedStartISO, bookedEndISO, token } = opts;
+  const { teamId, service, startISO, endISO, sortOrder = "asc", bookedStartISO, bookedEndISO, leadIds, token } = opts;
   // Prefer an explicit enterpriseId (the host scopes the iframe with ?enterprise_id=&team_id=). Fall back
   // to decoding it from the token — both point at the same rooftop in prod; the override lets local dev
   // (one shared token) query any enterprise/team the token is allowed to read.
   const enterpriseId = (opts.enterpriseId && opts.enterpriseId.trim()) || enterpriseIdFromToken(token);
   if (!enterpriseId || !teamId) return { meetings: [], total: 0 };
+  // Lead-scoped with no leads → the agent booked nothing in the window; show an empty list (don't fall
+  // through to an unfiltered fetch).
+  if (leadIds && leadIds.length === 0) return { meetings: [], total: 0 };
   const types: ServiceType[] = service === "both" ? ["sales", "service"] : [service];
   try {
     const lists = await Promise.all(
       types.map((serviceType) => fetchOne({ teamId, enterpriseId, serviceType, startISO, endISO, sortOrder, token })),
     );
     let meetings = lists.flat();
-    if (bookedStartISO && bookedEndISO) {
+    if (leadIds && leadIds.length) {
+      // lead-scoped: show exactly the leads the tile counted (resolved from agent_lead_days, which has
+      // the inbound/outbound split the meetings API lacks). One row per lead — soonest meeting first — so
+      // the modal count equals the tile and an inbound agent never shows outbound's appointments.
+      const set = new Set(leadIds);
+      const seen = new Set<string>();
+      meetings = meetings
+        .filter((m) => m.leadId && set.has(m.leadId))
+        .sort((a, b) => (a.when || "").localeCompare(b.when || ""))
+        .filter((m) => (seen.has(m.leadId as string) ? false : (seen.add(m.leadId as string), true)));
+    } else if (bookedStartISO && bookedEndISO) {
       // booked-in-period: keep meetings whose booking time falls in the window, newest booking first
       meetings = meetings
         .filter((m) => m.bookedAt && m.bookedAt >= bookedStartISO && m.bookedAt < bookedEndISO)
