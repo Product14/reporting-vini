@@ -112,8 +112,10 @@ export default function OverviewReportPage() {
   const maxAppts = useMemo(() => Math.max(1, ...agents.map((a) => a.metrics.appointments)), [agents]);
   // Rooftop campaigns (attached to outbound agents in build.ts; the same list per agent). Top by appointments.
   const campaigns = useMemo<ActiveCampaign[]>(() => {
-    const found = agents.find((a) => a.report.activeCampaigns?.length)?.report.activeCampaigns ?? [];
-    return [...found].sort((a, b) => b.appts - a.appts);
+    // Union across ALL outbound agents (each campaign belongs to one agent_type, so no dupes) — a rooftop
+    // running both Sales-OB and Service-OB campaigns showed only the first agent's before. Top by appts.
+    const all = agents.flatMap((a) => a.report.activeCampaigns ?? []);
+    return [...all].sort((a, b) => b.appts - a.appts);
   }, [agents]);
   // Money on the table (card 12236): recoverable inbound leads, SUMMED across agents by bucket (each
   // inbound agent carries its own agent_type's rows) — total + per-bucket breakdown, biggest first.
