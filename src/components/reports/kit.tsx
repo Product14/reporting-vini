@@ -4,6 +4,7 @@ import Link from "next/link";
 import React, { useEffect, useRef, useState } from "react";
 import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
 import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
+import { track } from "@/lib/analytics";
 
 export * from "./data";
 
@@ -28,6 +29,7 @@ export function ReportTabs({ active, teamId }: { active: ReportTab; teamId?: str
           <Link
             key={t.id}
             href={t.href}
+            onClick={() => track("report_tab_clicked", { from: active, to: t.id, team_id: teamId ?? "" })}
             className="flex items-center px-3 py-1.5 rounded-md text-[12.5px] font-semibold text-[#6b7280] hover:text-[#111] hover:bg-[#f3f4f6] transition-colors"
           >
             {t.label}
@@ -1463,8 +1465,22 @@ export function MeetingsModal({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setState({ loading: true, meetings: [], error: false });
     fetchMeetings(fetchOpts)
-      .then((r) => { if (on) setState({ loading: false, meetings: r.meetings, error: Boolean(r.error) }); })
-      .catch(() => { if (on) setState({ loading: false, meetings: [], error: true }); });
+      .then((r) => {
+        if (!on) return;
+        const error = Boolean(r.error);
+        setState({ loading: false, meetings: r.meetings, error });
+        // What the drill-down actually shows — product depth + monitoring of the meetings service.
+        track("appointments_drilldown_result", {
+          team_id: fetchOpts.teamId,
+          status: error ? "error" : r.meetings.length ? "ok" : "empty",
+          count: r.meetings.length,
+        });
+      })
+      .catch(() => {
+        if (!on) return;
+        setState({ loading: false, meetings: [], error: true });
+        track("appointments_drilldown_result", { team_id: fetchOpts.teamId, status: "error", count: 0 });
+      });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, key]);

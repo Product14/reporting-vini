@@ -40,6 +40,7 @@ import {
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, fetchMeetings, agentsForAccount, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult } from "@/components/reports/liveData";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
+import { track } from "@/lib/analytics";
 
 // Palette for the outbound-outcomes SplitBar — outcomes are ranked by volume, so colors are positional.
 const OUTCOME_COLORS = ["#6366f1", "#813fed", "#10b981", "#f59e0b", "#0ea5e9", "#94a3b8", "#ef4444", "#14b8a6"];
@@ -69,18 +70,21 @@ function AgentReportsView() {
   const [upsellId, setUpsellId] = useState<string | null>(null);
   // when set, the appointment-count drill-down modal is open (lists the leads behind the number)
   const [apptModal, setApptModal] = useState<{ service: "sales" | "service"; agentType: string; title: string; sub: string } | null>(null);
+  // Resolved up-front (before the effects/handlers below that reference teamId for analytics).
+  const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
 
   useEffect(() => {
     const stored = typeof window !== "undefined" ? window.localStorage.getItem("vini.apptCost") : null;
     if (stored) setApptCost(Number(stored));
-    else setCostModalOpen(true); // first visit — ask once
+    else { setCostModalOpen(true); track("cost_per_appt_prompted", { team_id: teamId }); } // first visit — ask once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const saveApptCost = (v: number) => {
     setApptCost(v);
     if (typeof window !== "undefined") window.localStorage.setItem("vini.apptCost", String(v));
     setCostModalOpen(false);
+    track("cost_per_appt_set", { team_id: teamId, cost: v });
   };
-  const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
   // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
   const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
@@ -92,6 +96,8 @@ function AgentReportsView() {
     const t = setInterval(() => setNow(Date.now()), 30000); // tick the "synced X ago" label
     return () => clearInterval(t);
   }, []);
+  // Engagement: fires once per opened agent report (the rooftop is resolved by mount).
+  useEffect(() => { track("report_viewed", { tab: "agents", team_id: teamId }); }, [teamId]);
   useEffect(() => {
     if (!teamId) { setFeed(null); return; } // no rooftop selected → no data
     let on = true;
@@ -100,16 +106,17 @@ function AgentReportsView() {
     setFeed(cached);
     fetchAgents({ teamId, ...rangeOpts })
       .then((res) => { if (on) setFeed(res); })
-      .catch(() => { if (on && !cached) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
+      .catch(() => { if (!on) return; track("report_load_failed", { tab: "agents", team_id: teamId }); if (!cached) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, bucket, custom]);
   const refresh = () => {
     if (!teamId) return;
+    track("report_refreshed", { tab: "agents", team_id: teamId });
     setFeed(null);
     fetchAgents({ teamId, ...rangeOpts, force: true })
       .then(setFeed)
-      .catch(() => setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }));
+      .catch(() => { track("report_load_failed", { tab: "agents", team_id: teamId }); setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
   };
   // Scope the live feed (and the no-crash mock skeleton) to the agents this rooftop actually runs.
   const AGENTS = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
@@ -150,13 +157,15 @@ function AgentReportsView() {
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
     feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
-  const openApptDrill = () =>
+  const openApptDrill = () => {
+    track("appointments_drilldown_opened", { tab: "agents", team_id: teamId, agent: a.id });
     setApptModal({
       service: a.id.startsWith("service") ? "service" : "sales",
       agentType: a.id,
       title: `Appointments · ${periodLabel}`,
       sub: `${r.summary.person} · ${a.name} — the leads behind this number`,
     });
+  };
   // only offer the drill-down when there's a non-zero count to drill into
   const canDrill = live && scale(m.appointments) > 0;
   const agentEmpty = live && hasTeam && !!feed?.hasData && Math.round(scale(m.calls)) === 0;
@@ -227,8 +236,8 @@ function AgentReportsView() {
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
-                  onPreset={(b) => { setBucket(b); setCustom(null); }}
-                  onCustom={(r) => setCustom(r)}
+                  onPreset={(b) => { setBucket(b); setCustom(null); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
+                  onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "agents", range: "custom", team_id: teamId }); }}
                 />
               </div>
             ) : (
@@ -264,7 +273,7 @@ function AgentReportsView() {
               return (
                 <button
                   key={ag.id}
-                  onClick={() => { setActiveId(ag.id); setUpsellId(null); }}
+                  onClick={() => { setActiveId(ag.id); setUpsellId(null); track("agent_switched", { team_id: teamId, agent: ag.id }); }}
                   className={`flex items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-all ${
                     selected
                       ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
@@ -288,7 +297,7 @@ function AgentReportsView() {
               return (
                 <button
                   key={ag.id}
-                  onClick={() => setUpsellId(ag.id)}
+                  onClick={() => { setUpsellId(ag.id); track("agent_upsell_viewed", { team_id: teamId, agent: ag.id }); }}
                   className={`flex items-center gap-3 rounded-xl border border-dashed px-3.5 py-2.5 text-left transition-all ${
                     selected
                       ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
@@ -319,7 +328,7 @@ function AgentReportsView() {
           {scenario === "onboarding" && <OnboardingAgents agent={a} view={view} />}
 
           {live && agentEmpty && (
-            <NoActivity name={a.name} onWiden={() => { setBucket("last30"); setCustom(null); }} />
+            <NoActivity name={a.name} onWiden={() => { setBucket("last30"); setCustom(null); track("empty_window_widened", { team_id: teamId, agent: a.id }); }} />
           )}
 
           {live && !agentEmpty && (
@@ -363,7 +372,7 @@ function AgentReportsView() {
                         ×{" "}
                         <b className="text-[#111]">{fmtMoneyFull(apptCost)}</b> per appointment{" "}
                         <button
-                          onClick={() => setCostModalOpen(true)}
+                          onClick={() => { setCostModalOpen(true); track("cost_per_appt_edit_opened", { team_id: teamId }); }}
                           className="ml-1 font-semibold text-[#059669] underline decoration-dotted underline-offset-2 hover:decoration-solid"
                         >
                           Edit
@@ -405,7 +414,7 @@ function AgentReportsView() {
               </section>
 
               <button
-                onClick={() => setShowDetail((v) => !v)}
+                onClick={() => { const next = !showDetail; setShowDetail(next); track("agent_detail_toggled", { team_id: teamId, agent: a.id, shown: next }); }}
                 className="mx-auto mt-1 rounded-lg border border-[#e5e7eb] bg-white px-4 py-2 text-[12px] font-semibold text-[#6b7280] hover:bg-[#faf8ff] hover:text-[#813fed] transition-colors"
               >
                 {showDetail ? "Hide detailed metrics ▴" : "Show detailed metrics ▾"}

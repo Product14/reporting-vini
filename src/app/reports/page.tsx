@@ -25,6 +25,7 @@ import {
 } from "@/components/reports/kit";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult } from "@/components/reports/liveData";
+import { track } from "@/lib/analytics";
 
 const AGENT_COLOR: Record<string, string> = {
   sales_ib: "#6366f1",
@@ -58,6 +59,10 @@ export default function OverviewReportPage() {
     const t = setInterval(() => setNow(Date.now()), 30000);
     return () => clearInterval(t);
   }, []);
+  // Engagement: the rooftop has resolved by the time this page mounts (the layout's
+  // ScenarioProvider holds children behind a loader until then), so this fires once
+  // per opened report with the real team_id. team_id "" → "(unscoped)" in track().
+  useEffect(() => { track("report_viewed", { tab: "overview", team_id: teamId }); }, [teamId]);
   useEffect(() => {
     if (!teamId) return; // no rooftop selected → leave feed as-is (UI shows the no-rooftop state)
     let on = true;
@@ -67,16 +72,17 @@ export default function OverviewReportPage() {
     setFeed(cached);
     fetchAgents({ teamId, ...rangeOpts })
       .then((res) => { if (on) setFeed(res); })
-      .catch(() => { if (on && !cached) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
+      .catch(() => { if (!on) return; track("report_load_failed", { tab: "overview", team_id: teamId }); if (!cached) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, bucket, custom]);
   const refresh = () => {
     if (!teamId) return;
+    track("report_refreshed", { tab: "overview", team_id: teamId });
     setFeed(null);
     fetchAgents({ teamId, ...rangeOpts, force: true })
       .then(setFeed)
-      .catch(() => setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }));
+      .catch(() => { track("report_load_failed", { tab: "overview", team_id: teamId }); setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
   };
 
   // Scope to the agents this rooftop actually runs, then aggregate the live numbers.
@@ -89,6 +95,7 @@ export default function OverviewReportPage() {
   // Appointment drill-down — clicking the headline count lists the rooftop's appointments (sales +
   // service) for the shown window. Window = the server-resolved dates when we have them, else the bucket.
   const [apptModalOpen, setApptModalOpen] = useState(false);
+  const openApptModal = () => { setApptModalOpen(true); track("appointments_drilldown_opened", { tab: "overview", team_id: teamId }); };
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
     feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
   // ROI gate: only surface a $ "value created" when real revenue exceeds run cost. Both are zeroed today
@@ -132,8 +139,8 @@ export default function OverviewReportPage() {
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
-                  onPreset={(b) => { setBucket(b); setCustom(null); }}
-                  onCustom={(r) => setCustom(r)}
+                  onPreset={(b) => { setBucket(b); setCustom(null); track("date_range_changed", { tab: "overview", range: b, team_id: teamId }); }}
+                  onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "overview", range: "custom", team_id: teamId }); }}
                 />
                 <button
                   onClick={refresh}
@@ -182,7 +189,7 @@ export default function OverviewReportPage() {
                     <p className="mt-3 max-w-[560px] text-[14px] leading-snug text-[#d6cdf0]">
                       From{" "}
                       {fleet.appointments > 0 ? (
-                        <button onClick={() => setApptModalOpen(true)} className="font-bold text-white underline decoration-dotted underline-offset-2 hover:decoration-solid" title="See the appointments behind this number">
+                        <button onClick={openApptModal} className="font-bold text-white underline decoration-dotted underline-offset-2 hover:decoration-solid" title="See the appointments behind this number">
                           {fmtInt(fleet.appointments)} appointments
                         </button>
                       ) : (
@@ -197,7 +204,7 @@ export default function OverviewReportPage() {
                     <div className="mt-3 flex items-end gap-4">
                       {fleet.appointments > 0 ? (
                         <>
-                          <button onClick={() => setApptModalOpen(true)} className="group/appt text-left" title="See the appointments behind this number">
+                          <button onClick={openApptModal} className="group/appt text-left" title="See the appointments behind this number">
                             <span className="text-[64px] font-black leading-[0.9] tracking-[-0.03em] text-white underline decoration-dotted decoration-white/40 underline-offset-[8px] group-hover/appt:decoration-white">{fmtInt(fleet.appointments)}</span>
                           </button>
                           <span className="pb-2.5 text-[15px] font-semibold text-[#c4b5fd]">booked · view leads ↗</span>
@@ -239,7 +246,7 @@ export default function OverviewReportPage() {
               {ranked.map((a, i) => (
                 <button
                   key={a.id}
-                  onClick={() => router.push(`/reports/agents?team_id=${teamId}&agent=${a.id}`)}
+                  onClick={() => { track("agent_opened", { team_id: teamId, agent: a.id }); router.push(`/reports/agents?team_id=${teamId}&agent=${a.id}`); }}
                   className="group flex items-center gap-4 rounded-2xl border border-[#e9e9ee] bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-[#c4b5fd] hover:shadow-md"
                 >
                   <span className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-[#f3eaff] text-[12px] font-extrabold text-[#813fed]">{i + 1}</span>

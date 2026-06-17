@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AGENT_OPTIONS,
@@ -11,6 +11,7 @@ import {
 } from "@/context/NewCampaignContext";
 import { Bucket, BUCKET_LABELS, BucketToggle, CalibratingBanner, GlanceStat, ReportTopBar, Td, Th } from "@/components/reports/kit";
 import { useScenario } from "@/components/reports/scenario";
+import { track } from "@/lib/analytics";
 
 /* Per-campaign run history. Phase 1 reads the in-memory NewCampaignContext;
  * Phase 2 swaps to GET /campaign/list (see IMPL_Reporting). */
@@ -52,10 +53,12 @@ function deriveMetrics(campaigns: LaunchedCampaign[]) {
 export default function CampaignsReportPage() {
   const router = useRouter();
   const { launchedCampaigns } = useNewCampaign();
-  const { scenario, view } = useScenario();
+  const { scenario, view, teamId } = useScenario();
   const [bucket, setBucket] = useState<Bucket>("yesterday");
   const [filterSubType, setFilterSubType] = useState<string>("all");
   const periodLabel = scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
+  // Engagement: fires once per opened campaigns report (the rooftop is resolved by mount).
+  useEffect(() => { track("report_viewed", { tab: "campaigns", team_id: teamId }); }, [teamId]);
 
   const rows = useMemo(() => deriveMetrics(launchedCampaigns), [launchedCampaigns]);
   const filteredRows = useMemo(
@@ -91,7 +94,7 @@ export default function CampaignsReportPage() {
           active="campaigns"
           right={
             scenario === "repeat" ? (
-              <BucketToggle bucket={bucket} onChange={setBucket} />
+              <BucketToggle bucket={bucket} onChange={(b) => { setBucket(b); track("date_range_changed", { tab: "campaigns", range: b, team_id: teamId }); }} />
             ) : (
               <span className="rounded-lg bg-[#f3eaff] px-3 py-1.5 text-[12px] font-semibold text-[#813fed]">{view.liveLabel}</span>
             )
@@ -148,7 +151,7 @@ export default function CampaignsReportPage() {
                 <label className="text-[11px] text-[#6b7280]">Sub-type</label>
                 <select
                   value={filterSubType}
-                  onChange={(e) => setFilterSubType(e.target.value)}
+                  onChange={(e) => { setFilterSubType(e.target.value); track("campaigns_filtered", { team_id: teamId, subtype: e.target.value }); }}
                   className="rounded-lg border border-[#e5e7eb] bg-white px-2.5 py-1.5 text-[12px] text-[#111] focus:border-[#813fed] focus:outline-none"
                 >
                   <option value="all">All</option>
@@ -190,7 +193,7 @@ export default function CampaignsReportPage() {
                     return (
                       <tr
                         key={r.campaign.id}
-                        onClick={() => router.push(`/campaign/${r.campaign.id}`)}
+                        onClick={() => { track("campaign_opened", { team_id: teamId, campaign_id: r.campaign.id }); router.push(`/campaign/${r.campaign.id}`); }}
                         className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] cursor-pointer transition-colors"
                       >
                         <Td>

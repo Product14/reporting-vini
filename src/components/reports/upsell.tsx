@@ -8,6 +8,7 @@
 import { useState } from "react";
 import { type AgentData, fmtInt } from "./kit";
 import type { SpeedToLead } from "./data";
+import { track } from "@/lib/analytics";
 
 interface UpsellCopy {
   headline: string;
@@ -110,7 +111,7 @@ export function UpsellAgent({
         </div>
         {!open && (
           <button
-            onClick={() => setOpen(true)}
+            onClick={() => { setOpen(true); track("agent_interest_opened", { team_id: teamId, agent: agent.id }); }}
             className="flex-none rounded-xl bg-[#813fed] px-5 py-2.5 text-[13px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
           >
             I’m interested →
@@ -209,7 +210,7 @@ export function StlUpsell({ accountName, teamId, stl }: { accountName: string; t
         <InterestForm agentId="speed_to_lead" agentName="Speed to Lead" accountName={accountName} teamId={teamId} onCancel={() => setOpen(false)} />
       ) : (
         <button
-          onClick={() => setOpen(true)}
+          onClick={() => { setOpen(true); track("agent_interest_opened", { team_id: teamId, agent: "speed_to_lead" }); }}
           className="mt-1 self-start rounded-xl bg-[#813fed] px-4 py-2 text-[12.5px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
         >
           {slow ? "Speed up my responses →" : "I’m interested →"}
@@ -265,6 +266,8 @@ function InterestForm({
       const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (!res.ok || !body.ok) throw new Error(body.error || "Something went wrong.");
       setStatus("done");
+      // Conversion — the upsell funnel's end. No PII: only which agent + rooftop.
+      track("agent_interest_submitted", { team_id: teamId, agent: agentId });
     } catch (e) {
       setStatus("error");
       setError((e as Error).message);
