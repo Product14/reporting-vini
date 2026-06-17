@@ -1455,7 +1455,9 @@ export function MeetingsModal({
   sub?: string;
   fetchOpts: MeetingFetchOpts;
 }) {
-  const [state, setState] = useState<{ loading: boolean; meetings: Meeting[]; error: boolean }>({ loading: true, meetings: [], error: false });
+  // `total` is the authoritative count (matches the tile); `meetings` is the live detail list, which may
+  // be shorter when a booked lead's meeting record can't be fetched — hence the "showing X of N" footer.
+  const [state, setState] = useState<{ loading: boolean; meetings: Meeting[]; total: number; error: boolean }>({ loading: true, meetings: [], total: 0, error: false });
   // Refetch only when the actual params change (object identity would refetch every render).
   const key = JSON.stringify([fetchOpts.teamId, fetchOpts.service, fetchOpts.scope, fetchOpts.bucket, fetchOpts.start, fetchOpts.end, fetchOpts.agentType]);
 
@@ -1463,22 +1465,23 @@ export function MeetingsModal({
     if (!open) return;
     let on = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState({ loading: true, meetings: [], error: false });
+    setState({ loading: true, meetings: [], total: 0, error: false });
     fetchMeetings(fetchOpts)
       .then((r) => {
         if (!on) return;
         const error = Boolean(r.error);
-        setState({ loading: false, meetings: r.meetings, error });
+        const total = typeof r.total === "number" ? r.total : r.meetings.length;
+        setState({ loading: false, meetings: r.meetings, total, error });
         // What the drill-down actually shows — product depth + monitoring of the meetings service.
         track("appointments_drilldown_result", {
           team_id: fetchOpts.teamId,
-          status: error ? "error" : r.meetings.length ? "ok" : "empty",
-          count: r.meetings.length,
+          status: error ? "error" : total ? "ok" : "empty",
+          count: total,
         });
       })
       .catch(() => {
         if (!on) return;
-        setState({ loading: false, meetings: [], error: true });
+        setState({ loading: false, meetings: [], total: 0, error: true });
         track("appointments_drilldown_result", { team_id: fetchOpts.teamId, status: "error", count: 0 });
       });
     return () => { on = false; };
@@ -1521,15 +1524,22 @@ export function MeetingsModal({
             </div>
           ) : state.meetings.length ? (
             <MeetingsList meetings={state.meetings} />
+          ) : state.total > 0 ? (
+            // Count is known (from the tile's lead set) but the live meeting records couldn't be listed.
+            <div className="p-6">
+              <EmptyState icon="📅" title={`${state.total} appointment${state.total === 1 ? "" : "s"} booked`} body="We couldn't load the individual records just now — the count above is correct. Try again in a moment." />
+            </div>
           ) : (
             <div className="p-6">
               <EmptyState icon="📅" title="No appointments to show" body="No booked appointments fall in this period for this rooftop." />
             </div>
           )}
         </div>
-        {!state.loading && !state.error && state.meetings.length > 0 && (
+        {!state.loading && !state.error && state.total > 0 && (
           <div className="border-t border-[#f0f0f0] px-6 py-2.5 text-[11px] text-[#9ca3af]">
-            {state.meetings.length} appointment{state.meetings.length === 1 ? "" : "s"}
+            {state.meetings.length < state.total
+              ? `Showing ${state.meetings.length} of ${state.total} appointments`
+              : `${state.total} appointment${state.total === 1 ? "" : "s"}`}
           </div>
         )}
       </div>
