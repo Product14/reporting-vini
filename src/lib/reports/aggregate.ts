@@ -107,7 +107,11 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.sms_replied += num(r.sms_replied);
     a.after_hours += num(r.after_hours);
     a.talk_seconds += num(r.talk_seconds);
-    a.transfers += num(r.had_transfer);
+    // transfers: prefer the spine's disposition-based `transferred` flag (set when ended_reason=
+    // 'transferred') — it matches the Calls tab / console (Honda DTLA Jun 16: 94 ≈ 93). Fall back to the
+    // legacy `had_transfer` (IRA/resolution flag) on older Q12227 versions that don't emit it — that one
+    // undercounts ~⅓ (62 vs 94). Presence-checked (!= null) so a real 0 isn't read as "column absent".
+    a.transfers += r.transferred != null ? num(r.transferred) : num(r.had_transfer);
     a.callbacks += num(r.had_callback);
     a.query_resolved += num(r.query_resolved);
     a.opt_outs += num(r.opted_out_sms);

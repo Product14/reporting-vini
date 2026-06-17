@@ -42,20 +42,24 @@ function shiftDays(iso: string, n: number): string {
 }
 
 /* Date window per the UI's bucket toggle — ROLLING relative to today in the store's timezone (or UTC
- * when none is known). `end` is exclusive and equals today's date, so each window's latest included day
- * is yesterday (the freshest complete day; the sync lags real-time by ~a day). Widths match the
- * original fixed windows: Today = the latest complete day, Yesterday the one before, last7/14/30
- * trailing N-day windows, Lifetime all history. */
+ * when none is known). Windows INCLUDE today (the live, in-progress day) so the report aligns with the
+ * Spyne console's calendar days: "Today" is the current day, "Yesterday" the one before, last7/14/30 the
+ * trailing N days ENDING today, Lifetime all history. `end` is exclusive = tomorrow, so today is in range.
+ * Caveat: the current day is PARTIAL — end-call-reports enrich a few minutes after each call ends and the
+ * sync pulls on its own cadence, so "Today" trails a live console slightly until the day closes. (This
+ * replaced the old "Today = latest *complete* day" shift, which made every window read a day behind and
+ * disagree with the console's "Today".) */
 export function rangeFor(bucket: Bucket, timeZone?: string): { start: string; end: string } {
-  const end = todayIn(timeZone); // exclusive upper bound, store-local
+  const today = todayIn(timeZone);   // current calendar day, store-local
+  const end = shiftDays(today, 1);   // exclusive upper bound = tomorrow, so today is included
   switch (bucket) {
-    case "today": return { start: shiftDays(end, -1), end };
-    case "yesterday": return { start: shiftDays(end, -2), end: shiftDays(end, -1) };
-    case "last7": return { start: shiftDays(end, -7), end };
-    case "last14": return { start: shiftDays(end, -14), end };
-    case "last30": return { start: shiftDays(end, -30), end };
+    case "today": return { start: today, end };
+    case "yesterday": return { start: shiftDays(today, -1), end: today };
+    case "last7": return { start: shiftDays(today, -6), end };
+    case "last14": return { start: shiftDays(today, -13), end };
+    case "last30": return { start: shiftDays(today, -29), end };
     case "lifetime": return { start: "2020-01-01", end };
-    default: return { start: shiftDays(end, -30), end };
+    default: return { start: shiftDays(today, -29), end };
   }
 }
 

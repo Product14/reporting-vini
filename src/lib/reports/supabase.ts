@@ -24,6 +24,8 @@ export const REPORT_APPOINTMENTS = "report_appointments";
 export const REPORT_CALLBACKS = "report_callbacks";
 export const REPORT_CAMPAIGNS = "report_campaigns";
 export const REPORT_OUTCOMES = "report_outcomes";
+export const REPORT_OPEN_FUNNEL = "report_open_funnel"; // Sales-IB open funnel (card 12341); see 0007_report_open_funnel.sql
+export const REPORT_MONEY_ON_TABLE = "report_money_on_table"; // recoverable inbound leads (card 12236); see 0008_report_money_on_table.sql
 export const STL_LEAD_FIRST = "stl_lead_first";
 // Persisted rooftop timezone map (see supabase/migrations/0006_team_tz.sql). Seeded by the sync when a
 // Spyne token is available; read as a fallback so bucketing stays store-local across token outages.

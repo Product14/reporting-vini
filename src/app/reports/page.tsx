@@ -115,6 +115,17 @@ export default function OverviewReportPage() {
     const found = agents.find((a) => a.report.activeCampaigns?.length)?.report.activeCampaigns ?? [];
     return [...found].sort((a, b) => b.appts - a.appts);
   }, [agents]);
+  // Money on the table (card 12236): recoverable inbound leads, SUMMED across agents by bucket (each
+  // inbound agent carries its own agent_type's rows) — total + per-bucket breakdown, biggest first.
+  const money = useMemo(() => {
+    const byBucket = new Map<string, { label: string; leads: number }>();
+    for (const a of agents) for (const m of a.report.moneyOnTable ?? []) {
+      const e = byBucket.get(m.bucket) ?? { label: m.label, leads: 0 };
+      e.leads += m.leads; byBucket.set(m.bucket, e);
+    }
+    const buckets = [...byBucket.values()].sort((x, y) => y.leads - x.leads);
+    return { total: buckets.reduce((s, b) => s + b.leads, 0), buckets };
+  }, [agents]);
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -299,7 +310,26 @@ export default function OverviewReportPage() {
                 )}
               </Card>
               <Card title="Money on the table" sub="Revenue you could still win back">
-                <ComingSoon title="Revenue you can still recover" note="An estimate of the revenue within reach — leads worth re-engaging and the follow-ups most likely to close — so nothing valuable goes cold." />
+                {money.total ? (
+                  <div className="flex flex-col gap-4">
+                    <div>
+                      <p className="text-[30px] font-extrabold tabular-nums text-[#813fed] leading-none">{fmtInt(money.total)}</p>
+                      <p className="text-[11.5px] text-[#6b7280] mt-1">
+                        recoverable leads we engaged but that haven&apos;t booked{apptCost ? <> · up to <b className="text-[#111]">{fmtMoneyFull(money.total * apptCost)}</b> if recovered</> : null}
+                      </p>
+                    </div>
+                    <div className="flex flex-col gap-2.5">
+                      {money.buckets.map((b, i) => (
+                        <div key={i} className="flex items-center justify-between gap-3">
+                          <p className="truncate text-[12.5px] font-semibold text-[#111]">{b.label}</p>
+                          <p className="flex-none text-[13px] font-bold tabular-nums text-[#813fed]">{fmtInt(b.leads)} leads</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <ComingSoon title="Revenue you can still recover" note="An estimate of the revenue within reach — leads worth re-engaging and the follow-ups most likely to close — so nothing valuable goes cold." />
+                )}
               </Card>
             </div>
           </div>

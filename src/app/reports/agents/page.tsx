@@ -558,9 +558,13 @@ function AgentReportsView() {
                   </table>
                 </Card>
               </div>
-              {a.id === "sales_ib" && (
+              {(a.id === "sales_ib" || a.id === "service_ib") && (
                 <Card title="Speed to lead" sub="How fast new CRM leads get a first touch">
-                  {r.speedToLead && r.speedToLead.medianUnderMin ? (
+                  {a.id === "service_ib" ? (
+                    // STL is live for Sales Inbound only right now (card 12341 is Sales-IB scoped); show
+                    // a coming-soon state for Service Inbound until a service-side funnel exists.
+                    <EmptyState icon="⏱️" title="Coming soon" body="Speed-to-lead tracking isn't live for the service inbound agent yet — it'll appear here once enabled." />
+                  ) : r.speedToLead && r.speedToLead.medianUnderMin ? (
                     <div className="flex flex-col gap-4">
                       <div>
                         <p className="text-[30px] font-extrabold tabular-nums text-[#813fed] leading-none">{r.speedToLead.avg}</p>
@@ -572,6 +576,7 @@ function AgentReportsView() {
                         <SummaryStat label="Appointments booked" value={fmtInt(scale(r.speedToLead.instantAppts))} accent="#813fed" />
                         <SummaryStat label="Instant → appointment" value={`${r.speedToLead.instantApptRate}%`} />
                       </div>
+                      <StlOpenFunnel data={r.speedToLead.openFunnel} />
                     </div>
                   ) : (
                     <StlUpsell accountName={account.name} teamId={teamId} stl={r.speedToLead} />
@@ -1011,6 +1016,26 @@ function SummaryStat({ label, value, accent }: { label: string; value: string; a
     <div className="rounded-xl border border-[#f0f0f0] px-3 py-2.5">
       <p className="text-[10px] font-semibold uppercase tracking-wider text-[#9ca3af]">{label}</p>
       <p className="mt-0.5 text-[16px] font-bold tabular-nums" style={{ color: accent ?? "#111" }}>{value}</p>
+    </div>
+  );
+}
+
+/* Open-funnel split for Sales Inbound (card 12341 via report_open_funnel): appointments booked / leads
+ * handled, per acquisition path. `data` absent (no ETL row yet) → coming-soon. */
+function StlOpenFunnel({ data }: { data?: { stlLeadsHandled: number; stlAppts: number; stlRate: number; followupLeadsHandled: number; followupAppts: number; followupRate: number } }) {
+  return (
+    <div className="border-t border-[#f0f0f3] pt-4">
+      <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Leads handled → appointments booked <span className="font-semibold normal-case text-[#c4c4cc]">· all-time</span></p>
+      {data ? (
+        <div className="grid grid-cols-2 gap-3">
+          <SummaryStat label="Via speed-to-lead" value={`${fmtInt(data.stlAppts)} / ${fmtInt(data.stlLeadsHandled)}`} accent="#813fed" />
+          <SummaryStat label="Via follow-ups" value={`${fmtInt(data.followupAppts)} / ${fmtInt(data.followupLeadsHandled)}`} accent="#10b981" />
+          <SummaryStat label="STL booked rate" value={`${data.stlRate}%`} />
+          <SummaryStat label="Follow-up booked rate" value={`${data.followupRate}%`} />
+        </div>
+      ) : (
+        <p className="text-[11.5px] text-[#9ca3af]">Coming soon — appointments split by speed-to-lead vs follow-up.</p>
+      )}
     </div>
   );
 }

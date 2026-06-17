@@ -29,7 +29,11 @@ export interface RawRow {
   reached_person: number;
   sms_replied: number;
   query_resolved: number;
-  had_transfer: number;
+  // disposition-based transfer flag from the spine (1 when callDetails_endedReason='transferred').
+  // Matches the Calls tab / console; PREFERRED over had_transfer. Absent on pre-spine-edit Q12227.
+  transferred?: number;
+  had_transfer: number; // legacy IRA/resolution-derived flag; undercounts vs `transferred` (~62 vs 94).
+  // Retained upstream as the stricter "AI-completed-transfer" signal for a future quality view.
   had_callback: number;
   had_appt_intent: number;
   talk_seconds: number;
@@ -153,6 +157,28 @@ export interface OutcomeRow {
   agent_type: string | null; // "Sales Outbound" | "Service Outbound" — which outbound agent owns it
   outcome_bucket: string; // e.g. "1 No reach" … "9 Other"; numeric prefix is sort order only
   mappings: number;
+}
+// Sales-IB "open funnel" (card 12341 → report_open_funnel): leads handled → appointments booked, per
+// acquisition path. Rooftop-level, agent_type='Sales Inbound'. Rates are FRACTIONS (0.0771 = 7.71%);
+// build rounds them to whole-number %. All-time (12341 isn't date-windowed yet).
+export interface OpenFunnelRow {
+  team_id: string;
+  agent_type: string | null;
+  stl_leads_handled: number;
+  stl_appointments_booked: number;
+  stl_handled_to_booked_rate: number;
+  followup_leads_handled: number;
+  followup_appointments_booked: number;
+  followup_handled_to_booked_rate: number;
+}
+// "Money on the table" (card 12236 → report_money_on_table): recoverable INBOUND leads by bucket —
+// leads the AI engaged that haven't booked. Rooftop-level, per inbound agent_type. The bucket's letter
+// prefix ("A. ") is sort order only; build strips it for display.
+export interface RecoverableRow {
+  team_id: string;
+  agent_type: string | null; // "Sales Inbound" | "Service Inbound"
+  recoverable_bucket: string;
+  recoverable_leads: number;
 }
 
 // Single-row sync bookkeeping table (id = 1).

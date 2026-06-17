@@ -9,7 +9,7 @@
 
 import { AGENTS as MOCK_AGENTS, type AgentData } from "@/components/reports/data";
 import type { FetchResult, Basis } from "@/components/reports/liveData";
-import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow } from "./schema";
+import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow, OpenFunnelRow, RecoverableRow } from "./schema";
 
 const AGENT_TYPE_BY_ID: Record<AgentData["id"], string> = {
   sales_ib: "Sales Inbound",
@@ -59,6 +59,12 @@ export interface BuildInput {
   // Outbound disposition mix (from card 12231 via report_outcomes); attached to the matching outbound
   // agent. Replaces the dead Q12227 `outbound_outcome` path (that column never existed in Q12227).
   outcomes?: OutcomeRow[];
+  // Sales-IB open funnel (card 12341 via report_open_funnel) → the STL card's "leads handled →
+  // appointments booked" split (speed-to-lead vs follow-up). Attached to sales_ib only.
+  openFunnel?: OpenFunnelRow[];
+  // Recoverable inbound leads by bucket (card 12236 via report_money_on_table) → the Overview's
+  // "Money on the table" card. Attached per inbound agent_type; the Overview sums across agents.
+  recoverable?: RecoverableRow[];
   // Slot ids the dealer has actually onboarded (from the Spyne onboarded-agents API). When provided,
   // the report is GATED to these slots — agents the dealer hasn't paid for are dropped (personas kept
   // as-is). null/undefined → don't gate (show all four), the previous behavior.
@@ -101,7 +107,7 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, onboardedSlots, leadCounts, priorLeadCounts }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, openFunnel, recoverable, onboardedSlots, leadCounts, priorLeadCounts }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
   // Rooftop-level detail mapped once into the UI shapes. Appointments/callbacks attach to inbound
@@ -121,6 +127,11 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
   // Outbound disposition slices — strip the numeric sort-prefix ("1 No reach" → "No reach") for display.
   const outcomeItems = (outcomes ?? []).map((o) => ({
     agentType: o.agent_type, label: o.outcome_bucket.replace(/^\d+\s+/, ""), value: o.mappings,
+  }));
+  // Recoverable leads by bucket — strip the letter sort-prefix ("A. Warm…" → "Warm…") for display.
+  const recoverableItems = (recoverable ?? []).map((r) => ({
+    agentType: r.agent_type ?? "", bucket: r.recoverable_bucket,
+    label: r.recoverable_bucket.replace(/^[A-Za-z]\.\s*/, ""), leads: r.recoverable_leads,
   }));
 
   // prior-window per-agent basis (drives report.deltas + fleet deltas)
@@ -304,6 +315,19 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
             note: "",
           }
         : undefined;
+      // Open-funnel split (card 12341 → report_open_funnel): appts booked / leads handled by acquisition
+      // path. All-time (12341 isn't windowed yet), attached onto the windowed STL card. Sales IB only.
+      const ofRow = openFunnel?.find((o) => o.agent_type === type);
+      if (ofRow && a.report.speedToLead) {
+        a.report.speedToLead.openFunnel = {
+          stlLeadsHandled: ofRow.stl_leads_handled,
+          stlAppts: ofRow.stl_appointments_booked,
+          stlRate: Math.round((ofRow.stl_handled_to_booked_rate || 0) * 100),
+          followupLeadsHandled: ofRow.followup_leads_handled,
+          followupAppts: ofRow.followup_appointments_booked,
+          followupRate: Math.round((ofRow.followup_handled_to_booked_rate || 0) * 100),
+        };
+      }
     } else {
       a.report.speedToLead = undefined;
     }
@@ -337,6 +361,12 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     // Attached after the zeroing above so it survives for quiet agents.
     a.report.upcomingAppointments = apptItems.length ? apptItems : undefined;
     a.report.followUps = callbackItems.length ? callbackItems : undefined;
+    // Money on the table (card 12236): recoverable leads by bucket for this agent's inbound type.
+    // Summed across agents on the Overview; outbound agents match no rows → undefined.
+    const mineRec = recoverableItems.filter((r) => r.agentType === type);
+    a.report.moneyOnTable = mineRec.length
+      ? mineRec.map((r) => ({ bucket: r.bucket, label: r.label, leads: r.leads })).sort((x, y) => x.bucket.localeCompare(y.bucket))
+      : undefined;
     if (!inbound) {
       const mine = campaignItems.filter((c) => c.agentType === type);
       a.report.activeCampaigns = mine.length

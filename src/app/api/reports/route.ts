@@ -1,6 +1,6 @@
-import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_APPOINTMENTS, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES } from "@/lib/reports/supabase";
+import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_APPOINTMENTS, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_OPEN_FUNNEL, REPORT_MONEY_ON_TABLE } from "@/lib/reports/supabase";
 import { buildResult } from "@/lib/reports/build";
-import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow } from "@/lib/reports/schema";
+import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow, OpenFunnelRow, RecoverableRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots } from "@/lib/spyne/teamContext";
@@ -117,11 +117,13 @@ export async function GET(request: Request): Promise<Response> {
   const safe = async <T,>(p: PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> => {
     try { const { data, error } = await p; return error ? [] : ((data ?? []) as T[]); } catch { return []; }
   };
-  const [appointments, callbacks, campaigns, outcomes, leadCounts, priorLeadCounts] = await Promise.all([
+  const [appointments, callbacks, campaigns, outcomes, openFunnel, recoverable, leadCounts, priorLeadCounts] = await Promise.all([
     safe<AppointmentRow>(sb.from(REPORT_APPOINTMENTS).select("*").eq("team_id", teamId)),
     safe<CallbackRow>(sb.from(REPORT_CALLBACKS).select("*").eq("team_id", teamId)),
     safe<CampaignRow>(sb.from(REPORT_CAMPAIGNS).select("*").eq("team_id", teamId)),
     safe<OutcomeRow>(sb.from(REPORT_OUTCOMES).select("*").eq("team_id", teamId)),
+    safe<OpenFunnelRow>(sb.from(REPORT_OPEN_FUNNEL).select("*").eq("team_id", teamId)),
+    safe<RecoverableRow>(sb.from(REPORT_MONEY_ON_TABLE).select("*").eq("team_id", teamId)),
     leadCountsFor(sb, teamId, start, end),
     leadCountsFor(sb, teamId, prior.start, prior.end),
   ]);
@@ -134,6 +136,8 @@ export async function GET(request: Request): Promise<Response> {
     callbacks,
     campaigns,
     outcomes,
+    openFunnel,
+    recoverable,
     onboardedSlots,
     leadCounts,
     priorLeadCounts,

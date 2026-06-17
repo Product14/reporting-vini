@@ -83,7 +83,7 @@ Sources: [data.ts](src/components/reports/data.ts) (model + mock),
 | `intent` | Intent mix (high / mid / low intent, not qualified) | yes |
 | `qualifiedPct` | % of connected conversations that qualified | yes |
 | `queries` | Per-topic resolution: how often the agent resolved a topic **without a human** | yes |
-| `callFlow` | Funnel: total → answered / missed → transferred / lost, plus `handledByAI` | yes |
+| `callFlow` | Funnel: total → answered / missed → transferred / lost, plus `handledByAI`. **`transferred`** is disposition-based (spine `transferred` flag = `ended_reason='transferred'`) so it reconciles with the Calls tab / console; the stricter IRA flag `had_transfer` (≈⅓ lower) is retained upstream for a future "AI-completed transfer" quality view. | yes |
 | `multiDayReply` | Reply rate by days-since-first-touch (same-day, day 1, 2, 3+) | yes |
 | `summary` | Persona card: name, conversations, avg first-contact, appts booked, booking rate | partial |
 
