@@ -1,6 +1,9 @@
-// Captures "I'm interested in this agent" submissions from the Agents report upsell flow.
-// Always logs the lead server-side so it's never lost; if AGENT_INTEREST_WEBHOOK_URL is set
-// (Slack-compatible incoming webhook), it also forwards a human-readable message.
+// Captures "I'm interested in this agent" / any CTA submissions from the reports upsell flow.
+// Always logs the lead server-side so it's never lost; it also (a) emails the product team via the
+// internal mail API (sendInterestEmail) and (b), if AGENT_INTEREST_WEBHOOK_URL is set, forwards a
+// Slack-compatible message. Both side-channels are best-effort and never fail the user's submission.
+import { sendInterestEmail } from "@/lib/mail";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -46,6 +49,9 @@ export async function POST(request: Request): Promise<Response> {
 
   // Captured regardless of whether a downstream destination is wired yet.
   console.log("[agent-interest]", JSON.stringify(lead));
+
+  // Email the product team (product@ + Devansh + Mehul). Best-effort: never blocks the response.
+  await sendInterestEmail(lead);
 
   const hook = process.env.AGENT_INTEREST_WEBHOOK_URL;
   if (hook) {
