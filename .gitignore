@@ -33,3 +33,7 @@ next-env.d.ts
 # local agent-skill installs (npx skills add …)
 /.agents
 /skills-lock.json
+
+# reporting-vini metrics scripts — runtime artifacts
+scripts/.metrics_refresh.log
+scripts/.objection_ai_ledger.json
