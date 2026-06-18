@@ -45,20 +45,59 @@ def load_env_local() -> None:
         os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
 
-# ── ClickHouse via the `ch` CLI (one statement per call; JSON for clean parsing) ───────────────────
+# ── ClickHouse. Two transports, same JSONEachRow output:
+#   • Local: the read-only `ch` CLI (creds in ~/.clickhouse-spyne.env).
+#   • CI/server: direct HTTPS to ClickHouse Cloud when CH_HOST is set (the `ch` binary isn't on a
+#     GitHub runner) — same endpoint/headers the `ch` wrapper uses. ──
+def _ch_http(sql: str) -> str:
+    host, port = os.environ["CH_HOST"], os.environ.get("CH_PORT", "8443")
+    req = urllib.request.Request(
+        f"https://{host}:{port}/?default_format=JSONEachRow",
+        data=sql.encode(),
+        method="POST",
+        headers={
+            "X-ClickHouse-User": os.environ.get("CH_USER", ""),
+            "X-ClickHouse-Key": os.environ.get("CH_PASSWORD", ""),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.read().decode()
+    except HTTPError as e:
+        sys.exit(f"ClickHouse HTTP error [{e.code}]: {e.read().decode()[:500]}\n--- sql ---\n{sql}")
+    except URLError as e:
+        sys.exit(f"ClickHouse HTTP connect error: {e.reason}\n--- sql ---\n{sql}")
+
+
 def ch_rows(sql: str) -> list[dict]:
-    env = {**os.environ, "CH_FORMAT": "JSONEachRow"}
-    r = subprocess.run(["ch", sql], capture_output=True, text=True, env=env)
-    if r.returncode != 0:
-        sys.exit(f"ch error:\n{r.stderr.strip()}\n--- sql ---\n{sql}")
-    # JSONEachRow → one object per line. Skip any stray non-JSON line the CLI may emit (notices, blanks).
-    rows = [json.loads(line) for line in r.stdout.splitlines() if line.strip().startswith("{")]
-    # ClickHouse reports query errors as a JSON {"exception": "..."} row even with exit 0 — never let
+    if os.environ.get("CH_HOST"):
+        out = _ch_http(sql)
+    else:
+        env = {**os.environ, "CH_FORMAT": "JSONEachRow"}
+        r = subprocess.run(["ch", sql], capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            sys.exit(f"ch error:\n{r.stderr.strip()}\n--- sql ---\n{sql}")
+        out = r.stdout
+    # JSONEachRow → one object per line. Skip any stray non-JSON line (notices, blanks).
+    rows = [json.loads(line) for line in out.splitlines() if line.strip().startswith("{")]
+    # ClickHouse reports query errors as a JSON {"exception": "..."} row even with HTTP 200 — never let
     # that masquerade as data (it would push a bad row and silently mislead). Fail loudly instead.
     for row in rows:
         if "exception" in row:
             sys.exit(f"ch query error: {row['exception']}\n--- sql ---\n{sql}")
     return rows
+
+
+def active_rooftops(min_calls: int, days: int) -> list[tuple]:
+    """Every rooftop with >= min_calls in the window → [(enterpriseId, teamId), ...]."""
+    rows = ch_rows(f"""
+        SELECT enterpriseId AS ent, teamId AS team
+        FROM dealer_leads.endcallreports
+        WHERE createdAt>=today()-{days} AND isActive AND NOT __deleted AND NOT isTestCall
+          AND enterpriseId!='' AND teamId!='' AND enterpriseId IS NOT NULL AND teamId IS NOT NULL
+        GROUP BY ent, team HAVING count()>={min_calls} ORDER BY count() DESC
+    """)
+    return [(r["ent"], r["team"]) for r in rows if r.get("ent") and r.get("team")]
 
 
 def q(s: str) -> str:
@@ -227,34 +266,50 @@ def post(base_url: str, secret: str, payload: dict) -> dict:
         sys.exit(f"POST failed: {e.reason}")
 
 
+def push_one(ent: str, team: str, days: int, base_url: str, secret: str, dry_run: bool) -> bool:
+    sections = build_sections(ent, team, days)
+    payload = {"team_id": team, "window_days": days, **sections}
+    if dry_run:
+        print(f"[dry-run] {ent}/{team}: " + ", ".join(f"{k}={len(v)}" for k, v in sections.items()))
+        return True
+    result = post(base_url, secret, payload)
+    ok = bool(result.get("ok"))
+    print(f"{'✓' if ok else '✗'} {team} → {json.dumps(result)}")
+    return ok
+
+
 def main() -> None:
     load_env_local()  # so REPORTS_BASE_URL / CRON_SECRET can live in .env.local
     ap = argparse.ArgumentParser(description="Compute coming-soon metrics from ClickHouse and push to Supabase.")
-    ap.add_argument("--ent", required=True, help="enterpriseId")
-    ap.add_argument("--team", required=True, help="teamId")
+    ap.add_argument("--ent", help="enterpriseId (omit with --all)")
+    ap.add_argument("--team", help="teamId (omit with --all)")
+    ap.add_argument("--all", action="store_true", help="sweep every active rooftop (>= --min-calls)")
+    ap.add_argument("--min-calls", type=int, default=int(os.environ.get("MIN_CALLS", "50")))
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--base-url", default=os.environ.get("REPORTS_BASE_URL", ""))
-    ap.add_argument("--dry-run", action="store_true", help="print the payload, don't POST")
+    ap.add_argument("--dry-run", action="store_true", help="compute only, don't POST")
     args = ap.parse_args()
 
-    sections = build_sections(args.ent, args.team, args.days)
-    payload = {"team_id": args.team, "window_days": args.days, **sections}
-
-    print(f"Computed sections for {args.ent}/{args.team} (last {args.days}d):")
-    for k, v in sections.items():
-        print(f"  {k:20} {len(v)} rows")
-
-    if args.dry_run:
-        print("\n[dry-run] payload:")
-        print(json.dumps(payload, indent=2, default=str))
-        return
-
     secret = os.environ.get("CRON_SECRET")
-    if not args.base_url or not secret:
+    if not args.dry_run and (not args.base_url or not secret):
         sys.exit("Set REPORTS_BASE_URL (or --base-url) and CRON_SECRET to POST. Use --dry-run to preview.")
 
-    result = post(args.base_url, secret, payload)
-    print(f"\nPushed → {json.dumps(result)}")
+    if args.all:
+        rooftops = active_rooftops(args.min_calls, args.days)
+        print(f"Sweeping {len(rooftops)} rooftops (>= {args.min_calls} calls/{args.days}d)…")
+        ok = 0
+        for ent, team in rooftops:
+            try:
+                if push_one(ent, team, args.days, args.base_url, secret, args.dry_run):
+                    ok += 1
+            except (SystemExit, Exception) as e:  # one bad rooftop must not abort the sweep
+                print(f"✗ {team} → {e}")
+        print(f"\nDone: {ok}/{len(rooftops)} ok")
+        return
+
+    if not args.ent or not args.team:
+        sys.exit("Provide --ent and --team, or use --all.")
+    push_one(args.ent, args.team, args.days, args.base_url, secret, args.dry_run)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,35 @@
+name: Refresh report metrics
+
+# Always-on replacement for the local cron: sweeps every active rooftop's "coming soon" metrics
+# (AGENT_FIELDS.md widgets #9/#12/#15/#16/#19/#22/#23 + the showed metric) from ClickHouse and pushes
+# each to the prod /api/reports/metrics ingest endpoint. Runs on GitHub's runners (so it doesn't
+# depend on anyone's laptop being awake). ClickHouse Cloud is reached over HTTPS using repo secrets.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours (UTC)
+  workflow_dispatch: # manual "Run workflow" button / gh workflow run
+
+# Don't let a slow sweep overlap the next scheduled one.
+concurrency:
+  group: refresh-metrics
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sweep all rooftops → prod ingest
+        env:
+          CH_HOST: ${{ secrets.CH_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT }}
+          CH_USER: ${{ secrets.CH_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          REPORTS_BASE_URL: ${{ secrets.REPORTS_BASE_URL }}
+        run: python3 scripts/push_metrics.py --all
