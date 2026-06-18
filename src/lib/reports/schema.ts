@@ -181,6 +181,90 @@ export interface RecoverableRow {
   recoverable_leads: number;
 }
 
+// ── "Coming soon" metrics derived from ClickHouse (dealer_leads), not Q12227. Written by
+//    scripts/push_metrics.py via POST /api/reports/metrics; read by GET /api/reports/metrics.
+//    Rooftop-level (team_id). Rates are FRACTIONS (0.779 = 77.9%). See 0009_report_coming_soon.sql. ──
+export interface ApptStatusRow {
+  team_id: string;
+  service_type: string | null;
+  booked_via: string | null; // "call" | "sms/chat"
+  booked: number;
+  showed: number;
+  no_show: number;
+  cancelled: number;
+  upcoming: number;
+  show_rate: number | null;
+  window_days: number | null;
+}
+export interface TransferQualityRow {
+  team_id: string;
+  transfers_ok: number;
+  transfers_failed: number;
+  forwarded: number;
+  success_rate: number | null;
+  window_days: number | null;
+}
+export interface CallsByReasonRow {
+  team_id: string;
+  direction: string | null; // "inbound" | "outbound"
+  reason: string;
+  calls: number;
+  booked: number;
+  window_days: number | null;
+}
+export interface OutboundCampaignRow {
+  team_id: string;
+  campaign_id: string | null;
+  name: string | null;
+  status: string | null;
+  days_live: number | null;
+  leads: number;
+  call_tasks: number;
+  sms_tasks: number;
+  appts: number;
+  conversion_rate: number | null;
+}
+export interface ObjectionRow {
+  team_id: string;
+  kind: string; // "outbound_outcome" | "theme"
+  label: string;
+  channel: string | null; // "call" | "sms" for outbound_outcome
+  count: number;
+  examples: string[] | null;
+  window_days: number | null;
+}
+export interface MissedOpportunityRow {
+  team_id: string;
+  channel: string; // "call" | "sms"
+  category: string; // voicemail / no_answer / abandoned / sms_failed
+  count: number;
+  window_days: number | null;
+}
+export interface UpcomingMeetingRow {
+  team_id: string;
+  lead_id: string | null;
+  service_type: string | null;
+  intent: string | null;
+  booked_via: string | null;
+  meeting_start_time: string | null;
+}
+export interface FollowUpRow {
+  team_id: string;
+  source: string | null; // "call_action_item" | "outbound_callback"
+  channel: string | null; // "call" | "sms"
+  lead_id: string | null;
+  detail: string | null;
+  due_at: string | null;
+}
+export interface HighlightRow {
+  team_id: string;
+  direction: string | null;
+  use_case: string | null;
+  score: number | null;
+  title: string | null;
+  occurred_on: string | null;
+}
+
 // Single-row sync bookkeeping table (id = 1).
 export interface SyncState {
   id: number;

@@ -263,6 +263,35 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
   return result;
 }
 
+/* Coming-soon metrics derived from ClickHouse and stored in Supabase by scripts/push_metrics.py — read
+ * from GET /api/reports/metrics (rooftop-level, separate from the Q12227 aggregate fetchAgents reads).
+ * Only the fields the UI renders are typed. Returns null when no rooftop / on any error → the widgets
+ * stay on their "coming soon" placeholder, so a missing push never breaks the report. */
+export interface ReportMetrics {
+  transfer_quality: { transfers_ok: number; transfers_failed: number; forwarded: number; success_rate: number | null } | null;
+  calls_by_reason: Array<{ direction: string | null; reason: string; calls: number; booked: number }>;
+  missed: Array<{ channel: string; category: string; count: number }>;
+  highlights: Array<{ direction: string | null; use_case: string | null; score: number | null; title: string | null; occurred_on: string | null }>;
+}
+
+export async function fetchReportMetrics(teamId: string): Promise<ReportMetrics | null> {
+  if (!teamId) return null;
+  try {
+    const r = await fetch(`/api/reports/metrics?team_id=${encodeURIComponent(teamId)}`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const j = (await r.json()) as Partial<ReportMetrics> | null;
+    if (!j) return null;
+    return {
+      transfer_quality: j.transfer_quality ?? null,
+      calls_by_reason: Array.isArray(j.calls_by_reason) ? j.calls_by_reason : [],
+      missed: Array.isArray(j.missed) ? j.missed : [],
+      highlights: Array.isArray(j.highlights) ? j.highlights : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface MeetingFetchOpts {
   teamId: string;
   enterpriseId?: string; // host-forwarded on the iframe URL; else the server decodes it from the token

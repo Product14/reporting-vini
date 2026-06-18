@@ -1,0 +1,3 @@
+# For scripts/objection_clusters.py — only needed to enable the AI theme-labelling step.
+# The pure-Python clustering (--no-ai) has no third-party deps.
+anthropic>=0.40

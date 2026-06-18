@@ -38,12 +38,20 @@ import {
   TrendBars,
 } from "@/components/reports/kit";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchMeetings, agentsForAccount, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { track } from "@/lib/analytics";
 
 // Palette for the outbound-outcomes SplitBar — outcomes are ranked by volume, so colors are positional.
 const OUTCOME_COLORS = ["#6366f1", "#813fed", "#10b981", "#f59e0b", "#0ea5e9", "#94a3b8", "#ef4444", "#14b8a6"];
+
+// Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
+const MISSED_LABELS: Record<string, string> = {
+  voicemail: "Went to voicemail",
+  no_answer: "No answer",
+  abandoned: "Abandoned (silence)",
+  sms_failed: "SMS failed to deliver",
+};
 
 // useSearchParams() (to read ?agent=) needs a Suspense boundary above it.
 export default function AgentReportsPage() {
@@ -110,6 +118,17 @@ function AgentReportsView() {
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, bucket, custom]);
+  // Coming-soon metrics (transfer success, calls-by-reason, highlights/missed) from /api/reports/metrics
+  // — a rooftop-level snapshot pushed from ClickHouse, separate from the Q12227 feed. Each widget falls
+  // back to its "coming soon" placeholder when this is null/empty, so a missing push never breaks render.
+  const [metrics, setMetrics] = useState<ReportMetrics | null>(null);
+  useEffect(() => {
+    let on = true;
+    Promise.resolve(teamId ? fetchReportMetrics(teamId) : null)
+      .then((mx) => { if (on) setMetrics(mx); })
+      .catch(() => { if (on) setMetrics(null); });
+    return () => { on = false; };
+  }, [teamId]);
   const refresh = () => {
     if (!teamId) return;
     track("report_refreshed", { tab: "agents", team_id: teamId });
@@ -667,7 +686,15 @@ function AgentReportsView() {
               <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
               <ComingSoon title="CSAT" inline />
               <ComingSoon title="Positive sentiment" inline />
-              <ComingSoon title={a.quality.fourthLabel} inline />
+              {metrics?.transfer_quality?.success_rate != null && a.quality.fourthLabel.toLowerCase().includes("transfer") ? (
+                <QCell
+                  label={a.quality.fourthLabel}
+                  value={`${Math.round(metrics.transfer_quality.success_rate * 100)}%`}
+                  status={metrics.transfer_quality.success_rate >= 0.8 ? "green" : metrics.transfer_quality.success_rate >= 0.6 ? "amber" : "red"}
+                />
+              ) : (
+                <ComingSoon title={a.quality.fourthLabel} inline />
+              )}
             </div>
           </Card>
 
@@ -681,21 +708,86 @@ function AgentReportsView() {
             </Card>
           </div>
 
-          {/* highlights */}
+          {/* highlights & missed — rooftop-level, from ClickHouse via /api/reports/metrics */}
           <Card title="Highlights & missed opportunities" sub="Standout moments worth a closer look" pad={false}>
-            <div className="px-6 py-5">
-              <ComingSoon title="Your wins — and the ones that got away" note="The best moments the agent caught, plus the deals worth a second look, gathered in one place so you can act on them quickly." />
-            </div>
+            {metrics && (metrics.highlights.length > 0 || metrics.missed.length > 0) ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2">
+                <div className="px-6 py-5 sm:border-r sm:border-[#f0f0f0]">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#059669]">Wins · best booked calls</p>
+                  {metrics.highlights.length ? (
+                    <ul className="mt-3 space-y-2.5">
+                      {metrics.highlights.slice(0, 5).map((h, i) => (
+                        <li key={i} className="flex items-start justify-between gap-3 text-[12.5px] leading-snug">
+                          <span className="text-[#374151]">{h.title || "—"}</span>
+                          <span className="shrink-0 tabular-nums text-[11px] text-[#9ca3af]">{h.occurred_on ?? ""}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-3 text-[12px] text-[#9ca3af]">No standout booked calls in this window.</p>
+                  )}
+                </div>
+                <div className="px-6 py-5">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#b45309]">Missed · demand that slipped</p>
+                  {metrics.missed.length ? (
+                    <ul className="mt-3 space-y-2.5">
+                      {metrics.missed.map((mm, i) => (
+                        <li key={i} className="flex items-center justify-between text-[12.5px]">
+                          <span className="text-[#374151]">
+                            {MISSED_LABELS[mm.category] ?? mm.category} <span className="text-[#9ca3af]">· {mm.channel}</span>
+                          </span>
+                          <b className="tabular-nums text-[#111]">{fmtInt(mm.count)}</b>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-3 text-[12px] text-[#9ca3af]">Nothing slipped in this window.</p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="px-6 py-5">
+                <ComingSoon title="Your wins — and the ones that got away" note="The best moments the agent caught, plus the deals worth a second look, gathered in one place so you can act on them quickly." />
+              </div>
+            )}
           </Card>
 
           {/* activity (inbound — calls by reason; outbound campaigns covered above) */}
-          {inbound && (
-            <Card title={a.activityTitle} sub={periodLabel} pad={false}>
-              <div className="px-6 py-5">
-                <ComingSoon title="Why customers are calling" note="A breakdown of call reasons — and how often each one turns into a booking — so you can staff and script for what matters most." />
-              </div>
-            </Card>
-          )}
+          {inbound && (() => {
+            const reasons = (metrics?.calls_by_reason ?? [])
+              .filter((rr) => (rr.direction ?? "") === "inbound" && rr.reason && rr.reason !== "Unknown")
+              .sort((x, y) => y.calls - x.calls);
+            return (
+              <Card title={a.activityTitle} sub={periodLabel} pad={false}>
+                {reasons.length ? (
+                  <table className="w-full">
+                    <thead className="bg-[#fafafa]">
+                      <tr>
+                        <Th align="left">Reason</Th>
+                        <Th align="right">Calls</Th>
+                        <Th align="right">Booked</Th>
+                        <Th align="right">Book rate</Th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reasons.map((rr) => (
+                        <tr key={rr.reason} className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] transition-colors">
+                          <Td align="left"><span className="text-[12.5px] font-semibold text-[#111]">{rr.reason}</span></Td>
+                          <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{fmtInt(rr.calls)}</span></Td>
+                          <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#111]">{fmtInt(rr.booked)}</span></Td>
+                          <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#10b981]">{rr.calls ? Math.round((rr.booked / rr.calls) * 100) : 0}%</span></Td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div className="px-6 py-5">
+                    <ComingSoon title="Why customers are calling" note="A breakdown of call reasons — and how often each one turns into a booking — so you can staff and script for what matters most." />
+                  </div>
+                )}
+              </Card>
+            );
+          })()}
           </>
           )}
           </>
