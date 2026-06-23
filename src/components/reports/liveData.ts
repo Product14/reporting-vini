@@ -109,7 +109,11 @@ export interface Basis {
 
 export interface FetchResult {
   agents: AgentData[];
-  hasData: boolean;
+  hasData: boolean; // the SELECTED window has rows — drives inline "empty window" notes, not the gate
+  // Has this rooftop EVER produced data (lifetime, any window)? Gates the full-surface "Coming soon"
+  // placeholder: a live account whose selected window is empty still renders the report (with zeros).
+  // Absent on the mock/error fallback → callers fall back to hasData (prior, window-scoped behavior).
+  everLive?: boolean;
   fetchedAt: number; // epoch ms — drives the "last synced" label
   prior: Record<string, Basis>; // per-agent-id totals for the prior window (for fleet deltas)
   // The window the server actually resolved (store-local when a timezone was known) + that timezone.
@@ -248,6 +252,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
     result = {
       agents: j.agents as AgentData[],
       hasData: Boolean(j.hasData),
+      everLive: typeof j.everLive === "boolean" ? j.everLive : undefined,
       fetchedAt: typeof j.fetchedAt === "number" ? j.fetchedAt : Date.now(),
       prior: (j.prior as Record<string, Basis>) ?? {},
       start: j.start,

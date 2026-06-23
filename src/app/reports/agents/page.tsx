@@ -140,7 +140,10 @@ function AgentReportsView() {
   // Scope the live feed (and the no-crash mock skeleton) to the agents this rooftop actually runs.
   const AGENTS = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const hasTeam = teamId !== "";
-  const comingSoon = hasTeam && feed !== null && !feed.hasData; // rooftop selected, but no live data yet
+  // Gated on lifetime "ever live", NOT the selected window — a live rooftop with an empty window (e.g.
+  // "Today" before its first synced call) renders the report with zeros instead of the on-its-way gate.
+  // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
+  const comingSoon = hasTeam && feed !== null && !(feed.everLive ?? feed.hasData); // rooftop selected, never live yet
   const skeleton = useMemo(() => agentsForAccount(MOCK_AGENTS, account), [account]);
   const visibleAgents = AGENTS.length ? AGENTS : skeleton;
   const a = useMemo(() => agentById(activeId, visibleAgents), [activeId, visibleAgents]);
@@ -187,7 +190,11 @@ function AgentReportsView() {
   };
   // only offer the drill-down when there's a non-zero count to drill into
   const canDrill = live && scale(m.appointments) > 0;
-  const agentEmpty = live && hasTeam && !!feed?.hasData && Math.round(scale(m.calls)) === 0;
+  // No activity to show for this agent in the selected window — covers both a quiet agent on an
+  // otherwise-busy window AND a fully-empty window on a live rooftop (e.g. "Today" before any calls
+  // sync). Either way show the NoActivity widen-prompt rather than a wall of zeros. (comingSoon is
+  // already handled above, so reaching here means the rooftop has been live.)
+  const agentEmpty = live && hasTeam && feed !== null && Math.round(scale(m.calls)) === 0;
   // "Turn rate" = qualified / connected. Use the CENTRAL value (build.ts report.qualifiedPct, computed
   // on the unique-lead basis) rather than recomputing inline — keeps it identical to the funnel's
   // qualified→connected step and de-duplicated (was an inline qualified-events / connected-events ratio).

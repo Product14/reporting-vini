@@ -104,9 +104,15 @@ export default function OverviewReportPage() {
   const totalRevenue = agents.reduce((s, a) => s + a.metrics.revenue, 0);
   const totalCost = agents.reduce((s, a) => s + a.metrics.cost, 0);
   const showDollarValue = totalCost > 0 && totalRevenue / totalCost > 1;
-  const comingSoon = hasTeam && feed !== null && !feed.hasData; // rooftop selected, no live data yet
+  // "Coming soon" is gated on whether the rooftop has EVER produced data (lifetime) — NOT on the
+  // selected window. A live account whose window happens to be empty (e.g. "Today" before the day's
+  // first call syncs) renders the real report with zeros + an inline note, not the on-its-way gate.
+  // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
+  const comingSoon = hasTeam && feed !== null && !(feed.everLive ?? feed.hasData);
   const showReport = scenario !== "first_time" && scenario !== "onboarding";
   const liveReady = showReport && hasTeam && feed !== null && !comingSoon;
+  // Live rooftop, but the selected window has no activity yet → gentle inline note above the report.
+  const emptyWindow = liveReady && feed !== null && !feed.hasData;
 
   const ranked = useMemo(() => [...agents].sort((a, b) => b.metrics.appointments - a.metrics.appointments), [agents]);
   const maxAppts = useMemo(() => Math.max(1, ...agents.map((a) => a.metrics.appointments)), [agents]);
@@ -189,6 +195,17 @@ export default function OverviewReportPage() {
 
           {liveReady && (
           <>
+          {emptyWindow && (
+            <div className="flex items-start gap-3 rounded-2xl border border-[#e0d8f5] bg-[#faf8ff] px-5 py-4">
+              <span className="mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-full bg-[#f3eaff] text-[13px]">📭</span>
+              <div>
+                <p className="text-[13px] font-bold text-[#111]">No activity has synced for {custom ? "this date range" : `“${BUCKET_LABELS[bucket]}”`} yet</p>
+                <p className="mt-0.5 text-[11.5px] leading-snug text-[#6b7280]">
+                  {account.name}&apos;s agents are live — activity appears here as calls and messages come in (today can trail the console by a few minutes while results sync). Widen the date range to see recent activity.
+                </p>
+              </div>
+            </div>
+          )}
           {/* ─────────── 1 · Value created — the live headline ─────────── */}
           <section className="overflow-hidden rounded-[28px] border border-[#ddd0fb] bg-gradient-to-br from-[#1c1033] via-[#2a1656] to-[#3a1d6e] text-white shadow-[0_20px_60px_-24px_rgba(58,29,110,0.7)]">
             <div className="flex flex-col gap-7 px-9 pt-8 pb-7 lg:flex-row lg:items-end lg:justify-between">
