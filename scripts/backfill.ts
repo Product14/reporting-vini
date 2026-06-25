@@ -64,13 +64,25 @@ const shiftDays = (iso: string, d: number) => {
 const minDay = (a: string, b: string) => (a < b ? a : b);
 const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
+// Write rows in 500-row batches. When `onConflict` (the table's PK) is given, UPSERT instead of INSERT
+// so an overlapping/concurrent run (or a retry) can never throw a duplicate-key — it updates in place.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function insertAll(sb: any, table: string, rows: object[]) {
+async function insertAll(sb: any, table: string, rows: object[], onConflict?: string) {
   for (let i = 0; i < rows.length; i += 500) {
-    const { error } = await sb.from(table).insert(rows.slice(i, i + 500));
-    if (error) throw new Error(`${table} insert @${i}: ${error.message}`);
+    const slice = rows.slice(i, i + 500);
+    const { error } = onConflict
+      ? await sb.from(table).upsert(slice, { onConflict })
+      : await sb.from(table).insert(slice);
+    if (error) throw new Error(`${table} ${onConflict ? "upsert" : "insert"} @${i}: ${error.message}`);
   }
 }
+
+// Primary keys for the partition-replace tables (used as upsert conflict targets).
+const PK = {
+  agent_daily: "activity_day,team_id,agent_type",
+  agent_daily_breakdown: "activity_day,team_id,agent_type,dim,dim_value",
+  agent_lead_days: "team_id,agent_type,lead_id,activity_day",
+} as const;
 
 /* Oldest changed (team,day) signal since the watermark — one cheap column scan per source table. */
 function deltaSql(effWm: string, cap: string): string {
@@ -144,9 +156,9 @@ function deltaSql(effWm: string, cap: string): string {
       const { error } = await sb.from(t).delete().gte("activity_day", a).lt("activity_day", b);
       if (error) throw new Error(`${t} delete [${a},${b}): ${error.message}`);
     }
-    await insertAll(sb, "agent_daily", daily);
-    await insertAll(sb, "agent_daily_breakdown", breakdown);
-    await insertAll(sb, "agent_lead_days", leadDays);
+    await insertAll(sb, "agent_daily", daily, PK.agent_daily);
+    await insertAll(sb, "agent_daily_breakdown", breakdown, PK.agent_daily_breakdown);
+    await insertAll(sb, "agent_lead_days", leadDays, PK.agent_lead_days);
     console.log(`  [${a} .. ${b})  ${raw.length} spine → ${daily.length} daily, ${breakdown.length} bd, ${leadDays.length} ld`);
     return daily.length;
   }
@@ -157,9 +169,9 @@ function deltaSql(effWm: string, cap: string): string {
     const { earliest } = await mergeStlEarliest(sb, raw, { full: true, dayOf });
     const agg = aggregate(raw, { tzOf: reBucket ? tzOf : undefined, stlEarliest: earliest });
     for (const t of ["agent_daily", "agent_daily_breakdown", "agent_lead_days"]) await sb.from(t).delete().gte("activity_day", "1900-01-01");
-    await insertAll(sb, "agent_daily", agg.daily);
-    await insertAll(sb, "agent_daily_breakdown", agg.breakdown);
-    await insertAll(sb, "agent_lead_days", agg.leadDays);
+    await insertAll(sb, "agent_daily", agg.daily, PK.agent_daily);
+    await insertAll(sb, "agent_daily_breakdown", agg.breakdown, PK.agent_daily_breakdown);
+    await insertAll(sb, "agent_lead_days", agg.leadDays, PK.agent_lead_days);
     console.log(`file: ${agg.daily.length} daily from ${fileArg}`);
     return;
   }
