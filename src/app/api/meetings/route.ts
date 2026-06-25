@@ -70,6 +70,43 @@ export async function GET(request: Request): Promise<Response> {
   // agent's modal shows only inbound appointments. Omitted on the rooftop-wide (Overview) drill.
   const agentType = SLOT_TO_AGENT_TYPE[searchParams.get("agent_type") || ""];
 
+  // TOP VEHICLES OF INTEREST — AI-booked appointments over a trailing window, grouped by vehicle.
+  // This is the single source for the daily digest's "Top vehicles" section: rather than the digest
+  // running its own ClickHouse query (a second source of truth that can drift), it reads this. Same
+  // meetings basis as every other appointment number here, so the two reports always agree.
+  //   ?scope=top-vehicles&team_id=&enterprise_id=[&serviceType=sales|service][&days=30][&limit=5]
+  if (scope === "top-vehicles") {
+    const windowDays = Math.max(1, Math.min(180, Number(searchParams.get("days")) || 30));
+    const limit = Math.max(1, Math.min(20, Number(searchParams.get("limit")) || 5));
+    const now = Date.now();
+    // Wide meeting-time window so a meeting booked in-period but scheduled outside it still counts;
+    // bookedStart/End then keep only the ones BOOKED in the trailing window (createdAt). Mirrors the
+    // booked-in-period drill-down logic above.
+    const result = await fetchMeetings({
+      teamId,
+      service,
+      startISO: new Date(now - windowDays * 86_400_000).toISOString(),
+      endISO: new Date(now + BOOKED_LOOKAHEAD_DAYS * 86_400_000).toISOString(),
+      bookedStartISO: new Date(now - windowDays * 86_400_000).toISOString(),
+      bookedEndISO: new Date(now + 86_400_000).toISOString(), // through end of today
+      enterpriseId,
+      token: spyneToken,
+    });
+    const counts = new Map<string, number>();
+    for (const m of result.meetings) {
+      const name = (m.vehicle || "").trim();
+      if (name) counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    const vehicles = [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+    return Response.json(
+      { vehicles, total: vehicles.length, window: { days: windowDays } },
+      { headers: { "Cache-Control": "s-maxage=300, stale-while-revalidate=600" } },
+    );
+  }
+
   let startISO: string;
   let endISO: string;
   let sortOrder: "asc" | "desc";

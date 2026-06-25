@@ -20,12 +20,23 @@ type SlotId = AgentData["id"]; // "sales_ib" | "sales_ob" | "service_ib" | "serv
  *      On success we also upsert team_tz, so the token-less sync picks up new rooftops without a backfill.
  *   2. Persisted team_tz — fallback when the live call can't be reached (endpoint down / network blip).
  * Both degrade to null → caller keeps prior behavior (UTC window). */
+// team_ids whose tz we've already persisted this process lifetime. A rooftop's tz almost never changes,
+// so re-upserting team_tz on every /api/reports call was a large slice of the project's write volume.
+// We self-heal at most once per team per warm instance; the 5-min sync re-persists everyone from live
+// data anyway, so a genuinely changed tz is still picked up promptly.
+const tzPersisted = new Set<string>();
+
 export async function getStoreTimeZone(teamId: string, token?: string | null): Promise<string | null> {
   if (!teamId) return null;
   const live = await cached(`tz:${teamId}`, () => fetchTeamTz(teamId, token));
   if (live) {
-    const sb = getSupabase();
-    if (sb) await saveTzMap(sb, new Map([[teamId, live]]), new Date().toISOString()); // self-heal team_tz for the sync
+    if (!tzPersisted.has(teamId)) {
+      const sb = getSupabase();
+      if (sb) {
+        await saveTzMap(sb, new Map([[teamId, live]]), new Date().toISOString()); // self-heal team_tz for the sync
+        tzPersisted.add(teamId);
+      }
+    }
     return live;
   }
   const sb = getSupabase();
