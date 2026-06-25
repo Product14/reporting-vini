@@ -1,10 +1,11 @@
 name: Sync reporting aggregate
 
-# Keeps the Supabase reporting aggregate fresh by running scripts/backfill.ts.
-# - Every 30 min: INCREMENTAL — per-day pulls over the trailing window (~3MB/day, ~1 min total).
-# - Daily 04:17 UTC: FULL reconcile — one 382MB pull rebuilds everything (catches edits to older rows).
-# Both are cheap enough to stay within free Action minutes. (A Vercel pg_cron → /api/sync path can do
-# 2-min incremental for free instead — see supabase/migrations/0001_agent_facts.sql.)
+# Keeps the Supabase reporting aggregate fresh by running scripts/backfill.ts (ClickHouse-direct).
+# - Every 30 min: INCREMENTAL — watermark-driven; re-aggregates only the (team,day) partitions changed
+#   since the last run (back to the oldest changed day, capped at MAX_LOOKBACK_DAYS).
+# - Daily 04:17 UTC: FULL — bounded reconcile over the last FULL_RECONCILE_DAYS (never an all-time scan).
+# ClickHouse is reached over HTTPS via repo secrets; prod Vercel has no ClickHouse access, so the ETL
+# lives here (not in a Vercel route).
 
 on:
   schedule:
@@ -36,11 +37,13 @@ jobs:
       - name: Sync Supabase aggregate
         env:
           NODE_OPTIONS: --max-old-space-size=6144
-          METABASE_SITE_URL: ${{ secrets.METABASE_SITE_URL }}
-          METABASE_SECRET_KEY: ${{ secrets.METABASE_SECRET_KEY }}
+          # ClickHouse creds — reuse the CH_* repo secrets the sibling refresh-metrics.yml already carries.
+          CLICKHOUSE_HOST: ${{ secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CH_PORT }}
+          CLICKHOUSE_USER: ${{ secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CH_PASSWORD }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          METABASE_RAW_DATE_PARAM: activity_day
           # Optional: an admin-scoped Spyne API token. When set, backfill.ts re-buckets activity_day by
           # each rooftop's store-local day (working-hours timezone) instead of UTC. Unset → UTC bucketing.
           SPYNE_API_TOKEN: ${{ secrets.SPYNE_API_TOKEN }}

@@ -1,27 +1,32 @@
-/* Pull Q12227 and materialize the Supabase reporting aggregate, using the SAME aggregate.ts the app
- * uses. Two modes:
+/* Materialize the Supabase reporting aggregate DIRECTLY from ClickHouse (dealer_leads) — no Metabase.
+ * Runs the conversation spine (src/lib/reports/agentBaseFact.sql, callback→outbound injected) through
+ * the SAME aggregate.ts the app uses, then writes agent_daily / agent_daily_breakdown / agent_lead_days
+ * plus the rooftop detail tables (report_campaigns / report_outcomes / report_callbacks).
  *
- *   npx tsx scripts/backfill.ts                 # INCREMENTAL (default): per-day pulls over the last
- *                                               # SYNC_WINDOW_DAYS days (~3MB/day), replace that window
- *   npx tsx scripts/backfill.ts --full          # FULL: one 382MB pull, rebuild the whole table
- *   npx tsx scripts/backfill.ts --days=7         # incremental over a custom trailing window
- *   npx tsx scripts/backfill.ts /tmp/q.json      # aggregate a local full dump (dev convenience)
+ * Modes:
+ *   npx tsx scripts/backfill.ts            # INCREMENTAL (default): watermark-driven. Reads sync_state.
+ *                                          #   watermark, asks ClickHouse which (team,day) partitions
+ *                                          #   changed since (updatedAt), and re-aggregates from the
+ *                                          #   oldest changed day (capped) — "last changes synced, not
+ *                                          #   synced again". Always refreshes at least the hot window.
+ *   npx tsx scripts/backfill.ts --full     # bounded full reconcile: rebuild the last FULL_RECONCILE_DAYS.
+ *   npx tsx scripts/backfill.ts --days=7    # force a fixed trailing hot window.
+ *   npx tsx scripts/backfill.ts /tmp/q.json # aggregate a local RawRow[] dump (dev convenience).
  *
- * The GitHub Actions cron runs the default (incremental) — cheap enough to run often. Use --full once
- * for the initial backfill or a periodic reconcile. Env (process.env or auto-loaded from .env.local):
- * METABASE_SITE_URL, METABASE_SECRET_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
- * METABASE_RAW_DATE_PARAM (default "activity_day"), SYNC_WINDOW_DAYS (default 3). */
+ * The GitHub Action (sync-reports.yml) runs the incremental every 30m and a --full nightly. Env
+ * (process.env or .env.local): CLICKHOUSE_HOST/PORT/USER/PASSWORD, SUPABASE_URL,
+ * SUPABASE_SERVICE_ROLE_KEY, SYNC_WINDOW_DAYS (hot window, default 3), FULL_RECONCILE_DAYS (default 120),
+ * MAX_LOOKBACK_DAYS (watermark pull-back cap, default 120), SPYNE_API_TOKEN (optional, for store-local tz). */
 import fs from "node:fs";
-import crypto from "node:crypto";
-import { Agent } from "undici";
 import { createClient } from "@supabase/supabase-js";
 import { aggregate } from "../src/lib/reports/aggregate";
 import { mergeStlEarliest, reconcileHistoricalStl } from "../src/lib/reports/stlSync";
 import { fetchTeamTzs, storeLocalDay, teamsInRows } from "../src/lib/reports/tzMap";
 import { saveTzMap, loadTzMap } from "../src/lib/reports/tzStore";
+import { queryRows } from "../src/lib/reports/clickhouseQuery";
+import { loadSpineSql } from "../src/lib/reports/spineSql";
+import { campaignsSql, outcomesSql, callbacksSql } from "../src/lib/reports/detailQueries";
 import type { RawRow } from "../src/lib/reports/schema";
-
-const RAW_QUESTION = 12227;
 
 function loadEnv() {
   if (!fs.existsSync(".env.local")) return;
@@ -32,52 +37,26 @@ function loadEnv() {
 }
 loadEnv();
 
-const SITE = process.env.METABASE_SITE_URL!;
-const SECRET = process.env.METABASE_SECRET_KEY!;
 const SB_URL = process.env.SUPABASE_URL!;
 const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const DATE_PARAM = process.env.METABASE_RAW_DATE_PARAM || "activity_day";
-for (const [k, v] of Object.entries({ METABASE_SITE_URL: SITE, METABASE_SECRET_KEY: SECRET, SUPABASE_URL: SB_URL, SUPABASE_SERVICE_ROLE_KEY: SB_KEY }))
+for (const [k, v] of Object.entries({
+  SUPABASE_URL: SB_URL,
+  SUPABASE_SERVICE_ROLE_KEY: SB_KEY,
+  CLICKHOUSE_HOST: process.env.CLICKHOUSE_HOST,
+  CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD,
+}))
   if (!v) { console.error(`Missing env: ${k}`); process.exit(1); }
 
-const b64 = (s: string) => Buffer.from(s).toString("base64url");
-function sign(payload: object): string {
-  const h = b64(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const b = b64(JSON.stringify(payload));
-  const d = `${h}.${b}`;
-  return `${d}.${crypto.createHmac("sha256", SECRET).update(d).digest("base64url")}`;
-}
+const FULL_DAYS = Number(process.env.FULL_RECONCILE_DAYS) || 120; // bounded full window — never an all-time scan
+const MAX_LOOKBACK = Number(process.env.MAX_LOOKBACK_DAYS) || 120; // cap how far a watermark delta pulls back
+
 const todayUTC = () => new Date().toISOString().slice(0, 10);
-const shiftDays = (iso: string, n: number) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-
-async function fetchRows(params: Record<string, string>): Promise<RawRow[]> {
-  const token = sign({ resource: { question: RAW_QUESTION }, params, exp: Math.round(Date.now() / 1000) + 1800 });
-  const res = await fetch(`${SITE}/api/embed/card/${token}/query/json`, {
-    cache: "no-store",
-    dispatcher: new Agent({ headersTimeout: 0, bodyTimeout: 0, connect: { timeout: 60_000 } }),
-  } as RequestInit);
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Metabase HTTP ${res.status}: ${text.slice(0, 200)}`);
-  const json = JSON.parse(text);
-  if (!Array.isArray(json)) throw new Error(`Expected array, got: ${text.slice(0, 200)}`);
-  return json as RawRow[];
-}
-
-// Pull any embeddable card (the rooftop-level detail cards are pre-aggregated; no date param).
-async function fetchCard(id: number, params: Record<string, string> = {}): Promise<Record<string, unknown>[]> {
-  // These cards' params (team_id/agent_type/…) are EDITABLE → pass via URL; locking them in the token errors.
-  const token = sign({ resource: { question: id }, params: {}, exp: Math.round(Date.now() / 1000) + 1800 });
-  const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${SITE}/api/embed/card/${token}/query/json${qs ? `?${qs}` : ""}`, {
-    cache: "no-store",
-    dispatcher: new Agent({ headersTimeout: 0, bodyTimeout: 0, connect: { timeout: 60_000 } }),
-  } as RequestInit);
-  const text = await res.text();
-  if (!res.ok) throw new Error(`card ${id} HTTP ${res.status}: ${text.slice(0, 120)}`);
-  const json = JSON.parse(text);
-  if (!Array.isArray(json)) throw new Error(`card ${id} not an array`);
-  return json as Record<string, unknown>[];
-}
+const shiftDays = (iso: string, n: number) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function insertAll(sb: any, table: string, rows: object[]) {
@@ -88,48 +67,76 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   console.log(`  ${table}: ${rows.length} inserted`);
 }
 
+/* Which (team,day) partitions changed since the watermark. One column scan per source table (cheap —
+ * updatedAt filter), returning the oldest changed conversation/ecr/meeting/sms day + the new max
+ * updatedAt + a changed-row count. `effWm` is floored at now()-MAX_LOOKBACK so a stale watermark can't
+ * trigger an unbounded pull-back. */
+function deltaSql(effWm: string): string {
+  const part = (tbl: string, created: string, updated: string) =>
+    `SELECT min(toDate(${created})) AS oldest, max(${updated}) AS mx, count() AS c
+     FROM dealer_leads.${tbl} FINAL WHERE __deleted = 0 AND ${updated} > parseDateTimeBestEffort('${effWm}')`;
+  return `SELECT min(oldest) AS oldest_changed_day, max(mx) AS new_watermark, sum(c) AS changed_rows FROM (
+    ${part("conversations", "createdAt", "updatedAt")}
+    UNION ALL ${part("endcallreports", "createdAt", "updatedAt")}
+    UNION ALL ${part("meetings", "created_at", "updated_at")}
+    UNION ALL ${part("smsMessages", "createdAt", "updatedAt")}
+  )`;
+}
+
 (async () => {
   const args = process.argv.slice(2);
   const full = args.includes("--full");
   const daysArg = Number((args.find((a) => a.startsWith("--days=")) || "").split("=")[1]);
   const fileArg = args.find((a) => !a.startsWith("--"));
-  const days = daysArg || Number(process.env.SYNC_WINDOW_DAYS) || 3;
+  const hotDays = daysArg || Number(process.env.SYNC_WINDOW_DAYS) || 3;
   const today = todayUTC();
-
   const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });
 
-  // windowStart = where we delete-and-replace from (matched on the FINAL, possibly re-bucketed,
-  // activity_day). Full/file rebuilds replace everything.
+  // windowStart = the activity_day floor we delete-and-replace from (matched on the FINAL, possibly
+  // re-bucketed, activity_day). Detail tables are full-replaced regardless.
   let windowStart = "1900-01-01";
   let raw: RawRow[];
+  let newWatermark: string | null = null;
 
   if (fileArg && fs.existsSync(fileArg)) {
     console.log("reading", fileArg);
     raw = JSON.parse(fs.readFileSync(fileArg, "utf8")) as RawRow[];
-  } else if (full) {
-    console.log("FULL pull (382MB)…");
-    raw = await fetchRows({});
   } else {
-    windowStart = shiftDays(today, -(days - 1));
-    // Re-bucketing a store-local day draws from events whose UTC activity_day is ±1, so pull one extra
-    // UTC day back to fully cover the store-local windowStart. Harmless when not re-bucketing — the
-    // output filter below trims anything that lands before windowStart.
-    const pullStart = shiftDays(windowStart, -1);
-    console.log(`INCREMENTAL pull, ${pullStart}..${today} (param "${DATE_PARAM}", replace from ${windowStart})…`);
-    raw = [];
-    for (let d = pullStart; d <= today; d = shiftDays(d, 1)) {
-      const dayRows = await fetchRows({ [DATE_PARAM]: d });
-      console.log(`  ${d}: ${dayRows.length} rows`);
-      raw.push(...dayRows);
+    let scanFloor: string;
+    if (full) {
+      scanFloor = shiftDays(today, -(FULL_DAYS - 1));
+      console.log(`FULL reconcile from ${scanFloor} (bounded ${FULL_DAYS}d).`);
+    } else {
+      const { data: state } = await sb.from("sync_state").select("watermark").eq("id", 1).maybeSingle();
+      const watermark: string | null = (state as { watermark?: string } | null)?.watermark ?? null;
+      const hotFloor = shiftDays(today, -(hotDays - 1));
+      const cap = shiftDays(today, -(MAX_LOOKBACK - 1));
+      if (!watermark) {
+        scanFloor = shiftDays(today, -(FULL_DAYS - 1));
+        console.log(`BOOTSTRAP (no watermark) — reconcile from ${scanFloor} (bounded ${FULL_DAYS}d).`);
+      } else {
+        // Floor the delta scan at the lookback cap so a stale watermark can't pull back unbounded.
+        const effWm = watermark > `${cap}T00:00:00Z` ? watermark : `${cap}T00:00:00Z`;
+        const delta = await queryRows<{ oldest_changed_day: string; new_watermark: string; changed_rows: string }>(deltaSql(effWm));
+        const changed = n(delta[0]?.changed_rows);
+        const oldest = changed > 0 ? String(delta[0]?.oldest_changed_day || "") : "";
+        newWatermark = delta[0]?.new_watermark && n(delta[0]?.changed_rows) > 0 ? String(delta[0].new_watermark) : watermark;
+        // Re-aggregate from the oldest changed day (capped), but always cover at least the hot window.
+        scanFloor = oldest && oldest < hotFloor ? (oldest < cap ? cap : oldest) : hotFloor;
+        console.log(`INCREMENTAL: watermark=${watermark}, changed_rows=${changed}, oldest_changed_day=${oldest || "—"} → scan from ${scanFloor}.`);
+      }
     }
+    windowStart = scanFloor;
+    // Re-bucketing a store-local day draws from events whose UTC day is ±1, so floor the SCAN one extra
+    // UTC day back; the output filter (>= windowStart) trims anything earlier.
+    const pullFloor = shiftDays(scanFloor, -1);
+    console.log(`spine scan floored at ${pullFloor}…`);
+    raw = await queryRows<RawRow>(loadSpineSql(`toDate('${pullFloor}')`));
+    console.log(`spine: ${raw.length} rows`);
   }
+  if (!raw.length) throw new Error("0 spine rows across the window — refusing to wipe the aggregate (pull likely failed).");
 
-  console.log("raw rows:", raw.length);
-  if (!raw.length) throw new Error("0 raw rows across the window — refusing to wipe the aggregate");
-
-  // Resolve store timezones for exactly the teams in this pull, via the token-less get-working-days
-  // endpoint — so even brand-new rooftops bucket store-local without an admin credential. Persist the
-  // result to team_tz, then layer it over the persisted cache (covers any team the live call missed).
+  // Resolve store timezones for exactly the teams in this pull, persist, then layer over the cache.
   const live = await fetchTeamTzs(teamsInRows(raw), process.env.SPYNE_API_TOKEN || null);
   await saveTzMap(sb, live, new Date().toISOString());
   const tzMap = await loadTzMap(sb);
@@ -172,68 +179,39 @@ async function insertAll(sb: any, table: string, rows: object[]) {
   await insertAll(sb, "agent_daily_breakdown", breakdown);
   await insertAll(sb, "agent_lead_days", leadDays);
 
-  // ── rooftop-level detail: appointments (12233) + callbacks (12234) + campaigns (12232) → detail
-  //    tables. 12233/12234 carry a rooftop NAME (mapped to team_id via the map Q12227 carries);
-  //    12232 now carries team_id directly. Best-effort: a failure here (e.g. migration 0002 not
-  //    applied yet) must NOT fail the main aggregate sync above. ──
+  // ── rooftop detail (ClickHouse-direct, full replace): campaigns / outcomes / callbacks. Each query
+  //    emits agent_type/team_id directly and is floored against the OOM ceiling. A failure here must NOT
+  //    fail the main aggregate above. report_appointments (old card 12233) is intentionally gone — the
+  //    UI lists upcoming appointments from the live /api/meetings proxy. ──
   try {
-    const rooftopToTeam = new Map<string, string>();
-    for (const r of raw) {
-      const name = String(r.rooftop_name || "").trim();
-      const team = String(r["cs.team_id"] || "");
-      if (name && team && !rooftopToTeam.has(name)) rooftopToTeam.set(name, team);
-    }
-    const mapTeam = (rooftop: unknown) => rooftopToTeam.get(String(rooftop || "").trim());
-    const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    const camps = await queryRows<Record<string, unknown>>(campaignsSql({ startFloor: `addDays(today(), -${FULL_DAYS})` }));
+    const campRows = camps
+      .map((c) => ({ team_id: String(c.team_id ?? ""), agent_type: (c.agent_type as string) ?? null, campaign: String(c.campaign ?? ""), use_case: c.use_case ?? null, enrolled: n(c.enrolled), appointments: n(c.appointments), warm_leads: n(c.warm_leads), opt_outs: n(c.opt_outs), no_reach: n(c.no_reach), appt_rate_pct: c.appt_rate_pct == null ? null : Number(c.appt_rate_pct) }))
+      .filter((r) => r.team_id && r.campaign);
 
-    const appts = await fetchCard(12233);
-    const apptRows = appts
-      .map((a) => ({ team_id: mapTeam(a.rooftop), customer_name: a.customer_name ?? null, appointment_time: a.appointment_time ?? null, vehicle: a.vehicle ?? null, status: a.status ?? null, assigned_to: a.assigned_to ?? null, booked_at: a.booked_at ?? null }))
-      .filter((r) => r.team_id);
-    const cbs = await fetchCard(12234);
+    const outs = await queryRows<Record<string, unknown>>(outcomesSql({}));
+    const outcomeRows = outs
+      .map((o) => ({ team_id: String(o.team_id ?? ""), agent_type: (o.agent_type as string) ?? null, outcome_bucket: String(o.outcome_bucket ?? ""), mappings: n(o.mappings) }))
+      .filter((r) => r.team_id && r.outcome_bucket);
+
+    const cbs = await queryRows<Record<string, unknown>>(callbacksSql({}));
     const cbRows = cbs
-      .map((c) => ({ team_id: mapTeam(c.rooftop), customer_name: c.customer_name ?? null, callback_due: c.callback_due ?? null, intent: c.intent ?? null, priority: c.priority ?? null, assigned_to: c.assigned_to ?? null, requested_on: c.requested_on ?? null }))
+      .map((c) => ({ team_id: String(c.team_id ?? ""), customer_name: c.customer_name ?? null, callback_due: c.callback_due ?? null, intent: c.intent ?? null, priority: c.priority ?? null, assigned_to: c.assigned_to ?? null, requested_on: c.requested_on ?? null }))
       .filter((r) => r.team_id);
-    // 12232 has no sales/service column, but filters by agent_type → pull per outbound agent and TAG it,
-    // so build.ts can show sales campaigns under Sales OB and service campaigns under Service OB.
-    let camps: Record<string, unknown>[] = [];
-    const campRows: object[] = [];
-    for (const at of ["Sales Outbound", "Service Outbound"]) {
-      const rows = await fetchCard(12232, { agent_type: at });
-      camps = camps.concat(rows);
-      for (const c of rows) {
-        const team = String(c.team_id ?? ""), campaign = String(c.campaign ?? "");
-        if (team && campaign) campRows.push({ team_id: team, agent_type: at, campaign, use_case: c.use_case ?? null, enrolled: n(c.enrolled), appointments: n(c.appointments), warm_leads: n(c.warm_leads), opt_outs: n(c.opt_outs), no_reach: n(c.no_reach), appt_rate_pct: c.appt_rate_pct ?? null });
-      }
-    }
 
-    // 12231 (outbound-outcomes-bucketed): same shape as 12232 — filter per outbound agent_type, expect
-    // a team_id column (the card must GROUP BY team_id), TAG with the agent_type we filtered on. Rows
-    // without a team_id are dropped, so until 12231 emits team_id the table stays empty (widget keeps
-    // its empty state). pct is recomputed downstream; we store only the raw `mappings` count.
-    let outs: Record<string, unknown>[] = [];
-    const outcomeRows: object[] = [];
-    for (const at of ["Sales Outbound", "Service Outbound"]) {
-      const rows = await fetchCard(12231, { agent_type: at });
-      outs = outs.concat(rows);
-      for (const o of rows) {
-        const team = String(o.team_id ?? ""), bucket = String(o.outcome_bucket ?? "");
-        if (team && bucket) outcomeRows.push({ team_id: team, agent_type: at, outcome_bucket: bucket, mappings: n(o.mappings) });
-      }
-    }
-
-    for (const [t, rows] of [["report_appointments", apptRows], ["report_callbacks", cbRows], ["report_campaigns", campRows], ["report_outcomes", outcomeRows]] as const) {
-      const { error: delErr } = await sb.from(t).delete().gte("synced_at", "1900-01-01");
-      if (delErr) throw new Error(`${t} delete: ${delErr.message}`);
+    for (const [t, rows] of [["report_campaigns", campRows], ["report_outcomes", outcomeRows], ["report_callbacks", cbRows]] as const) {
+      const { error } = await sb.from(t).delete().gte("synced_at", "1900-01-01");
+      if (error) throw new Error(`${t} delete: ${error.message}`);
       await insertAll(sb, t, rows);
     }
-    console.log(`detail: ${apptRows.length}/${appts.length} appointments + ${cbRows.length}/${cbs.length} callbacks + ${campRows.length}/${camps.length} campaigns + ${outcomeRows.length}/${outs.length} outcomes synced.`);
+    console.log(`detail: ${campRows.length} campaigns + ${outcomeRows.length} outcomes + ${cbRows.length} callbacks synced.`);
   } catch (e) {
-    console.warn(`detail sync skipped: ${(e as Error).message} — has migration 0002 been applied?`);
+    console.warn(`detail sync skipped: ${(e as Error).message}`);
   }
 
+  const wm = newWatermark || new Date().toISOString();
   await sb.from("sync_state").update({
-    last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: daily.length, window_start: windowStart, error: null,
+    last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: daily.length, window_start: windowStart, watermark: wm, error: null,
   }).eq("id", 1);
-  console.log(`done (${full || fileArg ? "full" : "incremental"}). ${daily.length} daily + ${breakdown.length} breakdown rows from ${windowStart}.`);
+  console.log(`done (${full ? "full" : fileArg ? "file" : "incremental"}). ${daily.length} daily + ${breakdown.length} breakdown + ${leadDays.length} lead-days from ${windowStart}. watermark=${wm}`);
 })().catch((e) => { console.error("FAILED:", e.message); process.exit(1); });

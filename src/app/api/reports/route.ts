@@ -1,6 +1,6 @@
-import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_APPOINTMENTS, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_OPEN_FUNNEL, REPORT_MONEY_ON_TABLE } from "@/lib/reports/supabase";
+import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES } from "@/lib/reports/supabase";
 import { buildResult } from "@/lib/reports/build";
-import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow, OpenFunnelRow, RecoverableRow } from "@/lib/reports/schema";
+import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots } from "@/lib/spyne/teamContext";
@@ -58,14 +58,13 @@ async function leadCountsBoth(sb: any, teamId: string, start: string, end: strin
   }
 }
 
-type Detail = {
-  appointments: AppointmentRow[]; callbacks: CallbackRow[]; campaigns: CampaignRow[];
-  outcomes: OutcomeRow[]; openFunnel: OpenFunnelRow[]; recoverable: RecoverableRow[];
-};
-const EMPTY_DETAIL: Detail = { appointments: [], callbacks: [], campaigns: [], outcomes: [], openFunnel: [], recoverable: [] };
+type Detail = { callbacks: CallbackRow[]; campaigns: CampaignRow[]; outcomes: OutcomeRow[] };
+const EMPTY_DETAIL: Detail = { callbacks: [], campaigns: [], outcomes: [] };
 
-/* The six per-team detail tables in ONE report_detail() rpc. On any error (e.g. migration 0010 not
- * applied) returns null so the caller falls back to the original six independent reads — output identical. */
+/* The per-team detail tables in ONE report_detail() rpc (callbacks / campaigns / outcomes — all now fed
+ * directly from ClickHouse by scripts/backfill.ts). On any error returns null so the caller falls back
+ * to the independent reads — output identical. (appointments / open-funnel / money-on-table were retired
+ * in migration 0011: the first is served live by /api/meetings, the other two were never populated.) */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function fetchDetailCombined(sb: any, teamId: string): Promise<Detail | null> {
   try {
@@ -73,12 +72,9 @@ async function fetchDetailCombined(sb: any, teamId: string): Promise<Detail | nu
     if (error || !data || typeof data !== "object") return null;
     const d = data as Record<string, unknown>;
     return {
-      appointments: (d.appointments ?? []) as AppointmentRow[],
       callbacks: (d.callbacks ?? []) as CallbackRow[],
       campaigns: (d.campaigns ?? []) as CampaignRow[],
       outcomes: (d.outcomes ?? []) as OutcomeRow[],
-      openFunnel: (d.openFunnel ?? []) as OpenFunnelRow[],
-      recoverable: (d.recoverable ?? []) as RecoverableRow[],
     };
   } catch {
     return null;
@@ -107,15 +103,12 @@ async function fetchDetailPerTable(sb: any, teamId: string): Promise<Detail> {
   const safe = async <T,>(p: PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> => {
     try { const { data, error } = await p; return error ? [] : ((data ?? []) as T[]); } catch { return []; }
   };
-  const [appointments, callbacks, campaigns, outcomes, openFunnel, recoverable] = await Promise.all([
-    safe<AppointmentRow>(sb.from(REPORT_APPOINTMENTS).select("*").eq("team_id", teamId)),
+  const [callbacks, campaigns, outcomes] = await Promise.all([
     safe<CallbackRow>(sb.from(REPORT_CALLBACKS).select("*").eq("team_id", teamId)),
     safe<CampaignRow>(sb.from(REPORT_CAMPAIGNS).select("*").eq("team_id", teamId)),
     safe<OutcomeRow>(sb.from(REPORT_OUTCOMES).select("*").eq("team_id", teamId)),
-    safe<OpenFunnelRow>(sb.from(REPORT_OPEN_FUNNEL).select("*").eq("team_id", teamId)),
-    safe<RecoverableRow>(sb.from(REPORT_MONEY_ON_TABLE).select("*").eq("team_id", teamId)),
   ]);
-  return { appointments, callbacks, campaigns, outcomes, openFunnel, recoverable };
+  return { callbacks, campaigns, outcomes };
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -193,18 +186,15 @@ export async function GET(request: Request): Promise<Response> {
     leadCountsBoth(sb, teamId, start, end, prior.start, prior.end),
     teamEverLive(sb, teamId),
   ]);
-  const { appointments, callbacks, campaigns, outcomes, openFunnel, recoverable } = detail ?? EMPTY_DETAIL;
+  const { callbacks, campaigns, outcomes } = detail ?? EMPTY_DETAIL;
 
   const result = buildResult({
     daily: cur,
     breakdown: (bd.data ?? []) as BreakdownRow[],
     priorDaily: pri,
-    appointments,
     callbacks,
     campaigns,
     outcomes,
-    openFunnel,
-    recoverable,
     onboardedSlots,
     leadCounts: lc.cur,
     priorLeadCounts: lc.prior,

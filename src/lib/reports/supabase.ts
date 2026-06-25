@@ -19,13 +19,12 @@ export const AGENT_DAILY = "agent_daily";
 export const AGENT_DAILY_BREAKDOWN = "agent_daily_breakdown";
 export const AGENT_LEAD_DAYS = "agent_lead_days";
 export const SYNC_STATE = "sync_state";
-// Per-row detail tables (see supabase/migrations/0002_report_detail.sql).
-export const REPORT_APPOINTMENTS = "report_appointments";
+// Per-row detail tables, fed directly from ClickHouse by scripts/backfill.ts (see detailQueries.ts).
+// report_appointments / report_open_funnel / report_money_on_table were retired in migration 0011
+// (the first is served live by /api/meetings; the other two were never populated).
 export const REPORT_CALLBACKS = "report_callbacks";
 export const REPORT_CAMPAIGNS = "report_campaigns";
 export const REPORT_OUTCOMES = "report_outcomes";
-export const REPORT_OPEN_FUNNEL = "report_open_funnel"; // Sales-IB open funnel (card 12341); see 0007_report_open_funnel.sql
-export const REPORT_MONEY_ON_TABLE = "report_money_on_table"; // recoverable inbound leads (card 12236); see 0008_report_money_on_table.sql
 // "Coming soon" metrics derived from ClickHouse (dealer_leads) by scripts/push_metrics.py and ingested
 // via POST /api/reports/metrics. Read by GET /api/reports/metrics. See 0009_report_coming_soon.sql.
 export const REPORT_APPT_STATUS = "report_appt_status"; // showed / no-show / show rate (widget: `showed`)
