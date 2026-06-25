@@ -91,6 +91,11 @@ function deltaSql(effWm: string): string {
   const daysArg = Number((args.find((a) => a.startsWith("--days=")) || "").split("=")[1]);
   const backfillDays = Number((args.find((a) => a.startsWith("--backfill-days=")) || "").split("=")[1]);
   const monthsArg = Number((args.find((a) => a.startsWith("--months=")) || "").split("=")[1]);
+  // Explicit [from, to) range — used to bootstrap a long history in SEGMENTS (one fresh process per
+  // segment) so heap never accumulates across many chunks. A historical segment does NOT advance the
+  // watermark or re-sync the (current-snapshot) detail tables.
+  const fromArg = (args.find((a) => a.startsWith("--from=")) || "").split("=")[1];
+  const toArg = (args.find((a) => a.startsWith("--to=")) || "").split("=")[1];
   const fileArg = args.find((a) => !a.startsWith("--"));
   const hotDays = daysArg || Number(process.env.SYNC_WINDOW_DAYS) || 3;
   const today = todayUTC();
@@ -103,7 +108,9 @@ function deltaSql(effWm: string): string {
   const reBucket = tzMap.size > 0;
   const tzOf = (teamId: string) => tzMap.get(teamId);
   const dayOf = (team: string, ts: string, rawDay: string) => storeLocalDay(ts, tzOf(team), rawDay);
-  console.log(reBucket ? `tz: ${tzMap.size} rooftops → store-local re-bucketing ON` : "tz: empty → UTC bucketing");
+  // NOTE: tzMap is the persisted timezone CACHE (a superset that includes test/inactive rooftops) — NOT
+  // the count of rooftops in the reports. The spine drops test accounts, so agent_daily holds far fewer.
+  console.log(reBucket ? `tz: ${tzMap.size} cached zones → store-local re-bucketing ON` : "tz: empty → UTC bucketing");
 
   // Process ONE [a, b) chunk: scan the spine over [a-1, b+1) (±1 day pad so store-local re-bucketing at
   // the boundary is complete), aggregate, and replace exactly the rows whose final activity_day ∈ [a, b).
@@ -154,11 +161,16 @@ function deltaSql(effWm: string): string {
   }
 
   // ── decide the [rangeStart, rangeEnd) to (re)compute ──
-  const rangeEnd = shiftDays(today, 1); // exclusive, through today
+  let rangeEnd = shiftDays(today, 1); // exclusive, through today
   let rangeStart: string;
   let newWatermark: string | null = null;
+  const historical = Boolean(fromArg); // a segment of a long backfill — don't touch watermark/detail
 
-  if (full || backfillDays || monthsArg) {
+  if (fromArg) {
+    rangeStart = fromArg;
+    rangeEnd = toArg || rangeEnd;
+    console.log(`SEGMENT reconcile ${rangeStart} .. ${rangeEnd} (${CHUNK_DAYS}d chunks).`);
+  } else if (full || backfillDays || monthsArg) {
     const span = backfillDays || (monthsArg ? monthsArg * 30 : FULL_DAYS);
     rangeStart = shiftDays(today, -(span - 1));
     console.log(`${backfillDays || monthsArg ? "BACKFILL" : "FULL"} reconcile ${rangeStart} .. ${today} (${span}d, ${CHUNK_DAYS}d chunks).`);
@@ -188,10 +200,10 @@ function deltaSql(effWm: string): string {
     totalDaily += await syncChunk(a, b);
   }
 
-  // ── rooftop detail (ClickHouse-direct, full replace, runs once): campaigns / outcomes / callbacks.
-  //    Cumulative snapshots (not per-day), so a single replace covers them. A failure here must NOT fail
-  //    the aggregate above. ──
-  try {
+  // ── rooftop detail (ClickHouse-direct, full replace): campaigns / outcomes / callbacks. Cumulative
+  //    snapshots (not per-day), so a single replace covers them. Skipped for historical segments (they'd
+  //    just re-write the same current snapshot each segment). A failure here must NOT fail the aggregate. ──
+  if (!historical) try {
     const camps = await queryRows<Record<string, unknown>>(campaignsSql({ startFloor: `toDate('${rangeStart}')` }));
     const campRows = camps
       .map((c) => ({ team_id: String(c.team_id ?? ""), agent_type: (c.agent_type as string) ?? null, campaign: String(c.campaign ?? ""), use_case: c.use_case ?? null, enrolled: num(c.enrolled), appointments: num(c.appointments), warm_leads: num(c.warm_leads), opt_outs: num(c.opt_outs), no_reach: num(c.no_reach), appt_rate_pct: c.appt_rate_pct == null ? null : Number(c.appt_rate_pct) }))
@@ -214,9 +226,12 @@ function deltaSql(effWm: string): string {
     console.warn(`detail sync skipped: ${(e as Error).message}`);
   }
 
-  const wm = newWatermark || new Date().toISOString();
-  await sb.from("sync_state").update({
-    last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: totalDaily, window_start: rangeStart, watermark: wm, error: null,
-  }).eq("id", 1);
-  console.log(`done. ${totalDaily} daily rows across ${rangeStart} .. ${today}. watermark=${wm}`);
+  // Advance the watermark only for live runs (full/incremental). A historical segment must not move it —
+  // the incremental watermark tracks "changes processed up to now", which a backfill of old days doesn't.
+  const update: Record<string, unknown> = {
+    last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: totalDaily, window_start: rangeStart, error: null,
+  };
+  if (!historical) update.watermark = newWatermark || new Date().toISOString();
+  await sb.from("sync_state").update(update).eq("id", 1);
+  console.log(`done. ${totalDaily} daily rows across ${rangeStart} .. ${rangeEnd}.${historical ? " (segment)" : ` watermark=${update.watermark}`}`);
 })().catch((e) => { console.error("FAILED:", e.message); process.exit(1); });
