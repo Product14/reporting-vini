@@ -13,16 +13,29 @@ const SLOT_TO_AGENT_TYPE: Record<string, string> = {
   service_ob: "Service Outbound",
 };
 
+// serviceType → the agent_type slots that belong to it. Used to scope booked leads to one department
+// when no specific agent slot is requested (the digest passes serviceType, not agent_type).
+const SERVICE_TO_AGENT_TYPES: Record<string, string[]> = {
+  sales: ["Sales Inbound", "Sales Outbound"],
+  service: ["Service Inbound", "Service Outbound"],
+};
+
 /* The distinct leads this agent (or the whole rooftop, when agentType is omitted) booked an appointment
  * with in [start, end) — i.e. exactly the leads behind the "Appointments booked" tile. Returns null when
- * the table/query is unavailable, so the caller falls back to the booking-date meeting filter. */
-async function bookedLeadIds(teamId: string, agentType: string | undefined, start: string, end: string): Promise<string[] | null> {
+ * the table/query is unavailable, so the caller falls back to the booking-date meeting filter.
+ *
+ * `service` scopes the leads to one department when no specific agent slot is given. This MUST mirror the
+ * serviceType passed to fetchMeetings: that call lists only same-service meetings, so without this filter
+ * cross-service booked leads inflate `total` while matching no listed meeting — an empty list with a
+ * non-zero count (the daily digest's "appointments booked, but no rows/dates" bug). */
+async function bookedLeadIds(teamId: string, agentType: string | undefined, service: ServiceType | "both", start: string, end: string): Promise<string[] | null> {
   const sb = getSupabase();
   if (!sb) return null;
   try {
     let q = sb.from(AGENT_LEAD_DAYS).select("lead_id").eq("team_id", teamId).eq("appointment", true)
       .gte("activity_day", start).lt("activity_day", end);
     if (agentType) q = q.eq("agent_type", agentType);
+    else if (service !== "both") q = q.in("agent_type", SERVICE_TO_AGENT_TYPES[service]);
     const { data, error } = await q;
     if (error || !Array.isArray(data)) return null;
     return [...new Set(data.map((r) => String((r as { lead_id?: string }).lead_id || "")).filter(Boolean))];
@@ -145,7 +158,7 @@ export async function GET(request: Request): Promise<Response> {
     // Preferred: list exactly the leads behind the tile (from agent_lead_days) so the count matches and
     // the inbound/outbound split is honored. Fall back to filtering meetings by booking date when the
     // aggregate is unavailable (older deploy / table missing).
-    const booked = await bookedLeadIds(teamId, agentType, start, end);
+    const booked = await bookedLeadIds(teamId, agentType, service, start, end);
     if (booked) {
       leadIds = booked;
     } else {
