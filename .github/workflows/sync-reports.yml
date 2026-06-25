@@ -36,7 +36,10 @@ jobs:
       - run: npm ci
       - name: Sync Supabase aggregate
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          # --expose-gc lets backfill.ts free heap between chunks (a long reconcile never accumulates);
+          # 8 GB headroom for the busiest 7-day window. CHUNK_DAYS=7 keeps each ClickHouse scan small.
+          NODE_OPTIONS: --max-old-space-size=8192 --expose-gc
+          CHUNK_DAYS: "7"
           # ClickHouse creds — reuse the CH_* repo secrets the sibling refresh-metrics.yml already carries.
           CLICKHOUSE_HOST: ${{ secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CH_PORT }}

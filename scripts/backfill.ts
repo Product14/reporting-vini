@@ -73,11 +73,15 @@ async function insertAll(sb: any, table: string, rows: object[]) {
 }
 
 /* Oldest changed (team,day) signal since the watermark — one cheap column scan per source table. */
-function deltaSql(effWm: string): string {
+function deltaSql(effWm: string, cap: string): string {
+  // The DISTINCT activity-days (by createdAt) whose rows changed since the watermark, capped at the
+  // lookback floor. We re-aggregate only THESE days (not oldest→today contiguous) so a single edit to an
+  // old row doesn't trigger a months-wide scan every run.
   const part = (tbl: string, created: string, updated: string) =>
-    `SELECT min(toDate(${created})) AS oldest, max(${updated}) AS mx, count() AS c
-     FROM dealer_leads.${tbl} FINAL WHERE __deleted = 0 AND ${updated} > parseDateTimeBestEffort('${effWm}')`;
-  return `SELECT min(oldest) AS oldest_changed_day, max(mx) AS new_watermark, sum(c) AS changed_rows FROM (
+    `SELECT toDate(${created}) AS d, ${updated} AS u
+     FROM dealer_leads.${tbl} FINAL
+     WHERE __deleted = 0 AND ${updated} > parseDateTimeBestEffort('${effWm}') AND toDate(${created}) >= toDate('${cap}')`;
+  return `SELECT arraySort(groupUniqArray(d)) AS days, max(u) AS new_watermark, count() AS changed_rows FROM (
     ${part("conversations", "createdAt", "updatedAt")}
     UNION ALL ${part("endcallreports", "createdAt", "updatedAt")}
     UNION ALL ${part("meetings", "created_at", "updated_at")}
@@ -160,51 +164,63 @@ function deltaSql(effWm: string): string {
     return;
   }
 
-  // ── decide the [rangeStart, rangeEnd) to (re)compute ──
-  let rangeEnd = shiftDays(today, 1); // exclusive, through today
-  let rangeStart: string;
+  // ── decide which day-windows to (re)compute, as a list of [a, b) chunks ──
   let newWatermark: string | null = null;
   const historical = Boolean(fromArg); // a segment of a long backfill — don't touch watermark/detail
+  const ranges: Array<[string, string]> = [];
+  const chunkRange = (start: string, end: string) => {
+    for (let a = start; a < end; a = shiftDays(a, CHUNK_DAYS)) ranges.push([a, minDay(shiftDays(a, CHUNK_DAYS), end)]);
+  };
 
   if (fromArg) {
-    rangeStart = fromArg;
-    rangeEnd = toArg || rangeEnd;
-    console.log(`SEGMENT reconcile ${rangeStart} .. ${rangeEnd} (${CHUNK_DAYS}d chunks).`);
+    chunkRange(fromArg, toArg || shiftDays(today, 1));
+    console.log(`SEGMENT reconcile ${fromArg} .. ${toArg || today} (${CHUNK_DAYS}d chunks).`);
   } else if (full || backfillDays || monthsArg) {
     const span = backfillDays || (monthsArg ? monthsArg * 30 : FULL_DAYS);
-    rangeStart = shiftDays(today, -(span - 1));
-    console.log(`${backfillDays || monthsArg ? "BACKFILL" : "FULL"} reconcile ${rangeStart} .. ${today} (${span}d, ${CHUNK_DAYS}d chunks).`);
+    const start = shiftDays(today, -(span - 1));
+    chunkRange(start, shiftDays(today, 1));
+    console.log(`${backfillDays || monthsArg ? "BACKFILL" : "FULL"} reconcile ${start} .. ${today} (${span}d, ${CHUNK_DAYS}d chunks).`);
   } else {
     const { data: state } = await sb.from("sync_state").select("watermark").eq("id", 1).maybeSingle();
     const watermark: string | null = (state as { watermark?: string } | null)?.watermark ?? null;
     const hotFloor = shiftDays(today, -(hotDays - 1));
     const cap = shiftDays(today, -(MAX_LOOKBACK - 1));
     if (!watermark) {
-      rangeStart = shiftDays(today, -(FULL_DAYS - 1));
-      console.log(`BOOTSTRAP (no watermark) — reconcile from ${rangeStart} (${FULL_DAYS}d, ${CHUNK_DAYS}d chunks).`);
+      chunkRange(shiftDays(today, -(FULL_DAYS - 1)), shiftDays(today, 1));
+      console.log(`BOOTSTRAP (no watermark) — reconcile last ${FULL_DAYS}d (${CHUNK_DAYS}d chunks).`);
     } else {
       const effWm = watermark > `${cap}T00:00:00Z` ? watermark : `${cap}T00:00:00Z`;
-      const delta = await queryRows<{ oldest_changed_day: string; new_watermark: string; changed_rows: string }>(deltaSql(effWm));
+      const delta = await queryRows<{ days: string[]; new_watermark: string; changed_rows: string }>(deltaSql(effWm, cap));
       const changed = num(delta[0]?.changed_rows);
-      const oldest = changed > 0 ? String(delta[0]?.oldest_changed_day || "") : "";
       newWatermark = changed > 0 && delta[0]?.new_watermark ? String(delta[0].new_watermark) : watermark;
-      rangeStart = oldest && oldest < hotFloor ? (oldest < cap ? cap : oldest) : hotFloor;
-      console.log(`INCREMENTAL: watermark=${watermark}, changed_rows=${changed}, oldest=${oldest || "—"} → ${rangeStart} .. ${today} (${CHUNK_DAYS}d chunks).`);
+      // Re-aggregate the days that actually changed PLUS the hot window, merged into ≤CHUNK_DAYS windows.
+      // A single edit to an old row scans just that day's window — never oldest→today contiguously.
+      const days = new Set<string>(Array.isArray(delta[0]?.days) ? delta[0]!.days.map(String).filter((d) => d >= cap) : []);
+      for (let d = hotFloor; d <= today; d = shiftDays(d, 1)) days.add(d);
+      for (const d of [...days].sort()) {
+        const last = ranges[ranges.length - 1];
+        if (last && d < shiftDays(last[0], CHUNK_DAYS)) last[1] = shiftDays(d, 1);
+        else ranges.push([d, shiftDays(d, 1)]);
+      }
+      console.log(`INCREMENTAL: watermark=${watermark}, changed_rows=${changed}, ${days.size} day(s) → ${ranges.length} chunk(s) (≤${CHUNK_DAYS}d each).`);
     }
   }
 
-  // ── walk the range in oldest-first chunks ──
+  // ── walk the chunks (oldest-first); force GC between them so a long run never accumulates heap ──
   let totalDaily = 0;
-  for (let a = rangeStart; a < rangeEnd; a = shiftDays(a, CHUNK_DAYS)) {
-    const b = minDay(shiftDays(a, CHUNK_DAYS), rangeEnd);
+  const gc = (globalThis as { gc?: () => void }).gc;
+  for (const [a, b] of ranges) {
     totalDaily += await syncChunk(a, b);
+    if (gc) gc();
   }
+  const firstStart = ranges.length ? ranges[0][0] : today;
+  const lastEnd = ranges.length ? ranges[ranges.length - 1][1] : shiftDays(today, 1);
 
   // ── rooftop detail (ClickHouse-direct, full replace): campaigns / outcomes / callbacks. Cumulative
   //    snapshots (not per-day), so a single replace covers them. Skipped for historical segments (they'd
   //    just re-write the same current snapshot each segment). A failure here must NOT fail the aggregate. ──
   if (!historical) try {
-    const camps = await queryRows<Record<string, unknown>>(campaignsSql({ startFloor: `toDate('${rangeStart}')` }));
+    const camps = await queryRows<Record<string, unknown>>(campaignsSql({ startFloor: `toDate('${firstStart}')` }));
     const campRows = camps
       .map((c) => ({ team_id: String(c.team_id ?? ""), agent_type: (c.agent_type as string) ?? null, campaign: String(c.campaign ?? ""), use_case: c.use_case ?? null, enrolled: num(c.enrolled), appointments: num(c.appointments), warm_leads: num(c.warm_leads), opt_outs: num(c.opt_outs), no_reach: num(c.no_reach), appt_rate_pct: c.appt_rate_pct == null ? null : Number(c.appt_rate_pct) }))
       .filter((r) => r.team_id && r.campaign);
@@ -229,9 +245,9 @@ function deltaSql(effWm: string): string {
   // Advance the watermark only for live runs (full/incremental). A historical segment must not move it —
   // the incremental watermark tracks "changes processed up to now", which a backfill of old days doesn't.
   const update: Record<string, unknown> = {
-    last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: totalDaily, window_start: rangeStart, error: null,
+    last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: totalDaily, window_start: firstStart, error: null,
   };
   if (!historical) update.watermark = newWatermark || new Date().toISOString();
   await sb.from("sync_state").update(update).eq("id", 1);
-  console.log(`done. ${totalDaily} daily rows across ${rangeStart} .. ${rangeEnd}.${historical ? " (segment)" : ` watermark=${update.watermark}`}`);
+  console.log(`done. ${totalDaily} daily rows across ${firstStart} .. ${lastEnd} in ${ranges.length} chunk(s).${historical ? " (segment)" : ` watermark=${update.watermark}`}`);
 })().catch((e) => { console.error("FAILED:", e.message); process.exit(1); });
