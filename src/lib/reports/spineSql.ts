@@ -15,9 +15,10 @@ const SPINE = applyCallbackOutboundAttribution(
   "agentBaseFact.sql",
 );
 
-/** The spine with callback attribution applied and {START} replaced by `startFloor` — a ClickHouse date
- *  expression, e.g. `toDate('2026-06-20')` or `addDays(today(), -3)`. Floors both the conversation_spine
- *  and ecr_events scans (and the injected callback CTE) to bound the read against the OOM ceiling. */
-export function loadSpineSql(startFloor: string): string {
-  return SPINE.replaceAll("{START}", startFloor);
+/** The spine with callback attribution applied and the {START}/{END} window substituted — ClickHouse
+ *  date expressions bounding `toDate(createdAt)` to `[startFloor, endCeil)`. Both bounds keep each scan
+ *  to a small window (the ETL chunks a long backfill into many of these), so the read never approaches
+ *  the cluster's memory ceiling. e.g. loadSpineSql("toDate('2026-06-01')", "toDate('2026-06-15')"). */
+export function loadSpineSql(startFloor: string, endCeil: string): string {
+  return SPINE.replaceAll("{START}", startFloor).replaceAll("{END}", endCeil);
 }

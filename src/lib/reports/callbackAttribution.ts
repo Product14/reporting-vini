@@ -17,10 +17,10 @@
  * Anchors are asserted (throws on miss) so any drift in the upstream spine SQL fails LOUDLY instead of
  * silently skipping the fix. On re-sync the fix re-applies automatically.
  *
- * IMPORTANT: the injected CTE is floored by `{START}` (the same placeholder the spine uses) so it never
- * scans endcallreports all-time — substitute {START} AFTER applying this, exactly as for the spine body.
- * Apply this only to SQL that contains {START} (i.e. the spine); the detail queries carry their own
- * callback branch.
+ * IMPORTANT: the injected CTE is bounded by `{START}`/`{END}` (the same placeholders the spine uses) so
+ * it scans only the active window, never endcallreports all-time — substitute both AFTER applying this,
+ * exactly as for the spine body. Apply this only to SQL that contains {START}/{END} (i.e. the spine);
+ * the detail queries carry their own callback branch.
  */
 
 const CTE_ANCHOR = "customer_opt_out AS (";
@@ -39,7 +39,7 @@ const CTE_BLOCK = `callback_from_outbound AS (
     FROM dealer_leads.endcallreports AS ecr FINAL
     WHERE ecr.__deleted = 0
       AND ecr.callId IS NOT NULL AND ecr.callId != ''
-      AND toDate(ecr.createdAt) >= {START}
+      AND toDate(ecr.createdAt) >= {START} AND toDate(ecr.createdAt) < {END}
       AND ( ecr.isCallbackFromOutbound = 1
             OR ifNull(ecr.callbackCampaignId, '') != ''
             OR ifNull(ecr.callbackOutboundTaskId, '') != '' )

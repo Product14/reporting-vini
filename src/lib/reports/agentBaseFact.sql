@@ -4,9 +4,10 @@
 -- replacing Metabase card 12227. One row per conversation; src/lib/reports/aggregate.ts reduces
 -- these into agent_daily / agent_daily_breakdown / agent_lead_days.
 --
---   • {START}  — date-floor placeholder, substituted at load time (addDays(today(), -N) for a full
---                reconcile, addDays(today(), -3) for the incremental window). Appears in two CTEs
---                (conversation_spine, ecr_events) plus the callback CTE injected by callbackAttribution.ts.
+--   • {START} / {END}  — date-window placeholders bounding toDate(createdAt) to [START, END),
+--                substituted at load time. The ETL walks a long backfill in small [START,END) chunks so
+--                no single scan nears the cluster memory ceiling. Appear in conversation_spine, ecr_events,
+--                and the callback CTE injected by callbackAttribution.ts.
 --   • cs."cs.team_id" / cs."cs.lead_id" are deliberately aliased WITH the "cs." prefix so the RawRow
 --     contract (aggregate.ts, stl.ts, tzMap.ts) holds unchanged after the Metabase→ClickHouse cutover.
 --   • The callback→outbound rule is injected at load time by callbackAttribution.ts (anchor-based) — do
@@ -149,7 +150,7 @@ conversation_spine AS (
       AND c.status != 'failed'
       AND lower(c.type) IN ('sms', 'call')
       AND lower(at.agentCallType) IN ('inbound', 'outbound')
-      AND toDate(c.createdAt) >= {START}
+      AND toDate(c.createdAt) >= {START} AND toDate(c.createdAt) < {END}
     GROUP BY
         c.conversationId, c.callId, lower(c.type),
         c.leadId, c.teamId, c.enterpriseId, lc.service_type, toDate(c.createdAt)
@@ -243,7 +244,7 @@ ecr_events AS (
       AND JSONExtractString(ecr.report, 'spam') = 'No'
       AND lower(ecr.callDetails_agentInfo_agentType) IN ('sales', 'service')
       AND ecr.callDetails_callType IN ('webCall', 'inboundPhoneCall', 'outboundPhoneCall')
-      AND toDate(ecr.createdAt) >= {START}
+      AND toDate(ecr.createdAt) >= {START} AND toDate(ecr.createdAt) < {END}
 ),
 
 ecr_by_call AS (
