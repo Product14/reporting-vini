@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   ActiveCampaign,
@@ -38,7 +38,8 @@ import {
   TrendBars,
 } from "@/components/reports/kit";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, addDay, peekAgents, tzShortLabel, valueForAgent, apptValueForId, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
+import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, hasAgentActivity, addDay, peekAgents, tzShortLabel, valueForAgent, apptValueForId, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
+import { useDateRange, reportNavQuery } from "@/components/reports/dateRange";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { track } from "@/lib/analytics";
 
@@ -65,11 +66,14 @@ export default function AgentReportsPage() {
 function AgentReportsView() {
   const searchParams = useSearchParams();
   const paramAgent = searchParams.get("agent"); // the agent the overview "who drove it" link picked
-  const [bucket, setBucket] = useState<Bucket>("last30");
-  const [custom, setCustom] = useState<{ start: string; end: string } | null>(null);
+  // Selected window comes from the URL so it persists when arriving from the Overview tab (and back).
+  const { bucket, custom, setPreset, setCustom } = useDateRange();
   // open on the agent passed in; the picker on the page then drives selection locally.
   // An invalid/absent id is corrected by the validity effect below once agents load.
   const [activeId, setActiveId] = useState<string>(paramAgent || "sales_ib");
+  // True once the user has clicked a pill — stops the activity-based default below from overriding an
+  // explicit choice (e.g. deliberately opening a quiet agent).
+  const userPickedRef = useRef(false);
   const [showDetail, setShowDetail] = useState<boolean>(true);
   // when set, the rooftop doesn't run this agent → show the upsell pitch instead of a report
   const [upsellId, setUpsellId] = useState<string | null>(null);
@@ -125,6 +129,9 @@ function AgentReportsView() {
   // Scope the live feed (and the no-crash mock skeleton) to the agents this rooftop actually runs.
   const AGENTS = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const hasTeam = teamId !== "";
+  // Carries team scope + the selected window into the tab links and the back arrow, so the window
+  // survives navigation back to the Overview tab.
+  const navQuery = reportNavQuery(teamId, bucket, custom);
   // Gated on lifetime "ever live", NOT the selected window — a live rooftop with an empty window (e.g.
   // "Today" before its first synced call) renders the report with zeros instead of the on-its-way gate.
   // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
@@ -140,10 +147,22 @@ function AgentReportsView() {
   // mock metrics/pills.
   const visibleAgents = AGENTS.length ? AGENTS : skeleton;
   const a = useMemo(() => agentById(activeId, visibleAgents), [activeId, visibleAgents]);
-  // keep the selected agent valid when the rooftop (and thus its agent set) changes
+  // keep the selected agent valid when the rooftop (and thus its agent set) changes, and default to an
+  // agent that actually has activity in this window so the page never lands on an empty agent while the
+  // rooftop is busy elsewhere (the "overview shows activity but by-agent doesn't" trap).
   useEffect(() => {
-    if (visibleAgents.length && !visibleAgents.some((ag) => ag.id === activeId)) setActiveId(visibleAgents[0].id);
-  }, [visibleAgents, activeId]);
+    if (!visibleAgents.length) return;
+    // dropped/invalid selection → fall back to the first agent
+    if (!visibleAgents.some((ag) => ag.id === activeId)) { setActiveId(visibleAgents[0].id); return; }
+    // Activity-based default: only when the user hasn't picked a pill and no explicit ?agent= was passed.
+    // If the current agent is empty for this window but another has activity, open the most-active one.
+    if (userPickedRef.current || paramAgent) return;
+    const current = agentById(activeId, visibleAgents);
+    if (hasAgentActivity(current)) return;
+    const score = (x: AgentData) => x.metrics.calls + x.metrics.smsSent + x.metrics.appointments + (x.leadFunnel?.contacted ?? x.report?.leadsAttempted ?? 0);
+    const best = visibleAgents.filter(hasAgentActivity).reduce<AgentData | null>((b, x) => (!b || score(x) > score(b) ? x : b), null);
+    if (best && best.id !== activeId) setActiveId(best.id);
+  }, [visibleAgents, activeId, paramAgent]);
   // agents this rooftop does NOT run — pitched as an upsell rather than hidden
   const upsellAgents = useMemo(() => {
     const liveIds = new Set(visibleAgents.map((x) => x.id));
@@ -167,7 +186,7 @@ function AgentReportsView() {
   // Show the $ "value created" whenever this agent has booked appointments to value — each carries a
   // fixed per-category dollar value (whiteboard spec), so it's a real delivered-value figure.
   const showDollarValue = scale(m.appointments) > 0;
-  const periodLabel = custom ? `${custom.start} – ${custom.end}` : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
+  const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
@@ -188,9 +207,11 @@ function AgentReportsView() {
   // sync). Either way show the NoActivity widen-prompt rather than a wall of zeros. (comingSoon is
   // already handled above, so reaching here means the rooftop has been live.)
   // Empty when EITHER the resolved live feed carries no agents at all (feedEmpty — never fall back to the
-  // mock skeleton's numbers) OR the selected agent simply had no calls in the window. Both render the
-  // NoActivity widen-prompt rather than a wall of zeros or, worse, the mock report.
-  const agentEmpty = hasTeam && feed !== null && (feedEmpty || (live && Math.round(scale(m.calls)) === 0));
+  // mock skeleton's numbers) OR the selected agent had NO activity of any kind in the window. We gate on
+  // overall activity (leads, conversations, qualified, appts, SMS — not just CALLS): an inbound agent can
+  // have a busy SMS/lead day with zero calls, and a calls-only check wrongly hid it as "no activity"
+  // while the overview counted its leads. Both render the NoActivity widen-prompt rather than zeros.
+  const agentEmpty = hasTeam && feed !== null && (feedEmpty || (live && !hasAgentActivity(a)));
   // "Turn rate" = qualified / connected. Use the CENTRAL value (build.ts report.qualifiedPct, computed
   // on the unique-lead basis) rather than recomputing inline — keeps it identical to the funnel's
   // qualified→connected step and de-duplicated (was an inline qualified-events / connected-events ratio).
@@ -245,7 +266,8 @@ function AgentReportsView() {
           subtitle="ROI, pipeline and quality by agent — Sales & Service, inbound & outbound."
           active="agents"
           teamId={teamId}
-          back={`/reports${teamId ? `?team_id=${teamId}` : ""}`}
+          query={navQuery}
+          back={`/reports${navQuery}`}
           right={
             hasTeam ? (
               <div className="flex items-center gap-3">
@@ -258,7 +280,7 @@ function AgentReportsView() {
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
-                  onPreset={(b) => { setBucket(b); setCustom(null); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
+                  onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
                   onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "agents", range: "custom", team_id: teamId }); }}
                 />
               </div>
@@ -289,7 +311,7 @@ function AgentReportsView() {
           {/* Live, resolved rooftop whose feed carries no agents/activity for the window — show the empty
               state, NOT the mock skeleton's switcher pills + fake report (the P1-3 bug). */}
           {scenario !== "first_time" && live && hasTeam && feed !== null && !comingSoon && feedEmpty && (
-            <NoActivity name={account.name || "this rooftop"} onWiden={() => { setBucket("last30"); setCustom(null); track("empty_window_widened", { team_id: teamId, agent: activeId }); }} />
+            <NoActivity name={account.name || "this rooftop"} onWiden={() => { setPreset("last30"); track("empty_window_widened", { team_id: teamId, agent: activeId }); }} />
           )}
 
           {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !comingSoon && !feedEmpty)) && (
@@ -301,7 +323,7 @@ function AgentReportsView() {
               return (
                 <button
                   key={ag.id}
-                  onClick={() => { setActiveId(ag.id); setUpsellId(null); track("agent_switched", { team_id: teamId, agent: ag.id }); }}
+                  onClick={() => { userPickedRef.current = true; setActiveId(ag.id); setUpsellId(null); track("agent_switched", { team_id: teamId, agent: ag.id }); }}
                   className={`flex items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-all ${
                     selected
                       ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
@@ -356,7 +378,7 @@ function AgentReportsView() {
           {scenario === "onboarding" && <OnboardingAgents agent={a} view={view} />}
 
           {live && agentEmpty && (
-            <NoActivity name={a.name} onWiden={() => { setBucket("last30"); setCustom(null); track("empty_window_widened", { team_id: teamId, agent: a.id }); }} />
+            <NoActivity name={a.name} onWiden={() => { setPreset("last30"); track("empty_window_widened", { team_id: teamId, agent: a.id }); }} />
           )}
 
           {live && !agentEmpty && (

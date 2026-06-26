@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Bucket,
@@ -25,6 +25,7 @@ import {
 } from "@/components/reports/kit";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, fleetValue, valueForAgent, blendedApptValue, type FetchResult } from "@/components/reports/liveData";
+import { useDateRange, reportNavQuery } from "@/components/reports/dateRange";
 import { track } from "@/lib/analytics";
 
 // Conservative expected booking rate applied to recoverable leads when projecting "money on the table"
@@ -40,10 +41,20 @@ const AGENT_COLOR: Record<string, string> = {
   service_ob: "#f59e0b",
 };
 
+// useDateRange() reads the selected window from the URL (?range / ?start&?end), which needs a Suspense
+// boundary above useSearchParams. The window now lives in the URL so it survives tab navigation.
 export default function OverviewReportPage() {
+  return (
+    <Suspense fallback={null}>
+      <OverviewReportView />
+    </Suspense>
+  );
+}
+
+function OverviewReportView() {
   const router = useRouter();
-  const [bucket, setBucket] = useState<Bucket>("last30");
-  const [custom, setCustom] = useState<{ start: string; end: string } | null>(null);
+  // Selected window comes from the URL so it persists across navigation to the By-agent tab (and back).
+  const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
 
 
@@ -89,7 +100,10 @@ export default function OverviewReportPage() {
   const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
 
   const hasTeam = teamId !== "";
-  const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
+  // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
+  // chosen date range survives navigation to the By-agent view.
+  const navQuery = reportNavQuery(teamId, bucket, custom);
+  const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : BUCKET_LABELS[bucket];
   // Value created = Σ each agent's appointments × its per-category whiteboard rate (single source of
   // truth in liveData). apptValueBlended is the appointment-weighted $/appt, for copy + pooled figures.
   const valueCreated = fleetValue(agents);
@@ -145,6 +159,7 @@ export default function OverviewReportPage() {
           subtitle="Your daily control-tower report — every agent, call and appointment in one place."
           active="overview"
           teamId={teamId}
+          query={navQuery}
           right={
             hasTeam ? (
               <div className="flex items-center gap-3">
@@ -159,7 +174,7 @@ export default function OverviewReportPage() {
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
-                  onPreset={(b) => { setBucket(b); setCustom(null); track("date_range_changed", { tab: "overview", range: b, team_id: teamId }); }}
+                  onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "overview", range: b, team_id: teamId }); }}
                   onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "overview", range: "custom", team_id: teamId }); }}
                 />
                 <button
@@ -277,7 +292,7 @@ export default function OverviewReportPage() {
               {ranked.map((a, i) => (
                 <button
                   key={a.id}
-                  onClick={() => { track("agent_opened", { team_id: teamId, agent: a.id }); router.push(`/reports/agents?team_id=${teamId}&agent=${a.id}`); }}
+                  onClick={() => { track("agent_opened", { team_id: teamId, agent: a.id }); router.push(`/reports/agents${navQuery}${navQuery ? "&" : "?"}agent=${a.id}`); }}
                   className="group flex items-center gap-4 rounded-2xl border border-[#e9e9ee] bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-[#c4b5fd] hover:shadow-md"
                 >
                   <span className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-[#f3eaff] text-[12px] font-extrabold text-[#813fed]">{i + 1}</span>

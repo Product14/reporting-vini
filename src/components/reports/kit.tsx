@@ -11,9 +11,10 @@ export * from "./data";
 /* ── tabs ── */
 export type ReportTab = "overview" | "agents" | "campaigns";
 
-export function ReportTabs({ active, teamId }: { active: ReportTab; teamId?: string }) {
-  // keep the rooftop scope across tab navigation — the host passes it as ?team_id=
-  const q = teamId ? `?team_id=${teamId}` : "";
+export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamId?: string; query?: string }) {
+  // keep the rooftop scope AND the selected date window across tab navigation. `query` (built by the
+  // page from team_id + the URL date range) is preferred; fall back to team_id only when absent.
+  const q = query ?? (teamId ? `?team_id=${teamId}` : "");
   const tabs = [
     { id: "overview", label: "Overview", href: `/reports${q}` },
     { id: "agents", label: "By agent", href: `/reports/agents${q}` },
@@ -48,6 +49,7 @@ export function ReportTopBar({
   right,
   back,
   teamId,
+  query,
 }: {
   title: string;
   subtitle: string;
@@ -55,6 +57,7 @@ export function ReportTopBar({
   right?: React.ReactNode;
   back?: string; // when set, render a back arrow linking here (e.g. the overview)
   teamId?: string; // preserved across tab + back navigation
+  query?: string; // full ?team_id=…&<date> for tab links (carries the selected window across tabs)
 }) {
   // sticky header that condenses once the page is scrolled
   const [scrolled, setScrolled] = useState(false);
@@ -92,7 +95,7 @@ export function ReportTopBar({
         </div>
         <div className="flex items-center gap-3">{right}</div>
       </div>
-      <ReportTabs active={active} teamId={teamId} />
+      <ReportTabs active={active} teamId={teamId} query={query} />
     </div>
   );
 }
@@ -142,6 +145,9 @@ export function DateFilter({
   // runs once at mount, not on every render.
   const [s, setS] = useState(() => custom?.start ?? new Date(Date.now() - 29 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
   const [e, setE] = useState(() => custom?.end ?? new Date().toISOString().slice(0, 10));
+  // Single-day search: a one-day window is just a custom range with start === end (the query layer
+  // makes the end exclusive). Seed from the active range when it already spans a single day.
+  const [day, setDay] = useState(() => (custom && custom.start === custom.end ? custom.start : new Date().toISOString().slice(0, 10)));
   return (
     <div className="relative flex items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
       {DATE_PRESETS.map((p) => {
@@ -160,10 +166,23 @@ export function DateFilter({
         onClick={() => setOpen((o) => !o)}
         className={`rounded-md px-2.5 py-1.5 text-[12px] font-semibold transition-all ${custom ? "bg-white text-[#111] shadow-sm" : "text-[#6b7280] hover:text-[#111]"}`}
       >
-        {custom ? `${custom.start.slice(5)}–${custom.end.slice(5)}` : "Custom"}
+        {custom ? (custom.start === custom.end ? custom.start.slice(5) : `${custom.start.slice(5)}–${custom.end.slice(5)}`) : "Custom"}
       </button>
       {open && (
         <div className="absolute right-0 top-full z-30 mt-2 flex flex-col gap-2.5 rounded-xl border border-[#e5e7eb] bg-white p-3 shadow-[0_10px_30px_rgba(16,24,40,0.15)]">
+          <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
+            Single day
+            <div className="flex items-end gap-2">
+              <input type="date" value={day} max={new Date().toISOString().slice(0, 10)} onChange={(ev) => setDay(ev.target.value)} className="rounded-md border border-[#e5e7eb] px-2 py-1 text-[12px] text-[#111]" />
+              <button
+                onClick={() => { if (day) { onCustom({ start: day, end: day }); setOpen(false); } }}
+                className="rounded-lg bg-[#813fed] px-3 py-1.5 text-[12px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
+              >
+                Go
+              </button>
+            </div>
+          </label>
+          <div className="h-px bg-[#f3f4f6]" />
           <div className="flex items-end gap-2">
             <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
               From

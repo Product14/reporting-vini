@@ -151,9 +151,14 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     };
   }
 
-  // Gate to onboarded slots when the dealer's onboarded-agent list is known. null → show all four
-  // (previous behavior). Personas are NOT changed — only which slots appear.
-  const slots = onboardedSlots ? MOCK_AGENTS.filter((base) => onboardedSlots.has(base.id)) : MOCK_AGENTS;
+  // Which slots to render: the onboarded ones (when the dealer's list is known) UNION any agent_type
+  // that actually has activity rows in this window. Activity is ground truth — an agent running live
+  // but missing from the onboarded list (or that list being unavailable) must never be silently
+  // dropped. null onboardedSlots → show all four (previous behavior). Personas are NOT changed.
+  const activeTypes = new Set(daily.map((r) => r.agent_type));
+  const slots = MOCK_AGENTS.filter(
+    (base) => (onboardedSlots ? onboardedSlots.has(base.id) : true) || activeTypes.has(AGENT_TYPE_BY_ID[base.id]),
+  );
 
   const agents = slots.map((base): AgentData => {
     const type = AGENT_TYPE_BY_ID[base.id];

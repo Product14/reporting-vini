@@ -14,11 +14,24 @@ export const ID_BY_AGENT_TYPE: Record<string, AgentData["id"]> = {
   "Service Outbound": "service_ob",
 };
 
-/* Scope an agent list to the agents a rooftop actually runs (per the CSM sheet). A rooftop not in
+/* Does this agent have ANY real activity in the window? Activity is ground truth for whether an agent
+ * should appear — not just calls (an inbound agent can have a busy SMS/lead day with zero calls), so we
+ * look across calls, conversations, qualified, appointments, SMS and unique leads touched. */
+export function hasAgentActivity(a: AgentData): boolean {
+  const m = a.metrics;
+  const leads = a.leadFunnel?.contacted ?? a.report?.leadsAttempted ?? 0;
+  return m.calls + m.conversations + m.qualified + m.appointments + m.smsSent + leads > 0;
+}
+
+/* Scope an agent list to the agents a rooftop actually runs. We keep the agents the CSM sheet lists for
+ * this rooftop PLUS any agent with real activity in the window — the sheet goes stale, so activity is
+ * the source of truth. Without this, an agent that runs live but was never added to the sheet (e.g. a
+ * rooftop's Sales-OB) is silently hidden from BOTH the overview and the by-agent view. A rooftop not in
  * the tracker (no agents listed) shows all, so an unmapped team never renders an empty report. */
 export function agentsForAccount(agents: AgentData[], account: Account | undefined): AgentData[] {
   const ids = new Set((account?.agents ?? []).map((t) => ID_BY_AGENT_TYPE[t]).filter(Boolean));
-  return ids.size ? agents.filter((a) => ids.has(a.id)) : agents;
+  if (!ids.size) return agents;
+  return agents.filter((a) => ids.has(a.id) || hasAgentActivity(a));
 }
 
 export const DEFAULT_TEAM_ID = "9923577d07"; // Honda of Downtown LA — overridable per call
