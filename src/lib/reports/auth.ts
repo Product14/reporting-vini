@@ -40,6 +40,33 @@ export function readBearer(request: Request): string | null {
   return t || null;
 }
 
+/* The Spyne session token to use for DOWNSTREAM Spyne API calls (live meetings, store timezone,
+ * onboarded agents) — NOT for authorizing this request (that's requireTeamAuth). Reads the same sources
+ * as readBearer, but the shared CRON_SECRET is NEVER a Spyne token: the service cron presents
+ * CRON_SECRET (header bearer or ?key=) to AUTHORIZE, and forwards the real dealer session token
+ * separately as ?auth_key=. The routes used to read the Authorization header first for this too, so the
+ * CRON_SECRET shadowed the real token — every Spyne call 401'd and the live sections (the appointments
+ * list, store timezone, onboarded agents) silently came back empty. Skip the secret and fall through to
+ * the query-param token; resolveToken() then applies the env fallback for local dev. A browser still
+ * works: it forwards its real session token in the Authorization header (≠ secret), which is used. */
+export function spyneTokenFrom(request: Request): string | null {
+  const url = new URL(request.url);
+  const secret = process.env.CRON_SECRET;
+  const candidates = [
+    request.headers.get("authorization"),
+    url.searchParams.get("auth_key"),
+    url.searchParams.get("spyne_token"),
+    url.searchParams.get("token"),
+  ];
+  for (const c of candidates) {
+    const t = (c || "").replace(/^Bearer\s+/i, "").trim();
+    if (!t) continue;
+    if (secret && t === secret) continue; // the service secret authorizes; it is not a Spyne token
+    return t;
+  }
+  return null;
+}
+
 // The team_id a Spyne session token is scoped to, or null when the token doesn't decode or carries no
 // team scope. Mirrors enterpriseIdFromToken (meetings.ts): base64 → JSON → field.
 function teamIdFromToken(token: string): string | null {

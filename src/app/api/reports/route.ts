@@ -4,7 +4,7 @@ import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow 
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots } from "@/lib/spyne/teamContext";
-import { requireTeamAuth } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
  * already consumes — one fast query instead of the ~84 Metabase round-trips fetchAgents() used to do.
@@ -128,10 +128,10 @@ export async function GET(request: Request): Promise<Response> {
 
   // Spyne API token: PROD forwards it per-request from the host — via the Authorization header or an
   // `auth_key`/`spyne_token`/`token` query param (the host uses `auth_key`); LOCAL DEV omits it and the
-  // client falls back to SPYNE_API_TOKEN (env). Strip any "Bearer " prefix from whichever source.
-  const tokenSource = request.headers.get("authorization")
-    || searchParams.get("auth_key") || searchParams.get("spyne_token") || searchParams.get("token") || "";
-  const spyneToken = tokenSource.replace(/^Bearer\s+/i, "").trim() || null;
+  // client falls back to SPYNE_API_TOKEN (env). spyneTokenFrom skips the CRON_SECRET so the cron's
+  // `Authorization: Bearer <secret>` doesn't shadow the real dealer token it sends as ?auth_key= — which
+  // would silently drop timezone/onboarded-agent enrichment back to UTC/all-agents.
+  const spyneToken = spyneTokenFrom(request);
 
   // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
   // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).

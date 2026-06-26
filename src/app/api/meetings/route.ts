@@ -1,6 +1,6 @@
 import { fetchMeetings, type ServiceType } from "@/lib/spyne/meetings";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
-import { requireTeamAuth } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
 import { getSupabase, AGENT_LEAD_DAYS } from "@/lib/reports/supabase";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -75,11 +75,11 @@ export async function GET(request: Request): Promise<Response> {
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
-  // Spyne token: prod forwards it (Authorization header or auth_key/spyne_token/token query param);
-  // local dev omits it and the client falls back to SPYNE_API_TOKEN. Strip any "Bearer " prefix.
-  const tokenSource = request.headers.get("authorization")
-    || searchParams.get("auth_key") || searchParams.get("spyne_token") || searchParams.get("token") || "";
-  const spyneToken = tokenSource.replace(/^Bearer\s+/i, "").trim() || null;
+  // Spyne token for the live meetings call: prod forwards it (Authorization header or
+  // auth_key/spyne_token/token query param); local dev omits it and the client falls back to
+  // SPYNE_API_TOKEN. spyneTokenFrom skips the CRON_SECRET so the cron's `Authorization: Bearer
+  // <secret>` (which authorizes the request) never shadows the real dealer token it sends as ?auth_key=.
+  const spyneToken = spyneTokenFrom(request);
 
   const svcParam = (searchParams.get("serviceType") || "both").toLowerCase();
   const service: ServiceType | "both" = svcParam === "sales" || svcParam === "service" ? svcParam : "both";
