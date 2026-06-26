@@ -41,7 +41,9 @@ export async function GET(request: Request): Promise<Response> {
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
-  if (!hasClickhouseCreds()) return Response.json({ actionItems: [], total: 0, note: "clickhouse not configured" });
+  // degraded:true is a LOUD signal — a missing CLICKHOUSE_* env otherwise returns an empty 200 that's
+  // indistinguishable from "no action items", silently disabling the transactional cron.
+  if (!hasClickhouseCreds()) return Response.json({ actionItems: [], total: 0, degraded: true, note: "clickhouse not configured" });
 
   const svc = (searchParams.get("serviceType") || "both").toLowerCase();
   const service = SERVICE.has(svc) ? svc : "both";
