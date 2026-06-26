@@ -137,8 +137,11 @@ export function DateFilter({
   onCustom: (r: { start: string; end: string }) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [s, setS] = useState(custom?.start ?? "2026-05-10");
-  const [e, setE] = useState(custom?.end ?? "2026-06-08");
+  // Default the custom range to the last 30 days relative to today (end = today, start = today-29)
+  // instead of stale hardcoded dates that drift out of date. Lazy initializers so the impure `new Date()`
+  // runs once at mount, not on every render.
+  const [s, setS] = useState(() => custom?.start ?? new Date(Date.now() - 29 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+  const [e, setE] = useState(() => custom?.end ?? new Date().toISOString().slice(0, 10));
   return (
     <div className="relative flex items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
       {DATE_PRESETS.map((p) => {

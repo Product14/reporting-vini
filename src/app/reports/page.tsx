@@ -24,8 +24,14 @@ import {
   StepList,
 } from "@/components/reports/kit";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, fleetValue, valueForAgent, blendedApptValue, type FetchResult } from "@/components/reports/liveData";
 import { track } from "@/lib/analytics";
+
+// Conservative expected booking rate applied to recoverable leads when projecting "money on the table"
+// to dollars. Recoverable leads are engaged-but-not-yet-booked, so NOT all of them will convert —
+// multiplying every lead by the full appointment value assumes 100% conversion and overstates the $.
+// ~30% is a deliberately conservative re-engagement booking rate; tune if a real rate is wired later.
+const EXPECTED_BOOK_RATE = 0.3;
 
 const AGENT_COLOR: Record<string, string> = {
   sales_ib: "#6366f1",
@@ -40,13 +46,6 @@ export default function OverviewReportPage() {
   const [custom, setCustom] = useState<{ start: string; end: string } | null>(null);
   const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
 
-  // cost per appointment — set on the Agents tab; read once from localStorage (same initializer
-  // pattern ScenarioProvider uses to seed the rooftop), so there's no setState-in-effect.
-  const [apptCost] = useState<number>(() => {
-    if (typeof window === "undefined") return 150;
-    const s = window.localStorage.getItem("vini.apptCost");
-    return s ? Number(s) : 150;
-  });
 
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for the query.
   // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
@@ -91,19 +90,21 @@ export default function OverviewReportPage() {
 
   const hasTeam = teamId !== "";
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
-  const valueCreated = appointmentValue(fleet.appointments, apptCost);
+  // Value created = Σ each agent's appointments × its per-category whiteboard rate (single source of
+  // truth in liveData). apptValueBlended is the appointment-weighted $/appt, for copy + pooled figures.
+  const valueCreated = fleetValue(agents);
+  const apptValueBlended = blendedApptValue(agents);
   // Appointment drill-down — clicking the headline count lists the rooftop's appointments (sales +
   // service) for the shown window. Window = the server-resolved dates when we have them, else the bucket.
   const [apptModalOpen, setApptModalOpen] = useState(false);
   const openApptModal = () => { setApptModalOpen(true); track("appointments_drilldown_opened", { tab: "overview", team_id: teamId }); };
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
     feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
-  // ROI gate: only surface a $ "value created" when real revenue exceeds run cost. Both are zeroed today
-  // (no Q12227 source), so this is false → we show appointments (real value delivered) instead of a
-  // break-even $ that would read as "no ROI" and risk churn. Flips on automatically once revenue/cost wire.
-  const totalRevenue = agents.reduce((s, a) => s + a.metrics.revenue, 0);
-  const totalCost = agents.reduce((s, a) => s + a.metrics.cost, 0);
-  const showDollarValue = totalCost > 0 && totalRevenue / totalCost > 1;
+  // Show the $ "value created" whenever there are booked appointments. Gate on the appointment COUNT
+  // (not valueCreated): every booked appointment now carries a per-category dollar value, so if any
+  // appointments exist we have a real figure to show — and we must never tell the dealer "dollar value
+  // appears once appointments are booked" while appointments already exist.
+  const showDollarValue = fleet.appointments > 0;
   // "Coming soon" is gated on whether the rooftop has EVER produced data (lifetime) — NOT on the
   // selected window. A live account whose window happens to be empty (e.g. "Today" before the day's
   // first call syncs) renders the real report with zeros + an inline note, not the on-its-way gate.
@@ -225,7 +226,7 @@ export default function OverviewReportPage() {
                       ) : (
                         <b className="text-white">{fmtInt(fleet.appointments)} appointments</b>
                       )}{" "}
-                      booked across your live agents, at <b className="text-white">{fmtMoneyFull(apptCost)}</b> per appointment.
+                      booked across your live agents, at <b className="text-white">{fmtMoneyFull(apptValueBlended)}</b> per appointment (blended).
                     </p>
                   </>
                 ) : (
@@ -247,7 +248,7 @@ export default function OverviewReportPage() {
                       )}
                     </div>
                     <p className="mt-3 max-w-[560px] text-[14px] leading-snug text-[#d6cdf0]">
-                      From <b className="text-white">{fmtInt(fleet.conversations)} conversations</b> across your live agents, with <b className="text-white">{fmtInt(fleet.qualified)} qualified</b>. Dollar value appears once revenue tracking is on.
+                      From <b className="text-white">{fmtInt(fleet.conversations)} conversations</b> across your live agents, with <b className="text-white">{fmtInt(fleet.qualified)} qualified</b>. Dollar value appears once appointments are booked.
                     </p>
                   </>
                 )}
@@ -293,7 +294,7 @@ export default function OverviewReportPage() {
                   </div>
                   <div className="w-[170px] flex-none">
                     <div className="flex items-baseline justify-between">
-                      <span className="text-[19px] font-extrabold tabular-nums text-[#10b981]">{showDollarValue ? fmtMoney(appointmentValue(a.metrics.appointments, apptCost)) : fmtInt(a.metrics.appointments)}</span>
+                      <span className="text-[19px] font-extrabold tabular-nums text-[#10b981]">{showDollarValue ? fmtMoney(valueForAgent(a.id, a.metrics.appointments)) : fmtInt(a.metrics.appointments)}</span>
                       <span className="text-[10px] text-[#9ca3af]">{showDollarValue ? "value" : "appts"}</span>
                     </div>
                     <div className="mt-1.5"><InlineBar pct={(a.metrics.appointments / maxAppts) * 100} color={AGENT_COLOR[a.id]} /></div>
@@ -334,7 +335,7 @@ export default function OverviewReportPage() {
                     <div>
                       <p className="text-[30px] font-extrabold tabular-nums text-[#813fed] leading-none">{fmtInt(money.total)}</p>
                       <p className="text-[11.5px] text-[#6b7280] mt-1">
-                        recoverable leads we engaged but that haven&apos;t booked{apptCost ? <> · up to <b className="text-[#111]">{fmtMoneyFull(money.total * apptCost)}</b> if recovered</> : null}
+                        recoverable leads we engaged but that haven&apos;t booked{apptValueBlended ? <> · ~<b className="text-[#111]">{fmtMoneyFull(money.total * apptValueBlended * EXPECTED_BOOK_RATE)}</b> at a {Math.round(EXPECTED_BOOK_RATE * 100)}% recovery rate</> : null}
                       </p>
                     </div>
                     <div className="flex flex-col gap-2.5">
@@ -359,7 +360,10 @@ export default function OverviewReportPage() {
             <Card title="Outreach → conversation → qualified → appointment" sub="Each step is the unique leads that reached that stage; the pill is conversion from the step before">
               <StepFunnel stages={fleet.funnel} />
               <div className="mt-5 grid grid-cols-2 gap-2.5 border-t border-[#f3f4f6] pt-4 sm:grid-cols-4">
-                <ContextChip label="Connect / answer" value={`${fleet.connectRate}%`} />
+                <ContextChip
+                  label={fleet.answerRateInbound != null ? "Inbound answer rate" : "Connect rate (IB+OB)"}
+                  value={`${fleet.answerRateInbound ?? fleet.connectRate}%`}
+                />
                 <ContextChip label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" />
                 <ContextChip label="Talk time" value={`${fmtInt(fleet.talkMinutes / 60)}h`} />
                 <ComingSoon title="Show rate" inline />
@@ -372,7 +376,15 @@ export default function OverviewReportPage() {
             <SectionLabel hint="audit-grade hygiene you can show">Can you trust it</SectionLabel>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card title="Conversation quality" sub="Fleet-level, call-weighted across your live agents">
-                <QualityCell label="Connect / answer" value={`${fleet.connectRate}%`} status={fleet.connectRate >= 60 ? "green" : "amber"} />
+                {(() => {
+                  // Prefer the inbound answer-rate (an answer rate is an inbound concept); fall back to
+                  // the blended connect-rate only when the fleet runs no inbound. RAG now has a RED tier
+                  // (a 5% rate used to show amber): green ≥ 50, amber ≥ 25, else red.
+                  const rate = fleet.answerRateInbound ?? fleet.connectRate;
+                  const label = fleet.answerRateInbound != null ? "Inbound answer rate" : "Connect rate (blended IB+OB)";
+                  const status = rate >= 50 ? "green" : rate >= 25 ? "amber" : "red";
+                  return <QualityCell label={label} value={`${rate}%`} status={status} />;
+                })()}
                 <div className="mt-3">
                   <ComingSoon title="CSAT & sentiment" note="Per-conversation satisfaction and sentiment land here once call transcripts are scored." />
                 </div>
@@ -437,7 +449,9 @@ function OverviewSkeleton() {
 }
 
 /* ── hero sub-tile (dark band) ── */
-function HeroTile({ label, value, delta, invert }: { label: string; value: string; delta?: number; invert?: boolean }) {
+function HeroTile({ label, value, delta, invert }: { label: string; value: string; delta?: number | null; invert?: boolean }) {
+  // null/undefined delta === no prior-window basis → render "New" rather than a misleading "▲ 0%".
+  const isNew = delta === null;
   const has = delta !== undefined;
   const d = delta ?? 0;
   const isGood = invert ? d < 0 : d > 0;
@@ -447,15 +461,28 @@ function HeroTile({ label, value, delta, invert }: { label: string; value: strin
       <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#a99fce]">{label}</p>
       <p className="mt-1 text-[22px] font-extrabold tabular-nums leading-none text-white">{value}</p>
       {has && (
-        <span className="mt-1.5 inline-block text-[10.5px] font-semibold" style={{ color: d === 0 ? "#a99fce" : isGood ? "#5eead4" : "#fca5a5" }}>
-          {d === 0 ? "0%" : `${up ? "▲" : "▼"} ${Math.abs(d)}%`} vs prior
-        </span>
+        isNew ? (
+          <span className="mt-1.5 inline-block text-[10.5px] font-semibold text-[#5eead4]">New</span>
+        ) : (
+          <span className="mt-1.5 inline-block text-[10.5px] font-semibold" style={{ color: d === 0 ? "#a99fce" : isGood ? "#5eead4" : "#fca5a5" }}>
+            {d === 0 ? "0%" : `${up ? "▲" : "▼"} ${Math.abs(d)}%`} vs prior
+          </span>
+        )
       )}
     </div>
   );
 }
 
-function DeltaBadge({ label, delta }: { label: string; delta: number }) {
+function DeltaBadge({ label, delta }: { label: string; delta: number | null }) {
+  // null === no prior-window basis → "New" instead of "▲ 0%".
+  if (delta === null) {
+    return (
+      <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-right backdrop-blur-sm">
+        <p className="text-[20px] font-extrabold tabular-nums leading-none text-[#5eead4]">New</p>
+        <p className="mt-1 text-[10.5px] text-[#c4b5fd]">{label}</p>
+      </div>
+    );
+  }
   const up = delta >= 0;
   return (
     <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-right backdrop-blur-sm">

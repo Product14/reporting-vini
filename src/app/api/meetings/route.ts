@@ -1,5 +1,6 @@
 import { fetchMeetings, type ServiceType } from "@/lib/spyne/meetings";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
+import { requireTeamAuth } from "@/lib/reports/auth";
 import { getSupabase, AGENT_LEAD_DAYS } from "@/lib/reports/supabase";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -67,6 +68,12 @@ export async function GET(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
   const teamId = searchParams.get("team_id");
   if (!teamId) return Response.json({ error: "team_id is required" }, { status: 400 });
+
+  // Require a credential and validate team scope: a valid Spyne session token scoped to this team, or
+  // the service CRON_SECRET. No credential → 401; token scoped to a different team → 403. (Meetings
+  // lists customer/vehicle records, so it must not be readable for an arbitrary team_id either.)
+  const auth = requireTeamAuth(request, teamId);
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
   // Spyne token: prod forwards it (Authorization header or auth_key/spyne_token/token query param);
   // local dev omits it and the client falls back to SPYNE_API_TOKEN. Strip any "Bearer " prefix.

@@ -4,6 +4,7 @@ import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow 
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots } from "@/lib/spyne/teamContext";
+import { requireTeamAuth } from "@/lib/reports/auth";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
  * already consumes — one fast query instead of the ~84 Metabase round-trips fetchAgents() used to do.
@@ -90,9 +91,12 @@ async function fetchDetailCombined(sb: any, teamId: string): Promise<Detail | nu
 async function teamEverLive(sb: any, teamId: string): Promise<boolean> {
   try {
     const { data, error } = await sb.from(AGENT_DAILY).select("activity_day").eq("team_id", teamId).limit(1);
-    return !error && Array.isArray(data) && data.length > 0;
+    // A transient probe error must NEVER demote a rooftop to "Coming soon": on error degrade to true
+    // (assume live). A clean read with zero rows is the only signal that means "never live".
+    if (error) return true;
+    return Array.isArray(data) && data.length > 0;
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -115,6 +119,12 @@ export async function GET(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
   const teamId = searchParams.get("team_id");
   if (!teamId) return Response.json({ error: "team_id is required" }, { status: 400 });
+
+  // Require a credential and validate team scope before returning any rooftop data: a valid Spyne
+  // session token scoped to this team, or the service CRON_SECRET. No credential → 401; token scoped
+  // to a different team → 403.
+  const auth = requireTeamAuth(request, teamId);
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
   // Spyne API token: PROD forwards it per-request from the host — via the Authorization header or an
   // `auth_key`/`spyne_token`/`token` query param (the host uses `auth_key`); LOCAL DEV omits it and the
@@ -169,8 +179,11 @@ export async function GET(request: Request): Promise<Response> {
   if (err) {
     // A read failure must NOT 502 (that blanks the report). Degrade to the same mock-shaped result
     // the no-backend path serves so the UI still renders; flag it so the failure is observable.
+    // `degraded: true` is in the BODY (not just the header) so the digest pipeline can tell an outage
+    // from a genuinely quiet day and SUPPRESS the email instead of sending all-zeros. HTTP stays 200 so
+    // existing healthy callers that rely on 200 don't break.
     console.error(`[/api/reports] Supabase read failed for team ${teamId}: ${err.message}`);
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots }), ...meta }, {
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots }), ...meta, degraded: true }, {
       headers: { "X-Reports-Degraded": "supabase-read-error" },
     });
   }
@@ -187,6 +200,10 @@ export async function GET(request: Request): Promise<Response> {
     teamEverLive(sb, teamId),
   ]);
   const { callbacks, campaigns, outcomes } = detail ?? EMPTY_DETAIL;
+  // Invariant: a rooftop that returned real rows in THIS request can't be "never live" — don't let a
+  // separate probe (even a clean-but-stale empty read) demote it. The probe still gates brand-new
+  // rooftops whose selected window AND lifetime are both empty.
+  const everLiveResolved = everLive || allDaily.length > 0;
 
   const result = buildResult({
     daily: cur,
@@ -200,7 +217,7 @@ export async function GET(request: Request): Promise<Response> {
     priorLeadCounts: lc.prior,
   });
 
-  return Response.json({ ...result, ...meta, everLive }, {
+  return Response.json({ ...result, ...meta, everLive: everLiveResolved }, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

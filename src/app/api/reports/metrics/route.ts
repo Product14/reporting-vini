@@ -1,4 +1,5 @@
 import { getSupabase } from "@/lib/reports/supabase";
+import { requireTeamAuth } from "@/lib/reports/auth";
 import {
   REPORT_APPT_STATUS,
   REPORT_TRANSFER_QUALITY,
@@ -123,6 +124,11 @@ export async function GET(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
   const teamId = searchParams.get("team_id");
   if (!teamId) return Response.json({ error: "team_id is required" }, { status: 400 });
+
+  // Require a credential and validate team scope (same guard as the other read routes). The POST ingest
+  // path keeps its own CRON_SECRET check untouched. No credential → 401; wrong team scope → 403.
+  const auth = requireTeamAuth(request, teamId);
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
   const sb = getSupabase();
   if (!sb) return Response.json({ team_id: teamId, configured: false }, { status: 200 });

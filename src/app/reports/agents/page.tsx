@@ -38,7 +38,7 @@ import {
   TrendBars,
 } from "@/components/reports/kit";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, addDay, peekAgents, tzShortLabel, appointmentValue, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
+import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, addDay, peekAgents, tzShortLabel, valueForAgent, apptValueForId, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { track } from "@/lib/analytics";
 
@@ -70,9 +70,6 @@ function AgentReportsView() {
   // open on the agent passed in; the picker on the page then drives selection locally.
   // An invalid/absent id is corrected by the validity effect below once agents load.
   const [activeId, setActiveId] = useState<string>(paramAgent || "sales_ib");
-  // cost per appointment — asked once (stored locally), then editable via a hyperlink
-  const [apptCost, setApptCost] = useState<number>(150);
-  const [costModalOpen, setCostModalOpen] = useState<boolean>(false);
   const [showDetail, setShowDetail] = useState<boolean>(true);
   // when set, the rooftop doesn't run this agent → show the upsell pitch instead of a report
   const [upsellId, setUpsellId] = useState<string | null>(null);
@@ -81,18 +78,6 @@ function AgentReportsView() {
   // Resolved up-front (before the effects/handlers below that reference teamId for analytics).
   const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
 
-  useEffect(() => {
-    const stored = typeof window !== "undefined" ? window.localStorage.getItem("vini.apptCost") : null;
-    if (stored) setApptCost(Number(stored));
-    else { setCostModalOpen(true); track("cost_per_appt_prompted", { team_id: teamId }); } // first visit — ask once
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const saveApptCost = (v: number) => {
-    setApptCost(v);
-    if (typeof window !== "undefined") window.localStorage.setItem("vini.apptCost", String(v));
-    setCostModalOpen(false);
-    track("cost_per_appt_set", { team_id: teamId, cost: v });
-  };
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
   // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
   const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
@@ -124,11 +109,11 @@ function AgentReportsView() {
   const [metrics, setMetrics] = useState<ReportMetrics | null>(null);
   useEffect(() => {
     let on = true;
-    Promise.resolve(teamId ? fetchReportMetrics(teamId) : null)
+    Promise.resolve(teamId ? fetchReportMetrics(teamId, spyneToken) : null)
       .then((mx) => { if (on) setMetrics(mx); })
       .catch(() => { if (on) setMetrics(null); });
     return () => { on = false; };
-  }, [teamId]);
+  }, [teamId, spyneToken]);
   const refresh = () => {
     if (!teamId) return;
     track("report_refreshed", { tab: "agents", team_id: teamId });
@@ -145,6 +130,14 @@ function AgentReportsView() {
   // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
   const comingSoon = hasTeam && feed !== null && !(feed.everLive ?? feed.hasData); // rooftop selected, never live yet
   const skeleton = useMemo(() => agentsForAccount(MOCK_AGENTS, account), [account]);
+  // A live rooftop whose feed has RESOLVED but carries no agents for the selected window. We must NOT
+  // fall back to the mock skeleton's numbers here (that rendered a fake "168 leads attempted" report for
+  // a real dealer) — this drives the empty/zero state instead. The skeleton is used ONLY for the
+  // pre-load / never-selected state below (so `a` is always a valid object and the JSX can't crash).
+  const feedEmpty = hasTeam && feed !== null && AGENTS.length === 0;
+  // Use real agents when present; otherwise the skeleton is a crash-safety placeholder only — when a live
+  // feed has resolved empty (feedEmpty), the render gates below show the empty state, never the skeleton's
+  // mock metrics/pills.
   const visibleAgents = AGENTS.length ? AGENTS : skeleton;
   const a = useMemo(() => agentById(activeId, visibleAgents), [activeId, visibleAgents]);
   // keep the selected agent valid when the rooftop (and thus its agent set) changes
@@ -163,9 +156,6 @@ function AgentReportsView() {
   }, [upsellAgents, upsellId]);
   const m = a.metrics;
   const r = a.report;
-  // Only show a $ "value created" when real revenue beats run cost. Both are zeroed today (no Q12227
-  // source) → false → show appointments delivered instead of a break-even $ that reads as "no ROI".
-  const showDollarValue = m.cost > 0 && m.revenue / m.cost > 1;
   const inbound = a.dir === "Inbound";
   const hasStory = !!(r.benchmarks && r.compare); // story-first treatment for every agent that has it
   const live = view.hasData; // recently_live + repeat render the real report
@@ -174,6 +164,9 @@ function AgentReportsView() {
   // per bucket), so it must not be re-scaled — factor=1 when live, 0 in the pre-live ghost states.
   const factor = live ? 1 : 0;
   const scale = (n: number) => Math.round(n * factor);
+  // Show the $ "value created" whenever this agent has booked appointments to value — each carries a
+  // fixed per-category dollar value (whiteboard spec), so it's a real delivered-value figure.
+  const showDollarValue = scale(m.appointments) > 0;
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
@@ -194,7 +187,10 @@ function AgentReportsView() {
   // otherwise-busy window AND a fully-empty window on a live rooftop (e.g. "Today" before any calls
   // sync). Either way show the NoActivity widen-prompt rather than a wall of zeros. (comingSoon is
   // already handled above, so reaching here means the rooftop has been live.)
-  const agentEmpty = live && hasTeam && feed !== null && Math.round(scale(m.calls)) === 0;
+  // Empty when EITHER the resolved live feed carries no agents at all (feedEmpty — never fall back to the
+  // mock skeleton's numbers) OR the selected agent simply had no calls in the window. Both render the
+  // NoActivity widen-prompt rather than a wall of zeros or, worse, the mock report.
+  const agentEmpty = hasTeam && feed !== null && (feedEmpty || (live && Math.round(scale(m.calls)) === 0));
   // "Turn rate" = qualified / connected. Use the CENTRAL value (build.ts report.qualifiedPct, computed
   // on the unique-lead basis) rather than recomputing inline — keeps it identical to the funnel's
   // qualified→connected step and de-duplicated (was an inline qualified-events / connected-events ratio).
@@ -290,7 +286,13 @@ function AgentReportsView() {
 
           {scenario !== "first_time" && live && hasTeam && comingSoon && <RooftopComingSoon name={account.name} />}
 
-          {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !comingSoon)) && (
+          {/* Live, resolved rooftop whose feed carries no agents/activity for the window — show the empty
+              state, NOT the mock skeleton's switcher pills + fake report (the P1-3 bug). */}
+          {scenario !== "first_time" && live && hasTeam && feed !== null && !comingSoon && feedEmpty && (
+            <NoActivity name={account.name || "this rooftop"} onWiden={() => { setBucket("last30"); setCustom(null); track("empty_window_widened", { team_id: teamId, agent: activeId }); }} />
+          )}
+
+          {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !comingSoon && !feedEmpty)) && (
           <>
           {/* agent switcher — full-width row of equal pills; the selected one drives the report below */}
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
@@ -381,7 +383,7 @@ function AgentReportsView() {
                         {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
                       </div>
                       <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">
-                        {fmtMoneyFull(appointmentValue(scale(m.appointments), apptCost))}
+                        {fmtMoneyFull(valueForAgent(a.id, scale(m.appointments)))}
                       </p>
                       <p className="mt-2 text-[12px] text-[#6b7280]">
                         {canDrill ? (
@@ -396,18 +398,12 @@ function AgentReportsView() {
                           <b className="text-[#111]">{fmtInt(scale(m.appointments))} appointments</b>
                         )}{" "}
                         ×{" "}
-                        <b className="text-[#111]">{fmtMoneyFull(apptCost)}</b> per appointment{" "}
-                        <button
-                          onClick={() => { setCostModalOpen(true); track("cost_per_appt_edit_opened", { team_id: teamId }); }}
-                          className="ml-1 font-semibold text-[#059669] underline decoration-dotted underline-offset-2 hover:decoration-solid"
-                        >
-                          Edit
-                        </button>
+                        <b className="text-[#111]">{fmtMoneyFull(apptValueForId(a.id))}</b> per appointment
                       </p>
                     </div>
                     <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Your cost / appointment</p>
-                      <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{fmtMoneyFull(apptCost)}</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Value / appointment</p>
+                      <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{fmtMoneyFull(apptValueForId(a.id))}</p>
                     </div>
                   </div>
                 ) : (
@@ -805,7 +801,6 @@ function AgentReportsView() {
           )}
         </main>
       </div>
-      {costModalOpen && <CostModal initial={apptCost} onSave={saveApptCost} />}
       <MeetingsModal
         open={apptModal !== null}
         onClose={() => setApptModal(null)}
@@ -813,65 +808,6 @@ function AgentReportsView() {
         sub={apptModal?.sub}
         fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", agentType: apptModal?.agentType, scope: "window", ...meetingWindow, spyneToken }}
       />
-    </div>
-  );
-}
-
-/* ── cost-per-appointment — asked once, then editable via the value-created band ── */
-function CostModal({ initial, onSave }: { initial: number; onSave: (v: number) => void }) {
-  const [v, setV] = useState(initial);
-  const presets = [100, 150, 200, 300];
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={() => onSave(v)} aria-hidden />
-      <div className="relative w-full max-w-[440px] rounded-3xl border border-[#ece6fb] bg-white p-7 shadow-[0_24px_70px_rgba(16,24,40,0.3)]">
-        <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-[#813fed]">One quick setup</p>
-        <h3 className="mt-1.5 text-[21px] font-extrabold tracking-[-0.02em] text-[#111]">What&apos;s your cost per appointment?</h3>
-        <p className="mt-2 text-[12.5px] leading-snug text-[#6b7280]">
-          We use this to turn every booked appointment into a dollar value across your reports. Use your average gross per
-          showroom or service appointment — you can change it anytime.
-        </p>
-
-        <div className="mt-6 flex items-end justify-between">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Cost / appointment</span>
-          <span className="text-[40px] font-extrabold tabular-nums leading-none text-[#059669]">${v.toLocaleString()}</span>
-        </div>
-        <input
-          type="range"
-          min={50}
-          max={600}
-          step={25}
-          value={v}
-          onChange={(e) => setV(Number(e.target.value))}
-          className="mt-3 w-full accent-[#059669]"
-          aria-label="Cost per appointment"
-        />
-        <div className="flex justify-between text-[10px] text-[#9ca3af]">
-          <span>$50</span>
-          <span>$600</span>
-        </div>
-
-        <div className="mt-4 flex flex-wrap gap-2">
-          {presets.map((p) => (
-            <button
-              key={p}
-              onClick={() => setV(p)}
-              className={`rounded-full border px-3 py-1.5 text-[12px] font-semibold transition-colors ${
-                v === p ? "border-[#059669] bg-[#f0fdf6] text-[#059669]" : "border-[#e5e7eb] text-[#6b7280] hover:border-[#cdeede]"
-              }`}
-            >
-              ${p}
-            </button>
-          ))}
-        </div>
-
-        <button
-          onClick={() => onSave(v)}
-          className="mt-6 w-full rounded-xl bg-[#813fed] py-2.5 text-[13.5px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
-        >
-          Save &amp; see my value
-        </button>
-      </div>
     </div>
   );
 }

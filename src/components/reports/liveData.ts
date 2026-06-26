@@ -3,7 +3,7 @@
  * AgentData[] the reporting UI already consumes. Replaces the old ~84 Metabase card round-trips.
  * Used by /reports (Overview) and /reports/agents (By agent) — no component/JSX changes. */
 
-import { type AgentData, type Bucket, type Meeting, type MeetingsResult } from "./data";
+import { type AgentData, type Bucket, type Meeting, type MeetingsResult, type RAG } from "./data";
 import { type Account } from "./accounts";
 
 // Maps the CSM sheet's agent-type labels to this report's agent ids.
@@ -82,10 +82,70 @@ export function addDay(iso: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-const pctDelta = (curr: number, prev: number): number => (prev ? Math.round(((curr - prev) / prev) * 100) : 0);
+// Period-over-period % change. Returns null (not 0) when there's NO prior basis (prev === 0) so the UI
+// can distinguish "new / no prior data" from a genuine 0% change — rendering "▲ 0%" for real growth
+// from an empty prior window is misleading.
+const pctDelta = (curr: number, prev: number): number | null => (prev ? Math.round(((curr - prev) / prev) * 100) : null);
 
-/* "Value created" = appointments × cost-per-appointment. Single source of truth so the Overview (fleet)
- * and per-agent pages compute it identically. apptCost is UI state (localStorage), passed in. */
+/* ── Per-appointment dollar value (whiteboard spec) ──────────────────────────
+ * The dollar value a booked appointment is worth, by agent slot. SINGLE SOURCE OF TRUTH —
+ * the same per-category rates as the Programs dashboard in vini-daily-calls
+ * (src/agents/AgentsDashboard.tsx COST_PER_APPT). Hardcoded by design (leadership spec),
+ * not a user-set cost, so every surface values an appointment identically. */
+export const APPT_VALUE_BY_AGENT: Record<AgentData["id"], number> = {
+  sales_ib: 200,
+  sales_ob: 250,
+  service_ib: 100,
+  service_ob: 200,
+};
+
+// Department-average per-appointment value — the fallback when an agent id isn't one of the four
+// known slots, so an unmapped id values its appointments at a sensible dept rate instead of $0
+// (which silently zeroed real bookings in "Value created"). Sales avg $225, Service avg $150.
+export const DEPT_AVG_APPT_VALUE = { sales: 225, service: 150 } as const;
+
+// Per-appointment value for an agent id: the exact slot rate when known, else the department average
+// inferred from the id ("service" → Service avg, else Sales avg). Warns once per unmapped id (dev only)
+// so the gap is visible rather than silent.
+const warnedUnmappedIds = new Set<string>();
+function warnUnmappedId(id: string): void {
+  if (process.env.NODE_ENV === "production" || warnedUnmappedIds.has(id)) return;
+  warnedUnmappedIds.add(id);
+  console.warn(`[liveData] unmapped agent id "${id}" — valuing appointments at the department average`);
+}
+export const apptValueForId = (id: string): number => {
+  const known = APPT_VALUE_BY_AGENT[id as AgentData["id"]];
+  if (known != null) return known;
+  warnUnmappedId(id);
+  return /service/i.test(id) ? DEPT_AVG_APPT_VALUE.service : DEPT_AVG_APPT_VALUE.sales;
+};
+
+// Value created by ONE agent slot = its appointments × that slot's per-appointment value (falling back
+// to the department average for an unmapped id rather than $0).
+export const valueForAgent = (id: AgentData["id"], appointments: number): number =>
+  appointments * apptValueForId(id);
+
+// Fleet value = Σ per-agent (each agent's appointments × its own rate). Use this — NOT a single
+// flat rate — so a rooftop's mix of Sales/Service × IB/OB is valued correctly.
+export const fleetValue = (agents: AgentData[]): number =>
+  agents.reduce((s, a) => s + valueForAgent(a.id, a.metrics.appointments), 0);
+
+// Appointment-weighted blended $/appt across a set of agents — for copy and pooled figures
+// (e.g. money-on-table) where the per-lead agent slot isn't known. Falls back to 0 when no appts.
+export const blendedApptValue = (agents: AgentData[]): number => {
+  const appts = agents.reduce((s, a) => s + a.metrics.appointments, 0);
+  return appts > 0 ? Math.round(fleetValue(agents) / appts) : 0;
+};
+
+/* ROI factor → RAG (whiteboard spec, same thresholds as the Programs dashboard):
+ *   ≥ 3 → Green · ≥ 1.5 → Amber · else Red. The factor itself (value ÷ run-cost or MRR) needs a
+ *   cost/MRR source that reporting-vini doesn't carry yet — this helper is the shared classifier. */
+export const ROI_GREEN = 3;
+export const ROI_AMBER = 1.5;
+export const roiRAG = (factor: number): RAG => (factor >= ROI_GREEN ? "green" : factor >= ROI_AMBER ? "amber" : "red");
+
+/* @deprecated flat-rate value — superseded by valueForAgent/fleetValue (per-category whiteboard rates).
+ * Kept only so any out-of-tree caller keeps compiling; in-tree code uses the per-agent helpers. */
 export const appointmentValue = (appointments: number, apptCost: number): number => appointments * apptCost;
 
 export interface LiveOpts {
@@ -136,8 +196,12 @@ export interface FleetLive {
   optOuts: number;
   csat: number;
   sentiment: number;
-  connectRate: number;
-  deltas: { appointments: number; calls: number; conversations: number; qualified: number; sms: number };
+  connectRate: number; // blended connected-calls / calls across IB+OB — kept for back-compat
+  // Inbound-only answer rate (answered inbound calls / inbound calls). The honest figure for a
+  // "Connect / answer" cell, which is an inbound concept; null when the fleet has no inbound calls.
+  answerRateInbound: number | null;
+  // null === no prior-window basis ("new"); a number is a real % change (incl. 0).
+  deltas: { appointments: number | null; calls: number | null; conversations: number | null; qualified: number | null; sms: number | null };
   funnel: { label: string; value: number }[];
 }
 
@@ -145,6 +209,11 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const sum = (f: (a: AgentData) => number) => agents.reduce((s, a) => s + f(a), 0);
   const calls = sum((a) => a.metrics.calls);
   const connectedCalls = sum((a) => a.metrics.conversations); // connected CALLS — the answer-rate basis
+  // Inbound-only slice for an honest answer rate (answer rate is an inbound concept; folding outbound
+  // dial connect-rate into the same number makes it meaningless).
+  const isInbound = (a: AgentData) => a.dir === "Inbound";
+  const inboundCalls = agents.filter(isInbound).reduce((s, a) => s + a.metrics.calls, 0);
+  const inboundAnswered = agents.filter(isInbound).reduce((s, a) => s + a.metrics.conversations, 0);
   const smsSent = sum((a) => a.metrics.smsSent);
   const afterHours = sum((a) => a.metrics.afterHours);
   const talkMinutes = sum((a) => a.metrics.talkMinutes);
@@ -191,6 +260,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     csat: +wAvg((a) => a.quality.csat).toFixed(1),
     sentiment: Math.round(wAvg((a) => a.quality.sentiment)),
     connectRate: calls ? Math.round((connectedCalls / calls) * 100) : 0,
+    answerRateInbound: inboundCalls ? Math.round((inboundAnswered / inboundCalls) * 100) : null,
     deltas: {
       appointments: pctDelta(appointments, pSum((b) => b.appointments)),
       calls: pctDelta(calls, pSum((b) => b.calls)),
@@ -279,10 +349,13 @@ export interface ReportMetrics {
   highlights: Array<{ direction: string | null; use_case: string | null; score: number | null; title: string | null; occurred_on: string | null }>;
 }
 
-export async function fetchReportMetrics(teamId: string): Promise<ReportMetrics | null> {
+export async function fetchReportMetrics(teamId: string, spyneToken?: string): Promise<ReportMetrics | null> {
   if (!teamId) return null;
   try {
-    const r = await fetch(`/api/reports/metrics?team_id=${encodeURIComponent(teamId)}`, { cache: "no-store" });
+    // Forward the host's Spyne token (prod) so the now-authenticated GET /api/reports/metrics authorizes,
+    // same as fetchAgents/fetchMeetings. Omitted locally → the server falls back to its env token.
+    const headers = spyneToken ? { Authorization: `Bearer ${spyneToken}` } : undefined;
+    const r = await fetch(`/api/reports/metrics?team_id=${encodeURIComponent(teamId)}`, { cache: "no-store", headers });
     if (!r.ok) return null;
     const j = (await r.json()) as Partial<ReportMetrics> | null;
     if (!j) return null;

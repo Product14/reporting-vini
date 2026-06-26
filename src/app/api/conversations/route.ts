@@ -10,6 +10,7 @@
  * Degrades to an empty list — never 502s the pipeline.
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
+import { requireTeamAuth } from "@/lib/reports/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,10 +19,26 @@ const SERVICE = new Set(["sales", "service", "both"]);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?Z?)?$/;
 const idOk = (s: string) => /^[A-Za-z0-9_-]{1,64}$/.test(s);
 
+// Explicit dept label from the agent-type/service-type string. Prefix-based and exhaustive: only a value
+// that actually starts with "service"/"sales" maps to that dept — blank/receptionist/sms → "other"
+// (the old `/service/.test ? service : sales` mislabeled all of those as sales).
+function deptOf(s: string): "sales" | "service" | "other" {
+  const v = (s || "").trim().toLowerCase();
+  if (v.startsWith("service")) return "service";
+  if (v.startsWith("sales")) return "sales";
+  return "other";
+}
+
 export async function GET(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
   const teamId = searchParams.get("team_id") || "";
   if (!idOk(teamId)) return Response.json({ error: "valid team_id is required" }, { status: 400 });
+
+  // PII endpoint (customer names / phones / call summaries) — auth is REQUIRED. A valid Spyne session
+  // token scoped to this team, or the service CRON_SECRET. No credential → 401; wrong team scope → 403.
+  const auth = requireTeamAuth(request, teamId);
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
+
   if (!hasClickhouseCreds()) return Response.json({ conversations: [], total: 0, note: "clickhouse not configured" });
 
   const svc = (searchParams.get("serviceType") || "both").toLowerCase();
@@ -36,7 +53,9 @@ export async function GET(request: Request): Promise<Response> {
     "e.isActive=1", "e.__deleted=0", "e.isTestCall=0",
   ];
   where.push(since && ISO_RE.test(since) ? `e.createdAt >= parseDateTimeBestEffort('${chEsc(since)}')` : `e.createdAt >= now() - INTERVAL ${minutes} MINUTE`);
-  if (service !== "both") where.push(`lower(e.callDetails_agentInfo_agentType)='${service}'`);
+  // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. (an exact '=' dropped those
+  // valid rows). `service`/`both` are validated against the SERVICE allow-list above, so the literal is safe.
+  if (service !== "both") where.push(`lower(e.callDetails_agentInfo_agentType) LIKE '${service}%'`);
   // "actionable" = the call produced an action item, scheduled an appointment, or left a query unresolved.
   if (actionableOnly) where.push("(ifNull(e.report_actionItems,'') NOT IN ('','[]','{}') OR lower(ifNull(e.report_overview_appointmentScheduled,''))='true' OR lower(ifNull(e.report_queryResolved,''))='false')");
 
@@ -67,7 +86,7 @@ export async function GET(request: Request): Promise<Response> {
     leadId: r.leadId || null,
     phone: r.phone || null,
     customer: r.customer || null,
-    dept: /service/i.test(r.agentType || "") ? "service" : "sales",
+    dept: deptOf(r.agentType || ""),
     direction: r.direction === "outbound" ? "outbound" : "inbound",
     title: r.title || "",
     summary: r.summary || "",
