@@ -231,7 +231,7 @@ function AgentReportsView() {
     const columns = [
       [{ id: "total", label: inbound ? "Leads attempted" : "Leads dialed", color: "#813fed" }],
       [
-        { id: "connected", label: "Connected", color: "#6366f1" },
+        { id: "connected", label: "Conversations", color: "#6366f1" },
         { id: "missed", label: "No conversation", color: "#dc2626" },
       ],
       [
@@ -523,9 +523,9 @@ function AgentReportsView() {
                 {[
                   { label: "During hours", value: Math.max(0, m.calls - m.afterHours) },
                   { label: "After hours", value: m.afterHours },
-                  // Connected/Qualified are UNIQUE LEADS (same basis as the funnel + Sankey) so each label
+                  // Conversations/Qualified are UNIQUE LEADS (same basis as the funnel + Sankey) so each label
                   // reads one consistent number across the page; the other tiles stay call-activity counts.
-                  { label: "Connected", value: a.leadFunnel?.connected ?? m.conversations },
+                  { label: "Conversations", value: a.leadFunnel?.connected ?? m.conversations },
                   { label: "Qualified", value: a.leadFunnel?.qualified ?? m.qualified },
                   // Transferred / Callbacks are an inbound concept — outbound agents (Sales/Service OB) don't show them.
                   ...(inbound
@@ -593,7 +593,7 @@ function AgentReportsView() {
                       {r.leadsBySource.map((s) => (
                         <tr key={s.source} className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] transition-colors">
                           <Td align="left"><span className="text-[12.5px] font-semibold text-[#111]">{s.source}</span></Td>
-                          <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{fmtInt(scale(s.interacted))}</span></Td>
+                          <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{fmtInt(scale(s.engaged))}</span></Td>
                           <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#111]">{fmtInt(scale(s.total))}</span></Td>
                           <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#10b981]">{fmtInt(scale(s.appts))}</span></Td>
                         </tr>
