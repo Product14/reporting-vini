@@ -126,6 +126,7 @@ export const DATE_PRESETS: { id: Bucket; label: string }[] = [
   { id: "last7", label: "7d" },
   { id: "last14", label: "14d" },
   { id: "last30", label: "30d" },
+  { id: "mtd", label: "MTD" },
   { id: "lifetime", label: "All" },
 ];
 export function DateFilter({

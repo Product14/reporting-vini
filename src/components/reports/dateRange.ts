@@ -12,7 +12,7 @@ import { useCallback, useMemo } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Bucket } from "./data";
 
-const BUCKETS: Bucket[] = ["today", "yesterday", "last7", "last14", "last30", "lifetime"];
+const BUCKETS: Bucket[] = ["today", "yesterday", "last7", "last14", "last30", "mtd", "lifetime"];
 
 export interface DateRangeState {
   bucket: Bucket;

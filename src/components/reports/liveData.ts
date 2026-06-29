@@ -71,6 +71,8 @@ export function rangeFor(bucket: Bucket, timeZone?: string): { start: string; en
     case "last7": return { start: shiftDays(today, -6), end };
     case "last14": return { start: shiftDays(today, -13), end };
     case "last30": return { start: shiftDays(today, -29), end };
+    // Month-to-date: 1st of the current (store-local) month → today inclusive.
+    case "mtd": return { start: `${today.slice(0, 7)}-01`, end };
     case "lifetime": return { start: "2020-01-01", end };
     default: return { start: shiftDays(today, -29), end };
   }
