@@ -77,6 +77,11 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   const groups = new Map<string, Acc>();
   const breaks = new Map<string, BAcc>();
   const leadMap = new Map<string, LeadDayRow>(); // key: day|team|type|lead — one row per lead per day
+  // "Leads by source" is a LEAD funnel, not an event count: per (day, team, type, source) we keep the
+  // DISTINCT leads touched, the subset that engaged two-way, and the subset that booked. Summing these
+  // per-day sets over a window gives lead-days (≈ distinct leads for short windows) — vastly closer to
+  // truth than summing conversation events, which over-counts every lead by its number of touches.
+  const srcMap = new Map<string, { activity_day: string; team_id: string; agent_type: string; source: string; leads: Set<string>; engaged: Set<string>; appt: Set<string> }>();
 
   const bump = (g: { activity_day: string; team_id: string; agent_type: string }, dim: BreakdownDim, val: string, count: number, qualified: number, appts: number) => {
     if (!val) return;
@@ -135,8 +140,16 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
 
     const intent = str(r.primary_intent);
     if (intent) bump(a, "intent", intent, 1, num(r.query_resolved), num(r.appointment_booked));
+    // source breakdown is lead-distinct (see srcMap above), so it needs the lead id — not an event bump.
     const source = str(r.lead_source);
-    if (source) bump(a, "source", source, 1, num(r.qualified), num(r.appointment_booked));
+    if (source && lead) {
+      const sk = `${day}|${team}|${type}|${source}`;
+      let s = srcMap.get(sk);
+      if (!s) { s = { activity_day: day, team_id: team, agent_type: type, source, leads: new Set(), engaged: new Set(), appt: new Set() }; srcMap.set(sk, s); }
+      s.leads.add(lead);
+      if (num(r.talk_seconds) > 0 || num(r.sms_replied) > 0) s.engaged.add(lead); // two-way conversation
+      if (num(r.appointment_booked) > 0) s.appt.add(lead);
+    }
     const h = hourOf(str(r.activity_ts), opts.tzOf?.(team));
     if (h != null) bump(a, "hour", String(h), isCall || 1, 0, 0);
     if (isSms) {
@@ -156,6 +169,13 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.stl_seconds_sum = Math.round(a.stl_seconds_sum);
     const { _leads, _apptLeads, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
     daily.push(row);
+  }
+  // Materialize the lead-distinct source breakdown into the same tall table the other dims use.
+  // For dim='source': count = distinct leads touched, qualified = distinct two-way-engaged leads,
+  // appts = distinct leads that booked (all per day; build.ts maps these onto Interacted/Total/Booked).
+  for (const s of srcMap.values()) {
+    const k = bkey(key(s.activity_day, s.team_id, s.agent_type), "source", s.source);
+    breaks.set(k, { activity_day: s.activity_day, team_id: s.team_id, agent_type: s.agent_type, dim: "source", dim_value: s.source, count: s.leads.size, qualified: s.engaged.size, appts: s.appt.size });
   }
   return { daily, breakdown: Array.from(breaks.values()), leadDays: Array.from(leadMap.values()) };
 }

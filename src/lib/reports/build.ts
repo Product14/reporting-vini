@@ -290,8 +290,10 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
 
     // ── inbound-only: leads by source + speed to lead. Always assigned from live data (or cleared) —
     //    never left as the cloned mock when there's nothing live to show. ──
+    // source breakdown is lead-distinct (aggregate.ts): count = leads touched, qualified = leads that
+    // engaged two-way, appts = leads that booked. Map onto the card: Total leads / Interacted / Booked.
     a.report.leadsBySource = inbound && sources.length
-      ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.count, engaged: r.count, total: r.count, handoffs: 0, appts: r.appts }))
+      ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.qualified, engaged: r.qualified, total: r.count, handoffs: 0, appts: r.appts }))
       : undefined;
     // Speed-to-lead is a SALES INBOUND concept only — service inbound has no new-CRM-lead funnel,
     // so it never shows the card (base.id gate, not just `inbound`).
