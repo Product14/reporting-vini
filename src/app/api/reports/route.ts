@@ -59,6 +59,33 @@ async function leadCountsBoth(sb: any, teamId: string, start: string, end: strin
   }
 }
 
+// Window-distinct "Leads by source" per agent_type (report_source_counts → COUNT(DISTINCT lead_id) per
+// source). Keyed by agent_type label; each entry is the source rows, biggest-first. {} on error/absence
+// → buildResult falls back to the per-day breakdown rollup (lead-days, the inflated behavior).
+export type SourceCounts = Record<string, { source: string; total: number; interacted: number; booked: number }[]>;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function sourceCountsFor(sb: any, teamId: string, start: string, end: string): Promise<SourceCounts | undefined> {
+  try {
+    const { data, error } = await sb.rpc("report_source_counts", { p_team: teamId, p_start: start, p_end: end });
+    if (error || !Array.isArray(data)) return undefined;
+    const out: SourceCounts = {};
+    for (const r of data as Array<Record<string, unknown>>) {
+      const type = String(r.agent_type);
+      (out[type] ??= []).push({
+        source: String(r.lead_source ?? ""),
+        total: Number(r.total_leads) || 0,
+        interacted: Number(r.interacted_leads) || 0,
+        booked: Number(r.booked_leads) || 0,
+      });
+    }
+    for (const type of Object.keys(out)) out[type].sort((a, b) => b.total - a.total);
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
 type Detail = { callbacks: CallbackRow[]; campaigns: CampaignRow[]; outcomes: OutcomeRow[] };
 const EMPTY_DETAIL: Detail = { callbacks: [], campaigns: [], outcomes: [] };
 
@@ -194,9 +221,10 @@ export async function GET(request: Request): Promise<Response> {
 
   // Detail tables (one rpc, fallback to six reads) + both lead-count windows (one rpc) + the
   // lifetime "ever live" probe in parallel.
-  const [detail, lc, everLive] = await Promise.all([
+  const [detail, lc, sourceCounts, everLive] = await Promise.all([
     fetchDetailCombined(sb, teamId).then((d) => d ?? fetchDetailPerTable(sb, teamId)),
     leadCountsBoth(sb, teamId, start, end, prior.start, prior.end),
+    sourceCountsFor(sb, teamId, start, end),
     teamEverLive(sb, teamId),
   ]);
   const { callbacks, campaigns, outcomes } = detail ?? EMPTY_DETAIL;
@@ -215,6 +243,7 @@ export async function GET(request: Request): Promise<Response> {
     onboardedSlots,
     leadCounts: lc.cur,
     priorLeadCounts: lc.prior,
+    sourceCounts,
   });
 
   return Response.json({ ...result, ...meta, everLive: everLiveResolved }, {

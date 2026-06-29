@@ -74,6 +74,10 @@ export interface BuildInput {
   // distincts (which over-counts cross-day leads). undefined → fall back to the daily sum.
   leadCounts?: LeadCounts;
   priorLeadCounts?: LeadCounts;
+  // Window-distinct "Leads by source" per agent_type (from report_source_counts → COUNT(DISTINCT
+  // lead_id) per source). When present, REPLACES the per-day breakdown rollup, which sums per-day
+  // distincts and so over-counts any lead touched on multiple days. undefined → fall back to breakdown.
+  sourceCounts?: Record<string, { source: string; total: number; interacted: number; booked: number }[]>;
 }
 
 // Per-agent_type window-distinct lead counts (keyed by agent_type label, e.g. "Sales Outbound").
@@ -107,7 +111,7 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, openFunnel, recoverable, onboardedSlots, leadCounts, priorLeadCounts }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, openFunnel, recoverable, onboardedSlots, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
   // Rooftop-level detail mapped once into the UI shapes. Appointments/callbacks attach to inbound
@@ -290,11 +294,17 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
 
     // ── inbound-only: leads by source + speed to lead. Always assigned from live data (or cleared) —
     //    never left as the cloned mock when there's nothing live to show. ──
-    // source breakdown is lead-distinct (aggregate.ts): count = leads touched, qualified = leads that
-    // engaged two-way, appts = leads that booked. Map onto the card: Total leads / Interacted / Booked.
-    a.report.leadsBySource = inbound && sources.length
-      ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.qualified, engaged: r.qualified, total: r.count, handoffs: 0, appts: r.appts }))
-      : undefined;
+    // "Leads by source": prefer the window-distinct RPC (sourceCounts: COUNT(DISTINCT lead_id) per
+    // source — exact). Fall back to the per-day breakdown rollup (lead-days; over-counts cross-day leads)
+    // only when the RPC is unavailable. Both map onto Total leads / Interacted (two-way) / Booked.
+    const srcRows = sourceCounts?.[type];
+    a.report.leadsBySource = !inbound
+      ? undefined
+      : srcRows && srcRows.length
+        ? srcRows.slice(0, 8).map((s) => ({ source: s.source, interacted: s.interacted, engaged: s.interacted, total: s.total, handoffs: 0, appts: s.booked }))
+        : sources.length
+          ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.qualified, engaged: r.qualified, total: r.count, handoffs: 0, appts: r.appts }))
+          : undefined;
     // Speed-to-lead is a SALES INBOUND concept only — service inbound has no new-CRM-lead funnel,
     // so it never shows the card (base.id gate, not just `inbound`).
     if (base.id === "sales_ib") {

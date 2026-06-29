@@ -122,13 +122,15 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.opt_outs += num(r.opted_out_sms);
 
     const lead = str(r["cs.lead_id"]);
+    const leadSource = str(r.lead_source);
     if (lead) {
       a._leads.add(lead);
       if (num(r.appointment_booked)) a._apptLeads.add(lead);
       // lead-day grain → exact window-distinct counts at read time (vs summing daily distincts)
       const lk = `${day}|${team}|${type}|${lead}`;
       let ld = leadMap.get(lk);
-      if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, dialed: false, connected: false, qualified: false, appointment: false }; leadMap.set(lk, ld); }
+      if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, lead_source: leadSource || null, dialed: false, connected: false, qualified: false, appointment: false }; leadMap.set(lk, ld); }
+      else if (!ld.lead_source && leadSource) ld.lead_source = leadSource; // backfill source if first row lacked it
       if (num(r.is_call) > 0) ld.dialed = true;
       if (num(r.talk_seconds) > 0 || num(r.sms_replied) > 0) ld.connected = true; // two-way conversation
       if (num(r.qualified) > 0) ld.qualified = true;
@@ -141,7 +143,9 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     const intent = str(r.primary_intent);
     if (intent) bump(a, "intent", intent, 1, num(r.query_resolved), num(r.appointment_booked));
     // source breakdown is lead-distinct (see srcMap above), so it needs the lead id — not an event bump.
-    const source = str(r.lead_source);
+    // This per-day breakdown is now only a FALLBACK; the window-distinct truth comes from agent_lead_days
+    // via report_source_counts (build.ts prefers it). Kept so a degraded read still shows something.
+    const source = leadSource;
     if (source && lead) {
       const sk = `${day}|${team}|${type}|${source}`;
       let s = srcMap.get(sk);

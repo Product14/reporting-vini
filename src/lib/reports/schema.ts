@@ -106,6 +106,8 @@ export interface LeadDayRow {
   agent_type: string;
   lead_id: string;
   activity_day: string;
+  lead_source: string | null; // CRM source of the lead — carried here so "Leads by source" can be
+  // window-distinct (COUNT(DISTINCT lead_id) per source) instead of summing per-day breakdown counts.
   dialed: boolean; // had ≥1 call (is_call) that day
   connected: boolean; // had a two-way conversation that day (talk_seconds>0 OR sms_replied>0)
   qualified: boolean; // was qualified that day
