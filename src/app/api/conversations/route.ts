@@ -1,11 +1,12 @@
 /* Per-event CONVERSATION feed for the post-conversation transactional email.
  *
- * Recent AI call conversations for a rooftop, straight from dealer_leads.endcallreports (the only
- * row-level source). The poll pass calls this every few minutes with ?minutes= to get conversations
- * since its last run, then emails one per (gated by rooftop config). SMS-only conversations aren't
- * here yet (calls first) — endcallreports is call reports.
+ * Recent AI conversations for a rooftop. channel=call (default) = per-call rows from
+ * dealer_leads.endcallreports; channel=sms = per-thread SMS rows from dealer_leads.smsMessages
+ * (scoped via dealer_leads.conversations, with the day's message bubbles); channel=both = union.
+ * The poll pass asks for channel=call every few minutes (emailed instantly); the EOD pass asks for
+ * channel=sms with since=local-midnight (emailed once at end of day, since the thread runs all day).
  *
- *   /api/conversations?team_id=&serviceType=sales|service|both[&minutes=15][&since=ISO][&limit=50][&actionableOnly=1]
+ *   /api/conversations?team_id=&serviceType=sales|service|both[&channel=call|sms|both][&minutes=15][&since=ISO][&limit=50][&actionableOnly=1]
  *
  * Degrades to an empty list — never 502s the pipeline.
  */
@@ -49,57 +50,114 @@ export async function GET(request: Request): Promise<Response> {
   const since = searchParams.get("since");
   const limit = Math.max(1, Math.min(200, Number(searchParams.get("limit")) || 50));
   const actionableOnly = searchParams.get("actionableOnly") === "1";
+  // CHANNEL — 'call' (default; endcallreports, the original behaviour) | 'sms' (per-thread SMS from
+  // smsMessages) | 'both'. SMS post-conversation is emailed ONCE at end-of-day (the thread runs all
+  // day), so the poll asks for channel=sms with a since=local-midnight window. SMS has no agent-type,
+  // so it is NOT split by sales/service (returns the team's threads regardless of serviceType).
+  const channel = (searchParams.get("channel") || "call").toLowerCase();
+  const wantCall = channel === "call" || channel === "both";
+  const wantSms = channel === "sms" || channel === "both";
+  const sinceClause = (col: string) =>
+    since && ISO_RE.test(since) ? `${col} >= parseDateTimeBestEffort('${chEsc(since)}')` : `${col} >= now() - INTERVAL ${minutes} MINUTE`;
 
-  const where: string[] = [
-    `e.teamId='${chEsc(teamId)}'`,
-    "e.isActive=1", "e.__deleted=0", "e.isTestCall=0",
-  ];
-  where.push(since && ISO_RE.test(since) ? `e.createdAt >= parseDateTimeBestEffort('${chEsc(since)}')` : `e.createdAt >= now() - INTERVAL ${minutes} MINUTE`);
-  // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. (an exact '=' dropped those
-  // valid rows). `service`/`both` are validated against the SERVICE allow-list above, so the literal is safe.
-  if (service !== "both") where.push(`lower(e.callDetails_agentInfo_agentType) LIKE '${service}%'`);
-  // "actionable" = the call produced an action item, scheduled an appointment, or left a query unresolved.
-  if (actionableOnly) where.push("(ifNull(e.report_actionItems,'') NOT IN ('','[]','{}') OR lower(ifNull(e.report_overview_appointmentScheduled,''))='true' OR lower(ifNull(e.report_queryResolved,''))='false')");
+  type Conv = Record<string, unknown> & { at: string };
+  const out: Conv[] = [];
 
-  // Identity (lead→customer) + AI-quality joins so the per-event email carries the customer name and
-  // call grade — the SAME data the digest reads, sourced once here instead of a second ClickHouse query
-  // in vini-daily-calls (eventPreviewCH). Without these the sent post-conversation email had no customer.
-  const sql =
-    "SELECT e.id AS id, e.leadId AS leadId, e.callId AS callId," +
-    " coalesce(nullIf(c.mobile_number,''), e.callDetails_mobile) AS phone, ifNull(c.name,'') AS customer," +
-    " e.callDetails_agentInfo_agentType AS agentType," +
-    " lower(ifNull(e.report_inOutType,'')) AS direction, ifNull(e.report_title,'') AS title," +
-    " ifNull(e.report_summary, ifNull(e.callDetails_analysis_summary,'')) AS summary," +
-    " lower(ifNull(e.report_overview_appointmentScheduled,'')) AS apptScheduled," +
-    " lower(ifNull(e.report_queryResolved,'')) AS queryResolved," +
-    " ifNull(e.report_actionItems,'') AS actionItems," +
-    " q.score AS aiScore, q.grade AS grade, q.frustrated AS frustrated," +
-    " formatDateTime(e.createdAt,'%Y-%m-%dT%H:%i:%SZ') AS at" +
-    " FROM dealer_leads.endcallreports e" +
-    " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
-    " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
-    " LEFT JOIN (SELECT callId, any(scorePercentage) score, any(overallGrade) grade, any(customerFrustrated) frustrated FROM dealer_leads.conversationQualities WHERE createdAt >= now()-INTERVAL 30 DAY GROUP BY callId) q ON e.callId=q.callId" +
-    " WHERE " + where.join(" AND ") +
-    ` ORDER BY e.createdAt DESC LIMIT ${limit}`;
+  if (wantCall) {
+    const where: string[] = [
+      `e.teamId='${chEsc(teamId)}'`,
+      "e.isActive=1", "e.__deleted=0", "e.isTestCall=0",
+    ];
+    where.push(sinceClause("e.createdAt"));
+    // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. (an exact '=' dropped those
+    // valid rows). `service`/`both` are validated against the SERVICE allow-list above, so the literal is safe.
+    if (service !== "both") where.push(`lower(e.callDetails_agentInfo_agentType) LIKE '${service}%'`);
+    // "actionable" = the call produced an action item, scheduled an appointment, or left a query unresolved.
+    if (actionableOnly) where.push("(ifNull(e.report_actionItems,'') NOT IN ('','[]','{}') OR lower(ifNull(e.report_overview_appointmentScheduled,''))='true' OR lower(ifNull(e.report_queryResolved,''))='false')");
 
-  const rows = await runClickhouse<Record<string, string>>(sql);
-  const conversations = rows.map((r) => ({
-    id: r.id,
-    leadId: r.leadId || null,
-    phone: r.phone || null,
-    customer: r.customer || null,
-    dept: deptOf(r.agentType || ""),
-    direction: r.direction === "outbound" ? "outbound" : "inbound",
-    title: r.title || "",
-    summary: r.summary || "",
-    appointmentScheduled: r.apptScheduled === "true",
-    queryResolved: r.queryResolved === "true",
-    hasActionItem: !!(r.actionItems && !["", "[]", "{}"].includes(r.actionItems)),
-    aiScore: r.aiScore != null && r.aiScore !== "" ? Number(r.aiScore) : null,
-    grade: r.grade || null,
-    frustrated: Number(r.frustrated) === 1,
-    at: r.at || "",
-  }));
+    // Identity (lead→customer) + AI-quality joins so the per-event email carries the customer name and
+    // call grade — the SAME data the digest reads, sourced once here instead of a second ClickHouse query
+    // in vini-daily-calls (eventPreviewCH). Without these the sent post-conversation email had no customer.
+    const sql =
+      "SELECT e.id AS id, e.leadId AS leadId, e.callId AS callId," +
+      " coalesce(nullIf(c.mobile_number,''), e.callDetails_mobile) AS phone, ifNull(c.name,'') AS customer," +
+      " e.callDetails_agentInfo_agentType AS agentType," +
+      " lower(ifNull(e.report_inOutType,'')) AS direction, ifNull(e.report_title,'') AS title," +
+      " ifNull(e.report_summary, ifNull(e.callDetails_analysis_summary,'')) AS summary," +
+      " lower(ifNull(e.report_overview_appointmentScheduled,'')) AS apptScheduled," +
+      " lower(ifNull(e.report_queryResolved,'')) AS queryResolved," +
+      " ifNull(e.report_actionItems,'') AS actionItems," +
+      " q.score AS aiScore, q.grade AS grade, q.frustrated AS frustrated," +
+      " formatDateTime(e.createdAt,'%Y-%m-%dT%H:%i:%SZ') AS at" +
+      " FROM dealer_leads.endcallreports e" +
+      " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
+      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+      " LEFT JOIN (SELECT callId, any(scorePercentage) score, any(overallGrade) grade, any(customerFrustrated) frustrated FROM dealer_leads.conversationQualities WHERE createdAt >= now()-INTERVAL 30 DAY GROUP BY callId) q ON e.callId=q.callId" +
+      " WHERE " + where.join(" AND ") +
+      ` ORDER BY e.createdAt DESC LIMIT ${limit}`;
+    const rows = await runClickhouse<Record<string, string>>(sql);
+    for (const r of rows) out.push({
+      id: r.id, leadId: r.leadId || null, callId: r.callId || null,
+      phone: r.phone || null, customer: r.customer || null,
+      channel: "call", dept: deptOf(r.agentType || ""),
+      direction: r.direction === "outbound" ? "outbound" : "inbound",
+      title: r.title || "", summary: r.summary || "",
+      appointmentScheduled: r.apptScheduled === "true",
+      queryResolved: r.queryResolved === "true",
+      hasActionItem: !!(r.actionItems && !["", "[]", "{}"].includes(r.actionItems)),
+      aiScore: r.aiScore != null && r.aiScore !== "" ? Number(r.aiScore) : null,
+      grade: r.grade || null,
+      frustrated: Number(r.frustrated) === 1,
+      at: r.at || "",
+    });
+  }
+
+  if (wantSms) {
+    // One row per SMS thread (conversationId) with the message bubbles. smsMessages has no teamId,
+    // so we scope through dealer_leads.conversations (conversationId → teamId/leadId), then lead→customer
+    // for the name/phone. authorType 'human' = the customer's reply, 'ai' = the agent.
+    const smsSql =
+      "SELECT t.id AS id, t.leadId AS leadId, ifNull(c.name,'') AS customer," +
+      " coalesce(nullIf(c.mobile_number,''), t.phone) AS phone, t.inboundMsgs AS inboundMsgs, t.msgs AS msgs, t.at AS at," +
+      " t.atypes AS atypes, t.bodies AS bodies, t.statuses AS statuses, t.ats AS ats FROM (" +
+      "SELECT s.conversationId AS id, any(cv.leadId) AS leadId, any(s.fromNumberE164) AS phone," +
+      " countIf(lower(ifNull(s.authorType,''))='human') AS inboundMsgs, count() AS msgs," +
+      " formatDateTime(max(s.createdAt),'%Y-%m-%dT%H:%i:%SZ') AS at," +
+      " groupArray(lower(ifNull(s.authorType,''))) AS atypes, groupArray(substring(ifNull(s.body,''),1,240)) AS bodies," +
+      " groupArray(lower(ifNull(s.status,''))) AS statuses, groupArray(formatDateTime(s.createdAt,'%Y-%m-%dT%H:%i:%SZ')) AS ats" +
+      " FROM dealer_leads.smsMessages s" +
+      " INNER JOIN (SELECT conversationId, any(teamId) teamId, any(leadId) leadId FROM dealer_leads.conversations GROUP BY conversationId) cv ON s.conversationId=cv.conversationId" +
+      ` WHERE cv.teamId='${chEsc(teamId)}' AND s.__deleted=0 AND ${sinceClause("s.createdAt")}` +
+      ` GROUP BY s.conversationId ORDER BY at DESC LIMIT ${limit}` +
+      ") t" +
+      " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON t.leadId=l.lead_id" +
+      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+    const rows = await runClickhouse<Record<string, unknown>>(smsSql);
+    for (const r of rows) {
+      const atypes = (Array.isArray(r.atypes) ? r.atypes : []) as string[];
+      const bodies = (Array.isArray(r.bodies) ? r.bodies : []) as string[];
+      const statuses = (Array.isArray(r.statuses) ? r.statuses : []) as string[];
+      const ats = (Array.isArray(r.ats) ? r.ats : []) as string[];
+      const bubbles = atypes.map((authorType, i) => ({
+        authorType, body: bodies[i] || "", status: statuses[i] || "", at: ats[i] || "",
+        direction: (statuses[i] || "") === "received" ? "inbound" : "outbound",
+      })).sort((a, b) => (a.at || "").localeCompare(b.at || "")).slice(-12);
+      const inbound = Number(r.inboundMsgs) || 0;
+      out.push({
+        id: String(r.id || ""), leadId: (r.leadId as string) || null,
+        phone: (r.phone as string) || null, customer: (r.customer as string) || null,
+        channel: "sms", dept: "other",
+        direction: inbound > 0 ? "inbound" : "outbound",
+        title: "", summary: "",
+        appointmentScheduled: false, queryResolved: false, hasActionItem: false,
+        hasReply: inbound > 0, msgs: Number(r.msgs) || 0,
+        sms: bubbles, smsFailed: bubbles.filter((b) => ["failed", "undelivered", "error"].includes(b.status)).length,
+        at: (r.at as string) || "",
+      });
+    }
+  }
+
+  const conversations = out.sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, limit);
   return Response.json({ conversations, total: conversations.length }, {
     headers: { "Cache-Control": "s-maxage=30, stale-while-revalidate=60" },
   });
