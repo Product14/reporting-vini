@@ -42,30 +42,54 @@ function release(): void {
   else active--;
 }
 
+const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
 /** Run a read-only ClickHouse query and parse JSONEachRow into rows. Throws on a non-2xx response or
- *  transport error (the caller decides whether to abort the sync). Concurrency-capped. */
+ *  transport error (the caller decides whether to abort the sync). Concurrency-capped.
+ *
+ *  Transport errors ("fetch failed" — a stale keep-alive socket, a dropped connection, a transient
+ *  network blip) and 5xx responses are retried with backoff (CH_QUERY_RETRIES, default 4). A long ETL
+ *  run over many chunks would otherwise abort on a single flaky request; reads are idempotent so retry
+ *  is always safe. A non-2xx 4xx (bad SQL / auth) is NOT retried — it won't get better. */
 export async function queryRows<T = Record<string, unknown>>(sql: string): Promise<T[]> {
   if (!hasClickhouseCreds()) {
     throw new Error("ClickHouse is not configured (CLICKHOUSE_HOST / CLICKHOUSE_PASSWORD).");
   }
+  const host = process.env.CLICKHOUSE_HOST;
+  const port = process.env.CLICKHOUSE_PORT || "8443";
+  const user = process.env.CLICKHOUSE_USER || "default";
+  const pass = process.env.CLICKHOUSE_PASSWORD || "";
+  const auth = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
+  const maxRetries = Number(process.env.CH_QUERY_RETRIES) || 4;
+
   await acquire();
   try {
-    const host = process.env.CLICKHOUSE_HOST;
-    const port = process.env.CLICKHOUSE_PORT || "8443";
-    const user = process.env.CLICKHOUSE_USER || "default";
-    const pass = process.env.CLICKHOUSE_PASSWORD || "";
-    const auth = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
-    const r = await fetch(`https://${host}:${port}/`, {
-      method: "POST",
-      headers: { Authorization: auth, "Content-Type": "text/plain" },
-      body: sql + "\nFORMAT JSONEachRow",
-      cache: "no-store",
-      // @ts-expect-error — undici-specific dispatcher option, valid at runtime under Node.
-      dispatcher: longPull,
-    });
-    const text = await r.text();
-    if (!r.ok) throw new Error(`ClickHouse ${r.status}: ${text.slice(0, 300)}`);
-    return text.trim() ? text.trim().split("\n").map((l) => JSON.parse(l) as T) : [];
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const r = await fetch(`https://${host}:${port}/`, {
+          method: "POST",
+          headers: { Authorization: auth, "Content-Type": "text/plain" },
+          body: sql + "\nFORMAT JSONEachRow",
+          cache: "no-store",
+          // @ts-expect-error — undici-specific dispatcher option, valid at runtime under Node.
+          dispatcher: longPull,
+        });
+        const text = await r.text();
+        if (!r.ok) {
+          // 5xx is transient (overload / restart) → retry; 4xx is a real error → fail fast.
+          if (r.status >= 500 && attempt < maxRetries) { lastErr = new Error(`ClickHouse ${r.status}`); await sleep(1000 * (attempt + 1)); continue; }
+          throw new Error(`ClickHouse ${r.status}: ${text.slice(0, 300)}`);
+        }
+        return text.trim() ? text.trim().split("\n").map((l) => JSON.parse(l) as T) : [];
+      } catch (e) {
+        // Transport-level failure (fetch failed / socket hang up). Retry with backoff; rethrow when spent.
+        lastErr = e;
+        if (attempt >= maxRetries) break;
+        await sleep(1000 * (attempt + 1));
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   } finally {
     release();
   }

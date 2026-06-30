@@ -68,12 +68,29 @@ const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 // so an overlapping/concurrent run (or a retry) can never throw a duplicate-key — it updates in place.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function insertAll(sb: any, table: string, rows: object[], onConflict?: string) {
+  const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+  const maxRetries = Number(process.env.SB_WRITE_RETRIES) || 4;
   for (let i = 0; i < rows.length; i += 500) {
     const slice = rows.slice(i, i + 500);
-    const { error } = onConflict
-      ? await sb.from(table).upsert(slice, { onConflict })
-      : await sb.from(table).insert(slice);
-    if (error) throw new Error(`${table} ${onConflict ? "upsert" : "insert"} @${i}: ${error.message}`);
+    // Retry transient transport failures ("fetch failed" — stale socket / network blip); without it a
+    // long backfill aborts on one flaky request. Upserts are idempotent (PK conflict target). Plain
+    // inserts (the small detail tables) are skipped on historical runs and otherwise fully delete+replace
+    // each run, so a rare retry-after-lost-ACK dup is wiped on the next sync — acceptable.
+    let lastMsg = "";
+    let ok = false;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const { error } = onConflict
+          ? await sb.from(table).upsert(slice, { onConflict })
+          : await sb.from(table).insert(slice);
+        if (!error) { ok = true; break; }
+        lastMsg = error.message;
+      } catch (e) {
+        lastMsg = (e as Error).message;
+      }
+      if (attempt < maxRetries) await sleep(1000 * (attempt + 1));
+    }
+    if (!ok) throw new Error(`${table} ${onConflict ? "upsert" : "insert"} @${i}: ${lastMsg}`);
   }
 }
 
