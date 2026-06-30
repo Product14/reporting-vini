@@ -638,7 +638,7 @@ function AgentReportsView() {
           {/* ── Upcoming appointments + priority follow-ups (rooftop-wide → shown on every agent) ── */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card title="Upcoming appointments" sub="Every booking the agent set, with customer and vehicle" pad={false}>
-                <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} />
+                <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} service={a.dept === "Service" ? "service" : "sales"} />
               </Card>
               <Card title="Priority follow-ups" sub="Callbacks the agent flagged" pad={false}>
                 {r.followUps?.length ? (
@@ -1121,9 +1121,10 @@ function QCell({ label, value, status }: { label: string; value: string; status?
 }
 
 /* ── Upcoming appointments (live ← Spyne leads/dealer/v3/meetings) ──
- * Rooftop-wide (sales + service), from now forward. Self-fetches so the card stays live regardless of
- * the Q12227 aggregate; degrades to the empty state on no-data / error. */
-function UpcomingAppointments({ teamId, enterpriseId, spyneToken }: { teamId: string; enterpriseId: string; spyneToken: string }) {
+ * Scoped to the agent's DEPARTMENT (sales meetings on Sales agents, service on Service) so a service
+ * rooftop's bookings don't leak onto the Sales cards. From now forward. Self-fetches so the card stays
+ * live regardless of the Q12227 aggregate; degrades to the empty state on no-data / error. */
+function UpcomingAppointments({ teamId, enterpriseId, spyneToken, service }: { teamId: string; enterpriseId: string; spyneToken: string; service: "sales" | "service" }) {
   const [state, setState] = useState<{ loading: boolean; meetings: Meeting[] }>({ loading: true, meetings: [] });
   useEffect(() => {
     let on = true;
@@ -1133,11 +1134,11 @@ function UpcomingAppointments({ teamId, enterpriseId, spyneToken }: { teamId: st
     if (!teamId) { setState({ loading: false, meetings: [] }); return; }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setState({ loading: true, meetings: [] });
-    fetchMeetings({ teamId, enterpriseId, service: "both", scope: "upcoming", spyneToken })
+    fetchMeetings({ teamId, enterpriseId, service, scope: "upcoming", spyneToken })
       .then((r) => { if (on) setState({ loading: false, meetings: r.meetings }); })
       .catch(() => { if (on) setState({ loading: false, meetings: [] }); });
     return () => { on = false; };
-  }, [teamId, enterpriseId, spyneToken]);
+  }, [teamId, enterpriseId, spyneToken, service]);
 
   if (state.loading) {
     return (
