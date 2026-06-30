@@ -121,7 +121,10 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     customer: a.customer_name ?? "—", when: fmtWhen(a.appointment_time),
     vehicle: fmtVehicle(a.vehicle), status: a.status ?? "",
   }));
+  // Keep service_type so each agent shows only its department's callbacks (sales agents → sales leads,
+  // service → service) — a service-heavy rooftop's callbacks must not leak onto the Sales cards.
   const callbackItems = (callbacks ?? []).map((c) => ({
+    serviceType: (c.service_type ?? "").toLowerCase(),
     customer: c.customer_name ?? "—", due: fmtWhen(c.callback_due), intent: c.intent ?? "", priority: c.priority ?? "",
   }));
   const campaignItems = (campaigns ?? []).map((c) => ({
@@ -377,7 +380,14 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     // Campaigns are tagged by agent_type → only the matching outbound agent shows them.
     // Attached after the zeroing above so it survives for quiet agents.
     a.report.upcomingAppointments = apptItems.length ? apptItems : undefined;
-    a.report.followUps = callbackItems.length ? callbackItems : undefined;
+    // Callbacks scoped to the agent's DEPARTMENT (sales agents → sales leads' callbacks, service →
+    // service) so a service-heavy rooftop's follow-ups don't leak onto the Sales cards. Rows with an
+    // unknown/blank service_type fall back to showing (better than hiding a real callback).
+    const dept = base.dept === "Service" ? "service" : "sales";
+    const myCallbacks = callbackItems.filter((c) => !c.serviceType || c.serviceType === dept);
+    a.report.followUps = myCallbacks.length
+      ? myCallbacks.map((c) => ({ customer: c.customer, due: c.due, intent: c.intent, priority: c.priority }))
+      : undefined;
     // Money on the table (card 12236): recoverable leads by bucket for this agent's inbound type.
     // Summed across agents on the Overview; outbound agents match no rows → undefined.
     const mineRec = recoverableItems.filter((r) => r.agentType === type);

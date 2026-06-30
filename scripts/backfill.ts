@@ -259,7 +259,7 @@ function deltaSql(effWm: string, cap: string): string {
       .filter((r) => r.team_id && r.outcome_bucket);
     const cbs = await queryRows<Record<string, unknown>>(callbacksSql({}));
     const cbRows = cbs
-      .map((c) => ({ team_id: String(c.team_id ?? ""), customer_name: c.customer_name ?? null, callback_due: c.callback_due ?? null, intent: c.intent ?? null, priority: c.priority ?? null, assigned_to: c.assigned_to ?? null, requested_on: c.requested_on ?? null }))
+      .map((c) => ({ team_id: String(c.team_id ?? ""), service_type: (c.service_type as string) ?? null, customer_name: c.customer_name ?? null, callback_due: c.callback_due ?? null, intent: c.intent ?? null, priority: c.priority ?? null, assigned_to: c.assigned_to ?? null, requested_on: c.requested_on ?? null }))
       .filter((r) => r.team_id);
     for (const [t, rows] of [["report_campaigns", campRows], ["report_outcomes", outcomeRows], ["report_callbacks", cbRows]] as const) {
       const { error } = await sb.from(t).delete().gte("synced_at", "1900-01-01");

@@ -133,6 +133,7 @@ export interface AppointmentRow {
 }
 export interface CallbackRow {
   team_id: string;
+  service_type: string | null; // 'sales' | 'service' — scopes the follow-up to the agent's department
   customer_name: string | null;
   callback_due: string | null;
   intent: string | null;

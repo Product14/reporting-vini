@@ -23,6 +23,17 @@ const esc = (v: string): string => String(v ?? "").replace(/'/g, "''").replace(/
 const teamPred = (col: string, teamId?: string): string =>
   teamId ? `AND ${col} = '${esc(teamId)}'` : "";
 
+// A "warm lead" = a campaignLeadMappings.outcome that signals real buying intent. SINGLE SOURCE OF
+// TRUTH for the warm-leads count (campaigns card + outbound headline). Deliberately EXCLUDES
+// 'general engagement' — a generic "they replied" signal that isn't a warm lead and would otherwise
+// dominate the count (e.g. Covina Kia: 382 of 420). Booked / opt-out / no-reach / lost are their own
+// buckets, not warm. Compared against lower(trimBoth(outcome)).
+const WARM_LEAD_OUTCOMES = [
+  "purchase intent", "vehicle inquiry", "pricing inquiry", "financing inquiry", "trade inquiry",
+  "customer considering", "customer open to return", "reconnect needed", "ancillary inquiry",
+];
+const sqlList = (xs: string[]): string => xs.map((s) => `'${esc(s)}'`).join(",");
+
 export interface CampaignsOpts {
   teamId?: string;
   startFloor?: string; // ClickHouse date expr, e.g. "addDays(today(), -120)". Default floors meeting/callback scans.
@@ -79,11 +90,7 @@ campaign_outcomes AS (
     SELECT
         clm.campaignId AS campaignId,
         countDistinct(clm.leadId) AS enrolled,
-        countDistinctIf(clm.leadId, lower(clm.outcome) IN (
-            'general engagement','purchase intent','vehicle inquiry','pricing inquiry',
-            'financing inquiry','trade inquiry','customer considering','customer open to return',
-            'reconnect needed'
-        )) AS warm_leads,
+        countDistinctIf(clm.leadId, lower(trimBoth(clm.outcome)) IN (${sqlList(WARM_LEAD_OUTCOMES)})) AS warm_leads,
         countDistinctIf(clm.leadId, lower(clm.outcome) = 'opt out') AS opt_outs,
         countDistinctIf(clm.leadId, lower(clm.outcome) IN (
             'not connected','wrong number','decision maker unavailable','number disconnected'
@@ -188,7 +195,8 @@ export interface CallbacksOpts {
 export function callbacksSql({ teamId, startFloor = "addDays(today(), -90)" }: CallbacksOpts = {}): string {
   return `
 WITH ob_leads AS (
-    SELECT DISTINCT l.lead_id AS lead_id, l.team_id AS team_id, l.customer_id AS customer_id
+    SELECT DISTINCT l.lead_id AS lead_id, l.team_id AS team_id, l.customer_id AS customer_id,
+                    l.service_type AS service_type
     FROM dealer_leads.leads AS l FINAL
     JOIN eventila.enterprise_details ed FINAL ON l.enterprise_id = ed.enterprise_id
     JOIN (SELECT DISTINCT leadId AS lead_id FROM dealer_leads.campaignLeadMappings FINAL WHERE __deleted = 0) clm
@@ -203,6 +211,7 @@ WITH ob_leads AS (
 )
 SELECT
     ol.team_id                           AS team_id,
+    ol.service_type                      AS service_type,
     cu.name                              AS customer_name,
     ai.due_date                          AS callback_due,
     ai.intent                            AS intent,
