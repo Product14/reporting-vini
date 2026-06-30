@@ -216,6 +216,10 @@ function AgentReportsView() {
   // on the unique-lead basis) rather than recomputing inline — keeps it identical to the funnel's
   // qualified→connected step and de-duplicated (was an inline qualified-events / connected-events ratio).
   const turnRate = r.qualifiedPct;
+  // Warm leads (outbound) — total across the agent's active campaigns (campaignLeadMappings outcomes
+  // that signal intent/engagement, summed in report_campaigns). Rooftop-wide, like the campaigns table,
+  // so it is NOT window-scaled. Shown as a headline activity stat + above the campaigns table.
+  const warmLeadsTotal = !inbound ? (r.activeCampaigns ?? []).reduce((s, c) => s + (c.warmLeads || 0), 0) : 0;
 
   // Lead journey (Sankey) — UNIQUE LEADS at each stage (same basis as the funnel above), so "Connected"
   // and "Qualified" mean the same thing everywhere on the page. Falls back to event metrics when
@@ -509,11 +513,12 @@ function AgentReportsView() {
               />
             </div>
 
-            {/* secondary: activity */}
-            <div className="grid grid-cols-3 divide-x divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd]">
+            {/* secondary: activity — outbound adds a Warm leads total (rooftop-wide, from campaigns) */}
+            <div className={`grid ${inbound ? "grid-cols-3" : "grid-cols-2 sm:grid-cols-4"} divide-x divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd]`}>
               <ActivityStat label={inbound ? "Total calls" : "Calls dispatched"} value={fmtInt(scale(m.calls))} hint={`${fmtInt(scale(m.talkMinutes))} mins talk`} delta={r.deltas.totalCalls} />
               <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} delta={r.deltas.totalSms} />
               <ActivityStat label="Turn rate" value={`${turnRate}%`} hint="qualified / connected" />
+              {!inbound && <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="engaged across campaigns" />}
             </div>
 
             {/* tertiary: call breakdown — only the buckets we can derive from live volume */}
@@ -650,7 +655,13 @@ function AgentReportsView() {
               <div className="lg:col-span-2">
                 <Card title="Active campaigns" sub="What this agent is working on right now" pad={false}>
                   {r.activeCampaigns?.length ? (
-                    <CampaignsTable items={r.activeCampaigns} />
+                    <>
+                      <div className="flex items-baseline gap-2 border-b border-[#f0f0f0] px-6 py-3">
+                        <span className="text-[20px] font-extrabold tabular-nums text-[#813fed]">{fmtInt(warmLeadsTotal)}</span>
+                        <span className="text-[11.5px] text-[#6b7280]">warm leads engaged across {r.activeCampaigns.length} campaign{r.activeCampaigns.length === 1 ? "" : "s"}</span>
+                      </div>
+                      <CampaignsTable items={r.activeCampaigns} />
+                    </>
                   ) : (
                     <EmptyState icon="📣" title="No active campaigns" body="This rooftop isn't running any outbound campaigns yet." />
                   )}

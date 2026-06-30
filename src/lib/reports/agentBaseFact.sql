@@ -411,7 +411,13 @@ appt_attribution AS (
         FROM dealer_leads.meetings AS m FINAL
         JOIN dealer_leads.conversations AS c FINAL
             ON c.callId = m.call_id AND c.__deleted = 0
-        WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
+        -- Narrow source relaxation: a meeting booked on an OUTBOUND-TASK (campaign) call is AI-driven
+        -- even when meetings.source wasn't stamped 'spyne'. Count those too; every other meeting still
+        -- needs source='spyne' to keep human/CRM (bdc) bookings out of the AI appointment totals.
+        LEFT JOIN dealer_leads.outboundTasks AS ot FINAL
+            ON ot.callId = m.call_id AND ot.__deleted = 0
+        WHERE m.is_active = 1 AND m.__deleted = 0
+          AND (m.source = 'spyne' OR ot.callId != '')
           AND m.call_id IS NOT NULL AND m.call_id != ''
     )
     WHERE conv_id IS NOT NULL AND conv_id != ''

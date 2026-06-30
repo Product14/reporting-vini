@@ -60,15 +60,19 @@ callback_calls AS (
       ${teamPred("ecr.teamId", teamId)}
 ),
 attributed_calls AS (
-    SELECT campaignId, callId FROM campaign_calls
+    SELECT campaignId, callId, toUInt8(1) AS is_task FROM campaign_calls
     UNION ALL
-    SELECT campaignId, callId FROM callback_calls
+    SELECT campaignId, callId, toUInt8(0) AS is_task FROM callback_calls
 ),
 campaign_appts AS (
+    -- Narrow source relaxation: a meeting booked on an OUTBOUND-TASK (campaign) call is AI-driven even
+    -- when meetings.source wasn't stamped 'spyne' (some AI-outbound bookings land with a null source).
+    -- Callback-attributed inbound calls still require source='spyne' to keep human/CRM (bdc) bookings out.
     SELECT ac.campaignId AS campaignId, countDistinct(m.meeting_id) AS appts
     FROM attributed_calls ac
     JOIN dealer_leads.meetings AS m FINAL
-        ON m.call_id = ac.callId AND m.__deleted = 0 AND m.is_active = 1 AND m.source = 'spyne'
+        ON m.call_id = ac.callId AND m.__deleted = 0 AND m.is_active = 1
+    WHERE m.source = 'spyne' OR ac.is_task = 1
     GROUP BY ac.campaignId
 ),
 campaign_outcomes AS (
