@@ -147,26 +147,27 @@ bucketed AS (
                 ('not connected','wrong number','decision maker unavailable','number disconnected',
                  'language barrier'), '1 No reach',
             lower(trimBoth(clm.outcome)) = 'opt out', '2 Opt out',
-            lower(trimBoth(clm.outcome)) IN
-                ('general engagement','purchase intent','vehicle inquiry','pricing inquiry',
-                 'financing inquiry','trade inquiry','customer considering','customer open to return',
-                 'reconnect needed','ancillary inquiry'), '3 Warm / engaged',
+            -- Warm = buying-signal outcomes only (shared WARM_LEAD_OUTCOMES — same list the warm-leads
+            -- count uses). 'general engagement' is split into its own '4 Engaged' bucket so the card's
+            -- warm segment matches the warm-leads KPI instead of being inflated by it.
+            lower(trimBoth(clm.outcome)) IN (${sqlList(WARM_LEAD_OUTCOMES)}), '3 Warm',
+            lower(trimBoth(clm.outcome)) = 'general engagement', '4 Engaged',
             lower(trimBoth(clm.outcome)) IN
                 ('appointment','service appointment booked','meeting already scheduled',
                  'customer already self booked','walk in committed','appointment rescheduled',
-                 'deposit placed'), '4 Booked',
-            lower(trimBoth(clm.outcome)) = 'callback requested', '5 Callback',
+                 'deposit placed'), '5 Booked',
+            lower(trimBoth(clm.outcome)) = 'callback requested', '6 Callback',
             lower(trimBoth(clm.outcome)) IN
-                ('human transferred','transferred to service team','human requested'), '6 Transferred',
+                ('human transferred','transferred to service team','human requested'), '7 Transferred',
             lower(trimBoth(clm.outcome)) IN
                 ('not interested','already purchased','soft decline','customer permanently declined',
                  'customer permanently using competitor','vehicle sold or traded',
                  'customer no longer owns vehicle','customer relocated','appointment cancelled',
-                 'vehicle written off','customer deceased','customer busy no callback'), '7 Lost / declined',
+                 'vehicle written off','customer deceased','customer busy no callback'), '8 Lost / declined',
             lower(trimBoth(clm.outcome)) IN
                 ('could not conclude','recall information shared','no slots available','operating hours',
-                 'drop off details shared','location shared','price estimate shared'), '8 Unclear / info',
-            '9 Other'
+                 'drop off details shared','location shared','price estimate shared'), '9 Unclear / info',
+            '10 Other'
         ) AS outcome_bucket
     FROM dealer_leads.campaignLeadMappings AS clm FINAL
     JOIN ob_leads ol ON ol.lead_id = clm.leadId

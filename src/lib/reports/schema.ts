@@ -158,7 +158,7 @@ export interface CampaignRow {
 export interface OutcomeRow {
   team_id: string;
   agent_type: string | null; // "Sales Outbound" | "Service Outbound" — which outbound agent owns it
-  outcome_bucket: string; // e.g. "1 No reach" … "9 Other"; numeric prefix is sort order only
+  outcome_bucket: string; // e.g. "1 No reach" … "10 Other"; numeric prefix is sort order only (stripped for display)
   mappings: number;
 }
 // Sales-IB "open funnel" (card 12341 → report_open_funnel): leads handled → appointments booked, per
