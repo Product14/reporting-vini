@@ -50,7 +50,9 @@ const offsetBucket = (o: number): string => (o >= 3 ? "3+" : String(o));
 
 interface Acc extends AgentDailyRow {
   _leads: Set<string>;
-  _apptLeads: Set<string>; // distinct leads with an appointment (the card counts these, not flag-sum)
+  _apptLeads: Set<string>; // distinct leads with an AI-booked appointment (card counts these, not flag-sum)
+  // canonical: distinct leads with an AI-assisted (CRM) appointment — SECONDARY metric, kept separate.
+  _apptAssistedLeads: Set<string>;
 }
 
 function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
@@ -58,11 +60,12 @@ function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
     activity_day: day, team_id: team, agent_type: type,
     enterprise_name: str(r.enterprise_name), rooftop_name: str(r.rooftop_name), rooftop_stage: str(r.rooftop_stage),
     calls: 0, sms_threads: 0, conv_count: 0, connected: 0, reached_person: 0, qualified: 0, appointments: 0,
+    appointments_assisted: 0, // canonical: AI-assisted (CRM) — SECONDARY
     sms_sent: 0, sms_replied: 0, after_hours: 0, talk_seconds: 0, transfers: 0, callbacks: 0, query_resolved: 0,
     opt_outs: 0, leads_attempted: 0, quality_score_sum: 0, quality_basis: 0,
     new_leads: 0, stl_within5: 0, stl_within1: 0, stl_seconds_sum: 0, stl_count: 0,
     stl_afterhours_within5: 0, stl_within5_appts: 0,
-    _leads: new Set(), _apptLeads: new Set(),
+    _leads: new Set(), _apptLeads: new Set(), _apptAssistedLeads: new Set(),
   };
 }
 
@@ -105,7 +108,11 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.calls += isCall;
     a.sms_threads += isSms;
     a.conv_count += 1;
-    if (num(r.talk_seconds) > 0) a.connected += 1;
+    // canonical: "Real conversations" = connected, voicemail EXCLUDED. Use the spine's `r.connected`
+    // (= is_connected = report.connected='Yes' OR (not voicemail AND user msgs)), NOT talk_seconds>0 —
+    // voicemails have a positive duration so talk_seconds>0 over-counts them as conversations (the bug
+    // behind OB connected=925 vs the real ~329). This daily column is call-side connected.
+    if (num(r.connected) > 0) a.connected += 1;
     a.reached_person += num(r.reached_person);
     a.qualified += num(r.qualified);
     a.sms_sent += num(r.n_sms_outbound);
@@ -126,15 +133,20 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     if (lead) {
       a._leads.add(lead);
       if (num(r.appointment_booked)) a._apptLeads.add(lead);
+      // canonical: AI-assisted (CRM) appt leads tracked separately from AI-booked (never merged).
+      if (num(r.appointment_assisted)) a._apptAssistedLeads.add(lead);
       // lead-day grain → exact window-distinct counts at read time (vs summing daily distincts)
       const lk = `${day}|${team}|${type}|${lead}`;
       let ld = leadMap.get(lk);
-      if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, lead_source: leadSource || null, dialed: false, connected: false, qualified: false, appointment: false }; leadMap.set(lk, ld); }
+      if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, lead_source: leadSource || null, dialed: false, connected: false, qualified: false, appointment: false, appointment_assisted: false }; leadMap.set(lk, ld); }
       else if (!ld.lead_source && leadSource) ld.lead_source = leadSource; // backfill source if first row lacked it
       if (num(r.is_call) > 0) ld.dialed = true;
-      if (num(r.talk_seconds) > 0 || num(r.sms_replied) > 0) ld.connected = true; // two-way conversation
+      // canonical: connected = spine's is_connected (voicemail-excluded) OR an SMS human reply. Was
+      // talk_seconds>0 which counts voicemails (positive duration) as connected → inflated OB to 925.
+      if (num(r.connected) > 0 || num(r.sms_replied) > 0) ld.connected = true; // two-way conversation
       if (num(r.qualified) > 0) ld.qualified = true;
-      if (num(r.appointment_booked) > 0) ld.appointment = true;
+      if (num(r.appointment_booked) > 0) ld.appointment = true; // canonical: AI-booked (PRIMARY)
+      if (num(r.appointment_assisted) > 0) ld.appointment_assisted = true; // canonical: AI-assisted (SECONDARY)
     }
 
     const q = r.quality_score;
@@ -151,7 +163,8 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
       let s = srcMap.get(sk);
       if (!s) { s = { activity_day: day, team_id: team, agent_type: type, source, leads: new Set(), engaged: new Set(), appt: new Set() }; srcMap.set(sk, s); }
       s.leads.add(lead);
-      if (num(r.talk_seconds) > 0 || num(r.sms_replied) > 0) s.engaged.add(lead); // two-way conversation
+      // canonical: engaged = connected (voicemail-excluded) OR SMS reply — same rule as lead-day connected.
+      if (num(r.connected) > 0 || num(r.sms_replied) > 0) s.engaged.add(lead); // two-way conversation
       if (num(r.appointment_booked) > 0) s.appt.add(lead);
     }
     const h = hourOf(str(r.activity_ts), opts.tzOf?.(team));
@@ -166,12 +179,13 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   for (const a of groups.values()) {
     a.leads_attempted = a._leads.size;
     a.appointments = a._apptLeads.size;
+    a.appointments_assisted = a._apptAssistedLeads.size; // canonical: AI-assisted (CRM) — SECONDARY
     const stlCols = stlCountsForGroup(stl, a.activity_day, a.team_id, a.agent_type);
     Object.assign(a, stlCols);
     a.talk_seconds = Math.round(a.talk_seconds);
     a.quality_score_sum = Math.round(a.quality_score_sum);
     a.stl_seconds_sum = Math.round(a.stl_seconds_sum);
-    const { _leads, _apptLeads, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
+    const { _leads, _apptLeads, _apptAssistedLeads, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
     daily.push(row);
   }
   // Materialize the lead-distinct source breakdown into the same tall table the other dims use.

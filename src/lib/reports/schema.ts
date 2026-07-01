@@ -24,7 +24,9 @@ export interface RawRow {
   is_sms: number;
   n_sms_outbound: number;
   qualified: number;
-  appointment_booked: number;
+  appointment_booked: number; // canonical: AI-booked (meetings.source='spyne') — PRIMARY/headline
+  // canonical: AI-assisted (CRM, source!='spyne', booked on an agent-worked lead) — SECONDARY metric
+  appointment_assisted: number;
   connected: number;
   reached_person: number;
   sms_replied: number;
@@ -61,7 +63,9 @@ export interface AgentDailyRow {
   connected: number; // Σ connected
   reached_person: number; // Σ reached_person
   qualified: number; // Σ qualified
-  appointments: number; // Σ appointment_booked
+  appointments: number; // canonical: distinct AI-booked appt leads (source='spyne') — PRIMARY/headline
+  // canonical: distinct AI-assisted (CRM) appt leads — SECONDARY, shown smaller, never in the headline
+  appointments_assisted: number;
   sms_sent: number; // Σ n_sms_outbound
   sms_replied: number; // Σ sms_replied
   after_hours: number; // Σ after_hours
@@ -111,7 +115,8 @@ export interface LeadDayRow {
   dialed: boolean; // had ≥1 call (is_call) that day
   connected: boolean; // had a two-way conversation that day (talk_seconds>0 OR sms_replied>0)
   qualified: boolean; // was qualified that day
-  appointment: boolean; // booked an appointment that day
+  appointment: boolean; // canonical: booked an AI appt (source='spyne') that day — PRIMARY
+  appointment_assisted: boolean; // canonical: AI-assisted (CRM) appt that day — SECONDARY
 }
 
 export interface AggregateResult {

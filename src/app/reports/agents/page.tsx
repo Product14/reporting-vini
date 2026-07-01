@@ -233,13 +233,14 @@ function AgentReportsView() {
     const booked = Math.min(qualified, scale(a.leadFunnel?.appt ?? m.appointments));
     const nurture = Math.max(0, qualified - booked);
     const columns = [
-      [{ id: "total", label: inbound ? "Leads attempted" : "Leads dialed", color: "#813fed" }],
+      // canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) · "Real conversations" · "Qualified leads".
+      [{ id: "total", label: inbound ? "Leads reached" : "Leads dialed", color: "#813fed" }],
       [
-        { id: "connected", label: "Conversations", color: "#6366f1" },
+        { id: "connected", label: "Real conversations", color: "#6366f1" },
         { id: "missed", label: "No conversation", color: "#dc2626" },
       ],
       [
-        { id: "qualified", label: "Qualified", color: "#10b981" },
+        { id: "qualified", label: "Qualified leads", color: "#10b981" },
         { id: "notq", label: "Not qualified", color: "#9ca3af" },
       ],
       [
@@ -435,8 +436,9 @@ function AgentReportsView() {
                 ) : (
                   <div>
                     <div className="flex items-center gap-2">
+                      {/* canonical wording: PRIMARY headline = "Appointments — AI-booked" */}
                       <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#059669]">
-                        Appointments booked · {periodLabel}
+                        Appointments — AI-booked · {periodLabel}
                       </p>
                       {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
                     </div>
@@ -454,8 +456,15 @@ function AgentReportsView() {
                     ) : (
                       <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">{fmtInt(scale(m.appointments))}</p>
                     )}
+                    {/* canonical: AI-assisted (CRM) = SECONDARY metric, shown smaller/muted, NEVER added
+                        into the AI-booked headline above. Hidden when zero. */}
+                    {scale(m.appointmentsAssisted ?? 0) > 0 && (
+                      <p className="mt-1 text-[12px] font-semibold text-[#9ca3af]">
+                        +{fmtInt(scale(m.appointmentsAssisted ?? 0))} AI-assisted (CRM)
+                      </p>
+                    )}
                     <p className="mt-2 max-w-[520px] text-[12px] text-[#6b7280]">
-                      From <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.connected ?? m.conversations))}</b> conversations · <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.qualified ?? m.qualified))}</b> qualified. Dollar value appears once revenue tracking is on.
+                      From <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.connected ?? m.conversations))}</b> real conversations · <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.qualified ?? m.qualified))}</b> qualified leads. Dollar value appears once revenue tracking is on.
                     </p>
                   </div>
                 )}
@@ -490,7 +499,8 @@ function AgentReportsView() {
               </div>
               <div className="flex items-center gap-2.5 rounded-xl bg-white px-4 py-2 shadow-sm ring-1 ring-[#ece6fb]">
                 <div className="text-right leading-tight">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Booking rate</p>
+                  {/* canonical wording: appts ÷ qualified is the "Close rate" (was "Booking rate"). */}
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
                   <DeltaPill delta={r.deltas.abr} />
                 </div>
                 <p className="text-[28px] font-extrabold tabular-nums leading-none text-[#813fed]">{r.abr}%</p>
@@ -504,10 +514,12 @@ function AgentReportsView() {
                   // Every stage is a window-DISTINCT lead count (from leadFunnel) so the funnel stays
                   // monotonic (contacted ≥ connected ≥ qualified ≥ appointments) and never double-counts a
                   // lead touched on multiple days. Falls back to event counts only if leadFunnel is absent.
-                  { label: inbound ? "Leads attempted" : "Leads dialed", value: scale(r.leadsAttempted), delta: r.deltas.leadsAttempted },
-                  { label: "Conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
-                  { label: "Leads qualified", value: scale(a.leadFunnel?.qualified ?? m.qualified), delta: r.deltas.leadsQualified },
-                  { label: "Appointments booked", value: scale(m.appointments), delta: r.deltas.appointments },
+                  // canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) · "Real conversations"
+                  //                     · "Qualified leads" · "Appointments — AI-booked".
+                  { label: inbound ? "Leads reached" : "Leads dialed", value: scale(r.leadsAttempted), delta: r.deltas.leadsAttempted },
+                  { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
+                  { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified), delta: r.deltas.leadsQualified },
+                  { label: "Appointments — AI-booked", value: scale(m.appointments), delta: r.deltas.appointments },
                 ]}
                 appointmentsDrill={live && scale(m.appointments) > 0 ? openApptDrill : undefined}
               />
@@ -530,8 +542,8 @@ function AgentReportsView() {
                   { label: "After hours", value: m.afterHours },
                   // Conversations/Qualified are UNIQUE LEADS (same basis as the funnel + Sankey) so each label
                   // reads one consistent number across the page; the other tiles stay call-activity counts.
-                  { label: "Conversations", value: a.leadFunnel?.connected ?? m.conversations },
-                  { label: "Qualified", value: a.leadFunnel?.qualified ?? m.qualified },
+                  { label: "Real conversations", value: a.leadFunnel?.connected ?? m.conversations },
+                  { label: "Qualified leads", value: a.leadFunnel?.qualified ?? m.qualified },
                   // Transferred / Callbacks are an inbound concept — outbound agents (Sales/Service OB) don't show them.
                   ...(inbound
                     ? [

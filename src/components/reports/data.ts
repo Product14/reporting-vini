@@ -39,7 +39,10 @@ export interface AgentMetrics {
   connectRate: number; // % answer (IB) / connect (OB)
   conversations: number; // reached a person/agent
   qualified: number; // qualified (sales) / booked-eligible (service)
-  appointments: number;
+  appointments: number; // canonical: AI-booked (meetings.source='spyne') — PRIMARY/headline
+  // canonical: AI-assisted (CRM) appointments — SECONDARY. Shown smaller (e.g. "+N AI-assisted"),
+  // NEVER added into `appointments`. Optional so mock agents (which don't set it) still type-check.
+  appointmentsAssisted?: number;
   showed: number;
   deals: number; // sales deals closed / service ROs completed
   revenue: number; // $ attributed

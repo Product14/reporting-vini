@@ -81,7 +81,8 @@ export interface BuildInput {
 }
 
 // Per-agent_type window-distinct lead counts (keyed by agent_type label, e.g. "Sales Outbound").
-export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number }>;
+// canonical: apptLeads = AI-booked (source='spyne', PRIMARY); apptLeadsAssisted = AI-assisted (CRM, SECONDARY).
+export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number; apptLeadsAssisted: number }>;
 
 // Format an ISO timestamp as a short, locale-stable "when" label (e.g. "Jun 11 · 9:30 AM" UTC).
 function fmtWhen(iso: string | null): string {
@@ -184,7 +185,11 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     const connected = sum(rows, (r) => r.connected);
     const qualified = sum(rows, (r) => r.qualified);
     // distinct booked leads over the window (exact); fall back to the per-day-distinct sum (overcounts)
+    // canonical: this is AI-booked (meetings.source='spyne') — the PRIMARY/headline appointments number.
     const appointments = lc ? lc.apptLeads : sum(rows, (r) => r.appointments);
+    // canonical: AI-assisted (CRM) appointments — SECONDARY. Reported separately ("+N AI-assisted"),
+    // NEVER folded into `appointments`. Window-distinct when available, else per-day-distinct sum.
+    const appointmentsAssisted = lc ? lc.apptLeadsAssisted : sum(rows, (r) => r.appointments_assisted);
     const smsSent = sum(rows, (r) => r.sms_sent);
     const smsThreads = sum(rows, (r) => r.sms_threads);
     const afterHours = sum(rows, (r) => r.after_hours);
@@ -212,7 +217,8 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       conversations: connected,
       connectRate,
       qualified,
-      appointments,
+      appointments, // canonical: AI-booked (source='spyne') — PRIMARY/headline
+      appointmentsAssisted, // canonical: AI-assisted (CRM) — SECONDARY, shown smaller, never in headline
       showed: 0,
       deals: 0,
       revenue: 0,
