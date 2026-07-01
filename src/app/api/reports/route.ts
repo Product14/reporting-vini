@@ -26,7 +26,8 @@ function priorWindow(start: string, end: string): { start: string; end: string }
   return { start: ps.toISOString().slice(0, 10), end: start };
 }
 
-export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number }>;
+// canonical: apptLeads = AI-booked (source='spyne', PRIMARY); apptLeadsAssisted = AI-assisted (CRM, SECONDARY).
+export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number; apptLeadsAssisted: number }>;
 
 function leadRow(r: Record<string, unknown>): LeadCounts[string] {
   return {
@@ -35,6 +36,7 @@ function leadRow(r: Record<string, unknown>): LeadCounts[string] {
     connected: Number(r.leads_connected) || 0,
     qualified: Number(r.leads_qualified) || 0,
     apptLeads: Number(r.appt_leads) || 0,
+    apptLeadsAssisted: Number(r.appt_leads_assisted) || 0, // canonical: AI-assisted (CRM) — SECONDARY
   };
 }
 
