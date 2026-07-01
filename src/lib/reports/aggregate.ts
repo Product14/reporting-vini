@@ -108,16 +108,11 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.calls += isCall;
     a.sms_threads += isSms;
     a.conv_count += 1;
-    // canonical #3 VERIFIED: the "Real conversations" card reads `connected` (not leads-contacted), and
-    // voicemail is excluded — talk_seconds>0 means a live call where the customer spoke, never a
-    // voicemail/IVR/silence-timeout. (The SQL `connected` flag = report.connected='Yes' OR (not voicemail
-    // AND user msgs).)
-    // TODO(canonical): the lead-day `connected` (line ~140) counts SMS replies as a real conversation
-    // (talk_seconds>0 OR sms_replied>0), but this DAILY `connected` is call-only. The user-visible card
-    // prefers leadFunnel.connected (SMS-inclusive, correct); this daily column is a FALLBACK. Aligning it
-    // to also count sms_replied would shift the fallback/headline metric — left unchanged to avoid an
-    // out-of-scope behavior change. Reference target: OB real conversations = 329 (31 calls + 309 SMS).
-    if (num(r.talk_seconds) > 0) a.connected += 1;
+    // canonical: "Real conversations" = connected, voicemail EXCLUDED. Use the spine's `r.connected`
+    // (= is_connected = report.connected='Yes' OR (not voicemail AND user msgs)), NOT talk_seconds>0 —
+    // voicemails have a positive duration so talk_seconds>0 over-counts them as conversations (the bug
+    // behind OB connected=925 vs the real ~329). This daily column is call-side connected.
+    if (num(r.connected) > 0) a.connected += 1;
     a.reached_person += num(r.reached_person);
     a.qualified += num(r.qualified);
     a.sms_sent += num(r.n_sms_outbound);
@@ -146,7 +141,9 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
       if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, lead_source: leadSource || null, dialed: false, connected: false, qualified: false, appointment: false, appointment_assisted: false }; leadMap.set(lk, ld); }
       else if (!ld.lead_source && leadSource) ld.lead_source = leadSource; // backfill source if first row lacked it
       if (num(r.is_call) > 0) ld.dialed = true;
-      if (num(r.talk_seconds) > 0 || num(r.sms_replied) > 0) ld.connected = true; // two-way conversation
+      // canonical: connected = spine's is_connected (voicemail-excluded) OR an SMS human reply. Was
+      // talk_seconds>0 which counts voicemails (positive duration) as connected → inflated OB to 925.
+      if (num(r.connected) > 0 || num(r.sms_replied) > 0) ld.connected = true; // two-way conversation
       if (num(r.qualified) > 0) ld.qualified = true;
       if (num(r.appointment_booked) > 0) ld.appointment = true; // canonical: AI-booked (PRIMARY)
       if (num(r.appointment_assisted) > 0) ld.appointment_assisted = true; // canonical: AI-assisted (SECONDARY)
@@ -166,7 +163,8 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
       let s = srcMap.get(sk);
       if (!s) { s = { activity_day: day, team_id: team, agent_type: type, source, leads: new Set(), engaged: new Set(), appt: new Set() }; srcMap.set(sk, s); }
       s.leads.add(lead);
-      if (num(r.talk_seconds) > 0 || num(r.sms_replied) > 0) s.engaged.add(lead); // two-way conversation
+      // canonical: engaged = connected (voicemail-excluded) OR SMS reply — same rule as lead-day connected.
+      if (num(r.connected) > 0 || num(r.sms_replied) > 0) s.engaged.add(lead); // two-way conversation
       if (num(r.appointment_booked) > 0) s.appt.add(lead);
     }
     const h = hourOf(str(r.activity_ts), opts.tzOf?.(team));

@@ -90,10 +90,17 @@ service_intents AS (
 
 sales_intents AS (
     SELECT arrayJoin([
-        'Appointment Booking/inquiry','Test Drive Booking','Schedule Test Drive','Vehicle Inquiry',
-        'Pricing Inquiry','Trade-in Inquiry','Financing Inquiry','Inventory Availability Inquiry',
-        'Sales person/Manager Request','Sales department transfer completed','Lease Inquiry',
-        'New Vehicle Inquiry','Used Vehicle Inquiry'
+        -- canonical: CONCRETE buying-intent intents, using the ACTUAL IRA vocabulary in prod
+        -- (data uses 'Vehicle Availability Inquiry' / 'Vehicle Price Inquiry' / 'Trade in value inquiry'
+        --  / 'Test drive Booking' / 'Finance Inquiry' — the old list used non-matching strings, so
+        --  inbound buying-intent calls never matched → IB qualified undercounted to ~4). Routing intents
+        -- ('Talk to sales department', 'Sales person/Manager Request', transfers) are NOT buying → excluded.
+        'Vehicle Availability Inquiry','Vehicle Price Inquiry','Trade in value inquiry',
+        'Test drive Booking','Appointment Booking/inquiry','Finance Inquiry','Lease Inquiry',
+        'Vehicle condition or history inquiry','Vehicle Feature Request','Sales appointment re-scheduled',
+        -- legacy / other-dealer variants (kept for safety; harmless if unused):
+        'Test Drive Booking','Schedule Test Drive','Vehicle Inquiry','New Vehicle Inquiry',
+        'Used Vehicle Inquiry','Pricing Inquiry','Inventory Availability Inquiry','Trade-in Inquiry','Financing Inquiry'
     ]) AS intent
 ),
 
@@ -133,6 +140,9 @@ lead_high_intent_action AS (
     FROM dealer_leads.actionItems AS ai FINAL
     WHERE ai.__deleted = 0
       AND ifNull(ai.intent, '') IN (SELECT intent FROM sms_buying_intent_actions)
+      -- canonical: window the buying-intent gate to the reporting window. Without this it matched
+      -- ALL-TIME action items, inflating outbound qualified (≈220 vs the real 32).
+      AND ai.createdAt >= {START} AND ai.createdAt < {END}
 ),
 
 agent_stage_override AS (
@@ -188,29 +198,35 @@ ecr_events AS (
     SELECT
         ecr.callId AS callId,
         ecr.teamId AS team_id,
+        -- canonical (LOCKED 2026-06-30): call-qualified uses the SAME buying-intent bar as SMS —
+        -- ENGAGED (non-voicemail live call where the customer spoke) AND the lead has a windowed
+        -- concrete buying-intent action item (lead_high_intent_action, hia.lead_id IS NOT NULL).
+        -- Dropped the old IRA-intent-match OR loose "any user message" fallback (a different, looser
+        -- rule than SMS — it under-counted inbound to 2 and could over-count elsewhere). Opt-out and
+        -- spam exclusions retained (spam is filtered in the WHERE clause; opt-outs gated here).
         if(
             ifNull(co.opt_out_call, 0) = 0
             AND ifNull(co.opt_out_sms, 0) = 0
             AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%'
+            AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%machine%'
+            -- ENGAGED: customer actually spoke on the call
+            AND arrayExists(
+                x -> JSONExtractString(x, 'role') = 'user',
+                JSONExtractArrayRaw(ifNull(ecr.callDetails_messages, '[]'))
+            )
+            -- canonical buying-intent signal = a windowed action item OR an IRA buying-intent match
+            -- (calls often show intent via IRA without a logged action item — required for inbound).
             AND (
-                (
+                hia.lead_id IS NOT NULL
+                OR (
                     ira.sourceId IS NOT NULL
                     AND (
-                        (lower(ecr.callDetails_agentInfo_agentType) = 'service'
-                         AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
-                             IN (SELECT intent FROM service_intents))
-                        OR
                         (lower(ecr.callDetails_agentInfo_agentType) = 'sales'
                          AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
                              IN (SELECT intent FROM sales_intents))
-                    )
-                )
-                OR
-                (
-                    ira.sourceId IS NULL
-                    AND arrayExists(
-                        x -> JSONExtractString(x, 'role') = 'user',
-                        JSONExtractArrayRaw(ifNull(ecr.callDetails_messages, '[]'))
+                        OR (lower(ecr.callDetails_agentInfo_agentType) = 'service'
+                         AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
+                             IN (SELECT intent FROM service_intents))
                     )
                 )
             ),
@@ -246,26 +262,40 @@ ecr_events AS (
             1, 0
         ) AS is_query_resolved,
         if(
-            JSONExtractString(ecr.report, 'connected') = 'Yes'
-            OR (
-                lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%'
-                AND arrayExists(
-                    x -> JSONExtractString(x, 'role') = 'user',
-                    JSONExtractArrayRaw(ifNull(ecr.callDetails_messages, '[]'))
-                )
+            -- canonical: a real conversation is NEVER a voicemail/IVR — require non-voicemail FIRST,
+            -- even when report.connected='Yes' (the outbound dialer sets that flag on voicemail-reached
+            -- calls too, which was inflating outbound "connected" ~2x).
+            lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%'
+            AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%machine%'
+            -- canonical: a REAL conversation means the customer actually spoke — require a user message.
+            -- report.connected='Yes' alone is the dialer's line-reached flag (set on voicemail/no-answer),
+            -- so it is NOT sufficient on its own.
+            AND arrayExists(
+                x -> JSONExtractString(x, 'role') = 'user',
+                JSONExtractArrayRaw(ifNull(ecr.callDetails_messages, '[]'))
             ),
             1, 0
         ) AS is_connected,
         trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), '')) AS primary_intent,
-        greatest(0, dateDiff('second',
-            parseDateTimeBestEffortOrNull(ecr.callDetails_startedAt),
-            parseDateTimeBestEffortOrNull(ecr.callDetails_endedAt))) AS talk_seconds,
+        -- canonical: talk_seconds is CONNECTED-only — voicemails have a positive duration but are not a
+        -- real conversation, so gate on non-voicemail. Prevents voicemail duration leaking into talk time
+        -- (and, historically, into any talk_seconds>0 connected proxy).
+        if(
+            lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%',
+            greatest(0, dateDiff('second',
+                parseDateTimeBestEffortOrNull(ecr.callDetails_startedAt),
+                parseDateTimeBestEffortOrNull(ecr.callDetails_endedAt))),
+            0
+        ) AS talk_seconds,
         -- ★ disposition transfer (Calls-tab parity): endedReason='transferred'. aggregate.ts PREFERS this
         --   over has_transfer (the IRA 'transfer completed' flag, which undercounts ~62 vs ~94).
         if(lower(ifNull(ecr.callDetails_endedReason, '')) = 'transferred', 1, 0) AS is_transferred
     FROM dealer_leads.endcallreports AS ecr FINAL
     JOIN lead_canonical lc ON lc.lead_id = ecr.leadId AND lc.team_id = ecr.teamId
     LEFT JOIN customer_opt_out co ON co.customer_id = lc.customer_id AND co.team_id = lc.team_id
+    -- canonical: windowed buying-intent gate for call qualification (SAME as SMS side, see
+    -- lead_high_intent_action). hia.lead_id IS NOT NULL ⇒ lead logged a concrete buying-intent action.
+    LEFT JOIN lead_high_intent_action hia ON hia.lead_id = lc.lead_id AND hia.team_id = lc.team_id
     LEFT JOIN dealer_leads.intentResolutionAnalysis AS ira FINAL
         ON ira.sourceId = ecr.callId AND ira.sourceType = 'call' AND ira.isActive = 1
     WHERE ecr.__deleted = 0 AND ecr.isTestCall = false
