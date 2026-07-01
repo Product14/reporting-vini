@@ -82,7 +82,7 @@ export interface BuildInput {
 
 // Per-agent_type window-distinct lead counts (keyed by agent_type label, e.g. "Sales Outbound").
 // canonical: apptLeads = AI-booked (source='spyne', PRIMARY); apptLeadsAssisted = AI-assisted (CRM, SECONDARY).
-export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number; apptLeadsAssisted: number }>;
+export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number; apptLeadsAssisted: number; transferLeads: number; transferFailedLeads: number }>;
 
 // Format an ISO timestamp as a short, locale-stable "when" label (e.g. "Jun 11 · 9:30 AM" UTC).
 function fmtWhen(iso: string | null): string {
@@ -194,7 +194,10 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     const smsThreads = sum(rows, (r) => r.sms_threads);
     const afterHours = sum(rows, (r) => r.after_hours);
     const talkSeconds = sum(rows, (r) => r.talk_seconds);
-    const transfers = sum(rows, (r) => r.transfers);
+    // canonical: transfers = window-DISTINCT leads with a completed transfer (lead grain, matches the
+    // funnel); fall back to the call-level daily sum when lead-counts are unavailable.
+    const transfers = lc ? lc.transferLeads : sum(rows, (r) => r.transfers);
+    const transfersFailed = lc ? lc.transferFailedLeads : sum(rows, (r) => r.transfers_failed);
     const callbacks = sum(rows, (r) => r.callbacks);
     const queryResolved = sum(rows, (r) => r.query_resolved);
     const optOuts = sum(rows, (r) => r.opt_outs);
@@ -272,6 +275,7 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
         answered: connected,
         missed: Math.max(0, calls - connected),
         transferred: transfers,
+        transfersFailed, // canonical: failed transfers — reported separately, never in `transferred`
         callbacks,
         lost: Math.max(0, connected - qualified),
         handledByAI: queryResolved,

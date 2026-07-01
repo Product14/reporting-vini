@@ -23,7 +23,8 @@ const spine = loadSpineSql(`toDate('${start}')`, `toDate('${end}')`);
 // Plain projection + filter (NO aggregates) — avoids nesting the spine's internal aggregates.
 const q = `
 SELECT "cs.lead_id" AS lead_id, agent_type, connected, sms_replied, qualified,
-       qualified_via_call, qualified_via_sms, appointment_booked, appointment_assisted
+       qualified_via_call, qualified_via_sms, appointment_booked, appointment_assisted,
+       transferred, transfer_failed
 FROM ( ${spine} )
 WHERE "cs.team_id" = '${team}' AND agent_type LIKE 'Sales%'
 `;
@@ -38,7 +39,8 @@ WHERE "cs.team_id" = '${team}' AND agent_type LIKE 'Sales%'
   for (const r of rows as any[]) {
     const at = r.agent_type, lead = r.lead_id;
     const a = (agg[at] ??= { leads: new Set(), connected: new Set(), qualified: new Set(),
-      qvcall: new Set(), qvsms: new Set(), booked: new Set(), assisted: new Set() });
+      qvcall: new Set(), qvsms: new Set(), booked: new Set(), assisted: new Set(),
+      transferred: new Set(), transferFailed: new Set() });
     a.leads.add(lead);
     if (N(r.connected) > 0 || N(r.sms_replied) > 0) a.connected.add(lead);
     if (N(r.qualified) > 0) a.qualified.add(lead);
@@ -46,6 +48,8 @@ WHERE "cs.team_id" = '${team}' AND agent_type LIKE 'Sales%'
     if (N(r.qualified_via_sms) > 0) a.qvsms.add(lead);
     if (N(r.appointment_booked) > 0) a.booked.add(lead);
     if (N(r.appointment_assisted) > 0) a.assisted.add(lead);
+    if (N(r.transferred) > 0) a.transferred.add(lead);
+    if (N(r.transfer_failed) > 0) a.transferFailed.add(lead);
   }
   for (const at of Object.keys(agg).sort()) {
     const a = agg[at];
@@ -53,7 +57,8 @@ WHERE "cs.team_id" = '${team}' AND agent_type LIKE 'Sales%'
       `${at.padEnd(15)} | leads ${String(a.leads.size).padStart(4)}` +
       ` | connected ${String(a.connected.size).padStart(4)}` +
       ` | qualified ${String(a.qualified.size).padStart(4)} (call ${a.qvcall.size} / sms ${a.qvsms.size})` +
-      ` | appt AI-booked ${a.booked.size} · assisted ${a.assisted.size}`,
+      ` | appt AI-booked ${a.booked.size} · assisted ${a.assisted.size}` +
+      ` | transfers ${a.transferred.size} · failed ${a.transferFailed.size}`,
     );
   }
   console.log("");

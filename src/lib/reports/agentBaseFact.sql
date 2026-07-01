@@ -287,9 +287,13 @@ ecr_events AS (
                 parseDateTimeBestEffortOrNull(ecr.callDetails_endedAt))),
             0
         ) AS talk_seconds,
-        -- ★ disposition transfer (Calls-tab parity): endedReason='transferred'. aggregate.ts PREFERS this
-        --   over has_transfer (the IRA 'transfer completed' flag, which undercounts ~62 vs ~94).
-        if(lower(ifNull(ecr.callDetails_endedReason, '')) = 'transferred', 1, 0) AS is_transferred
+        -- ★ CANONICAL transfer (locked 2026-07-01): completed disposition hand-off to a human =
+        --   endedReason ∈ {'transferred','assistant-forwarded-call'}. Matches the Calls tab AND counts
+        --   AI→human forwards (previously excluded). aggregate.ts uses this, NOT the IRA has_transfer
+        --   flag ('transfer completed'), which undercounts ~⅓.
+        if(lower(ifNull(ecr.callDetails_endedReason, '')) IN ('transferred','assistant-forwarded-call'), 1, 0) AS is_transferred,
+        -- ★ failed transfer — reported SEPARATELY, never folded into is_transferred.
+        if(lower(ifNull(ecr.callDetails_endedReason, '')) = 'transfer_failed', 1, 0) AS is_transfer_failed
     FROM dealer_leads.endcallreports AS ecr FINAL
     JOIN lead_canonical lc ON lc.lead_id = ecr.leadId AND lc.team_id = ecr.teamId
     LEFT JOIN customer_opt_out co ON co.customer_id = lc.customer_id AND co.team_id = lc.team_id
@@ -317,7 +321,8 @@ ecr_by_call AS (
         max(is_connected)       AS is_connected,
         any(primary_intent)     AS primary_intent,
         max(talk_seconds)       AS talk_seconds,
-        max(is_transferred)     AS transferred
+        max(is_transferred)     AS transferred,
+        max(is_transfer_failed) AS transfer_failed
     FROM ecr_events
     GROUP BY callId, team_id
 ),
@@ -596,6 +601,7 @@ SELECT
     ifNull(ec.had_appt_intent, 0)           AS had_appt_intent,
     ifNull(ec.had_transfer, 0)              AS had_transfer,
     ifNull(ec.transferred, 0)               AS transferred,
+    ifNull(ec.transfer_failed, 0)           AS transfer_failed,
     ifNull(ec.had_callback, 0)              AS had_callback,
     ifNull(ec.talk_seconds, 0)              AS talk_seconds,
     q.score_percentage                      AS quality_score,

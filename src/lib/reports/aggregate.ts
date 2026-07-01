@@ -61,7 +61,7 @@ function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
     enterprise_name: str(r.enterprise_name), rooftop_name: str(r.rooftop_name), rooftop_stage: str(r.rooftop_stage),
     calls: 0, sms_threads: 0, conv_count: 0, connected: 0, reached_person: 0, qualified: 0, appointments: 0,
     appointments_assisted: 0, // canonical: AI-assisted (CRM) — SECONDARY
-    sms_sent: 0, sms_replied: 0, after_hours: 0, talk_seconds: 0, transfers: 0, callbacks: 0, query_resolved: 0,
+    sms_sent: 0, sms_replied: 0, after_hours: 0, talk_seconds: 0, transfers: 0, transfers_failed: 0, callbacks: 0, query_resolved: 0,
     opt_outs: 0, leads_attempted: 0, quality_score_sum: 0, quality_basis: 0,
     new_leads: 0, stl_within5: 0, stl_within1: 0, stl_seconds_sum: 0, stl_count: 0,
     stl_afterhours_within5: 0, stl_within5_appts: 0,
@@ -119,11 +119,13 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     a.sms_replied += num(r.sms_replied);
     a.after_hours += num(r.after_hours);
     a.talk_seconds += num(r.talk_seconds);
-    // transfers: prefer the spine's disposition-based `transferred` flag (set when ended_reason=
-    // 'transferred') — it matches the Calls tab / console (Honda DTLA Jun 16: 94 ≈ 93). Fall back to the
-    // legacy `had_transfer` (IRA/resolution flag) on older Q12227 versions that don't emit it — that one
-    // undercounts ~⅓ (62 vs 94). Presence-checked (!= null) so a real 0 isn't read as "column absent".
+    // transfers (CANONICAL): spine's disposition `transferred` = endedReason ∈ {transferred,
+    // assistant-forwarded-call} = completed hand-off to a human (matches Calls tab; counts AI-forwards).
+    // Fall back to legacy `had_transfer` (IRA) only on old spine versions that don't emit it (undercounts
+    // ~⅓). Failed transfers tracked separately, never folded in. This daily column is call-level; the
+    // window-DISTINCT headline is derived lead-level from agent_lead_days (report_lead_counts).
     a.transfers += r.transferred != null ? num(r.transferred) : num(r.had_transfer);
+    a.transfers_failed += num(r.transfer_failed);
     a.callbacks += num(r.had_callback);
     a.query_resolved += num(r.query_resolved);
     a.opt_outs += num(r.opted_out_sms);
@@ -138,7 +140,7 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
       // lead-day grain → exact window-distinct counts at read time (vs summing daily distincts)
       const lk = `${day}|${team}|${type}|${lead}`;
       let ld = leadMap.get(lk);
-      if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, lead_source: leadSource || null, dialed: false, connected: false, qualified: false, appointment: false, appointment_assisted: false }; leadMap.set(lk, ld); }
+      if (!ld) { ld = { team_id: team, agent_type: type, lead_id: lead, activity_day: day, lead_source: leadSource || null, dialed: false, connected: false, qualified: false, appointment: false, appointment_assisted: false, transferred: false, transfer_failed: false }; leadMap.set(lk, ld); }
       else if (!ld.lead_source && leadSource) ld.lead_source = leadSource; // backfill source if first row lacked it
       if (num(r.is_call) > 0) ld.dialed = true;
       // canonical: connected = spine's is_connected (voicemail-excluded) OR an SMS human reply. Was
@@ -147,6 +149,8 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
       if (num(r.qualified) > 0) ld.qualified = true;
       if (num(r.appointment_booked) > 0) ld.appointment = true; // canonical: AI-booked (PRIMARY)
       if (num(r.appointment_assisted) > 0) ld.appointment_assisted = true; // canonical: AI-assisted (SECONDARY)
+      if (num(r.transferred) > 0) ld.transferred = true; // canonical: completed transfer — lead-level (headline)
+      if (num(r.transfer_failed) > 0) ld.transfer_failed = true; // failed transfer — reported separately
     }
 
     const q = r.quality_score;
