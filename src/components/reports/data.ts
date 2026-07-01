@@ -136,6 +136,7 @@ export interface CallFlow {
   answered: number;
   missed: number;
   transferred: number;
+  transfersFailed?: number; // canonical: failed transfers — separate from `transferred`; optional for mocks
   callbacks?: number; // had_callback — optional so mock callFlow objects don't need it
   lost: number;
   handledByAI: number;

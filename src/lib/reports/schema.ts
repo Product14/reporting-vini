@@ -31,10 +31,11 @@ export interface RawRow {
   reached_person: number;
   sms_replied: number;
   query_resolved: number;
-  // disposition-based transfer flag from the spine (1 when callDetails_endedReason='transferred').
-  // Matches the Calls tab / console; PREFERRED over had_transfer. Absent on pre-spine-edit Q12227.
+  // CANONICAL transfer flag from the spine (1 when endedReason ∈ {'transferred','assistant-forwarded-call'}).
+  // Completed hand-off to a human; matches the Calls tab. Used for counts (NOT the IRA had_transfer).
   transferred?: number;
-  had_transfer: number; // legacy IRA/resolution-derived flag; undercounts vs `transferred` (~62 vs 94).
+  transfer_failed?: number; // 1 when endedReason='transfer_failed' — reported SEPARATELY, never in transfers.
+  had_transfer: number; // legacy IRA/resolution-derived flag; undercounts ~⅓. Kept for a future quality view.
   // Retained upstream as the stricter "AI-completed-transfer" signal for a future quality view.
   had_callback: number;
   had_appt_intent: number;
@@ -70,7 +71,9 @@ export interface AgentDailyRow {
   sms_replied: number; // Σ sms_replied
   after_hours: number; // Σ after_hours
   talk_seconds: number; // Σ talk_seconds
-  transfers: number; // Σ had_transfer
+  transfers: number; // Σ transferred (disposition, incl assistant-forwarded-call). Call-level; the
+  // window-DISTINCT headline comes from agent_lead_days via report_lead_counts (leads.transferLeads).
+  transfers_failed: number; // Σ transfer_failed — reported separately, never folded into transfers
   callbacks: number; // Σ had_callback
   query_resolved: number; // Σ query_resolved
   opt_outs: number; // Σ opted_out_sms
@@ -117,6 +120,8 @@ export interface LeadDayRow {
   qualified: boolean; // was qualified that day
   appointment: boolean; // canonical: booked an AI appt (source='spyne') that day — PRIMARY
   appointment_assisted: boolean; // canonical: AI-assisted (CRM) appt that day — SECONDARY
+  transferred: boolean; // canonical: had ≥1 completed transfer (disposition) that day — lead-level
+  transfer_failed: boolean; // had ≥1 failed transfer that day — reported separately
 }
 
 export interface AggregateResult {

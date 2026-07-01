@@ -27,7 +27,7 @@ function priorWindow(start: string, end: string): { start: string; end: string }
 }
 
 // canonical: apptLeads = AI-booked (source='spyne', PRIMARY); apptLeadsAssisted = AI-assisted (CRM, SECONDARY).
-export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number; apptLeadsAssisted: number }>;
+export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number; apptLeadsAssisted: number; transferLeads: number; transferFailedLeads: number }>;
 
 function leadRow(r: Record<string, unknown>): LeadCounts[string] {
   return {
@@ -37,6 +37,8 @@ function leadRow(r: Record<string, unknown>): LeadCounts[string] {
     qualified: Number(r.leads_qualified) || 0,
     apptLeads: Number(r.appt_leads) || 0,
     apptLeadsAssisted: Number(r.appt_leads_assisted) || 0, // canonical: AI-assisted (CRM) — SECONDARY
+    transferLeads: Number(r.transfer_leads) || 0, // canonical: window-distinct completed transfers (headline)
+    transferFailedLeads: Number(r.transfer_failed_leads) || 0, // reported separately
   };
 }
 
