@@ -209,26 +209,19 @@ ecr_events AS (
             AND ifNull(co.opt_out_sms, 0) = 0
             AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%'
             AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%machine%'
-            -- ENGAGED: customer actually spoke on the call
-            AND arrayExists(
-                x -> JSONExtractString(x, 'role') = 'user',
-                JSONExtractArrayRaw(ifNull(ecr.callDetails_messages, '[]'))
-            )
-            -- canonical buying-intent signal = a windowed action item OR an IRA buying-intent match
-            -- (calls often show intent via IRA without a logged action item — required for inbound).
+            -- Call-qualified = IRA buying-intent only (aligned with vini-daily-calls
+            -- agentBaseFact.sql + dashboard). Outbound calls have no IRA records, so
+            -- qualified_via_call is structurally 0 for outbound — an accepted upstream
+            -- pipeline gap; outbound qualification comes from the SMS engagement rule
+            -- + the booking guard, not the call side.
+            AND ira.sourceId IS NOT NULL
             AND (
-                hia.lead_id IS NOT NULL
-                OR (
-                    ira.sourceId IS NOT NULL
-                    AND (
-                        (lower(ecr.callDetails_agentInfo_agentType) = 'sales'
-                         AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
-                             IN (SELECT intent FROM sales_intents))
-                        OR (lower(ecr.callDetails_agentInfo_agentType) = 'service'
-                         AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
-                             IN (SELECT intent FROM service_intents))
-                    )
-                )
+                (lower(ecr.callDetails_agentInfo_agentType) = 'sales'
+                 AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
+                     IN (SELECT intent FROM sales_intents))
+                OR (lower(ecr.callDetails_agentInfo_agentType) = 'service'
+                 AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
+                     IN (SELECT intent FROM service_intents))
             ),
             1, 0
         ) AS is_qualifying_call,
@@ -334,14 +327,14 @@ sms_by_conv AS (
         count()          AS n_sms_messages,
         sum(if(lower(sm.authorType) = 'human' AND lower(sm.direction) = 'in', 1, 0)) AS n_human_inbound,
         sum(if(lower(sm.direction) = 'out', 1, 0)) AS n_sms_outbound,
-        -- canonical (LOCKED): SMS qualified = human inbound reply AND a concrete buying-intent signal
-        -- on the lead (NOT opted-out). A bare reply with no buying intent is "Engaged", not Qualified —
-        -- this replaces the old "any human reply = qualified" rule that inflated outbound (≈297 → 32).
-        -- hia.lead_id IS NOT NULL is the buying-intent gate (lead has a high-intent action item).
+        -- SMS-qualified base = human inbound reply AND not opted-out (call+SMS DNC).
+        -- The buying-intent gate (hia) was intentionally REMOVED per product: SMS
+        -- qualification is now "responded + not opted-out + still in campaign"
+        -- (campaign-exit is applied at the final SELECT via campaign_state). This
+        -- is the same engaged-workable definition used by vini-daily-calls.
         max(if(lower(sm.authorType) = 'human' AND lower(sm.direction) = 'in'
                AND ifNull(co.opt_out_call, 0) = 0
-               AND ifNull(co.opt_out_sms, 0) = 0
-               AND hia.lead_id IS NOT NULL, 1, 0)) AS qualified_via_sms
+               AND ifNull(co.opt_out_sms, 0) = 0, 1, 0)) AS qualified_via_sms
     FROM dealer_leads.smsMessages AS sm FINAL
     JOIN dealer_leads.conversations AS c FINAL
         ON sm.conversationId = c.conversationId
@@ -366,6 +359,37 @@ lead_optout AS (
     LEFT JOIN customer_opt_out co
         ON co.customer_id = lc.customer_id AND co.team_id = lc.team_id
     GROUP BY lc.lead_id, lc.team_id
+),
+
+-- Campaign-exit signal per lead, for SMS qualification (mirrors vini-daily-calls).
+-- Reads the lead's MOST RECENT campaignLeadMappings row and flags "exited" when
+-- ANY of three signals says so:
+--   • leadEngagementStatus ∈ CLOSED/PAUSED (lifecycle no longer active)
+--   • status ∈ DNC / CANCELLED            (removed from cadence)
+--   • outcome ∈ negative exits            (Opt Out, Not Interested, Already
+--     Purchased, Wrong Number). Positive exits (booked) are protected by the
+--     appointment guard on `qualified` below.
+campaign_state AS (
+    SELECT
+        lead_id,
+        team_id,
+        if(
+            latest_engagement IN ('CLOSED', 'PAUSED')
+            OR latest_status IN ('DNC_REQUESTED', 'DNC_REGISTERED', 'CANCELLED')
+            OR latest_outcome IN ('Opt Out', 'Not Interested', 'Already Purchased', 'Wrong Number'),
+            1, 0
+        ) AS campaign_exited
+    FROM (
+        SELECT
+            leadId AS lead_id,
+            teamId AS team_id,
+            argMax(ifNull(leadEngagementStatus, ''), ifNull(updatedAt, createdAt)) AS latest_engagement,
+            argMax(ifNull(status, ''),              ifNull(updatedAt, createdAt)) AS latest_status,
+            argMax(ifNull(outcome, ''),             ifNull(updatedAt, createdAt)) AS latest_outcome
+        FROM dealer_leads.campaignLeadMappings FINAL
+        WHERE __deleted = 0 AND leadId IS NOT NULL AND teamId IS NOT NULL
+        GROUP BY leadId, teamId
+    )
 ),
 
 quality_by_call AS (
@@ -583,8 +607,15 @@ SELECT
     ifNull(sb.n_sms_outbound, 0)            AS n_sms_outbound,
 
     ifNull(ec.qualified_via_call, 0)        AS qualified_via_call,
-    ifNull(sb.qualified_via_sms, 0)         AS qualified_via_sms,
-    greatest(ifNull(ec.qualified_via_call, 0), ifNull(sb.qualified_via_sms, 0)) AS qualified,
+    -- SMS-qualified = responded + not opted-out (from sb) AND not exited campaign.
+    if(ifNull(sb.qualified_via_sms, 0) = 1 AND ifNull(cst.campaign_exited, 0) = 0, 1, 0) AS qualified_via_sms,
+    -- Booking guard: appointment_booked keeps every booked lead qualified so
+    -- appts ⊆ qualified holds and ABR can't exceed 100%.
+    greatest(
+        ifNull(ec.qualified_via_call, 0),
+        if(ifNull(sb.qualified_via_sms, 0) = 1 AND ifNull(cst.campaign_exited, 0) = 0, 1, 0),
+        if(ifNull(ad.n_appts, 0) > 0, 1, 0)
+    ) AS qualified,
 
     if(ifNull(ad.n_appts, 0) > 0, 1, 0)     AS appointment_booked,
     ifNull(ad.n_appts, 0)                    AS appointments_count,
@@ -649,6 +680,8 @@ LEFT JOIN sms_by_conv sb
     ON sb.conversationId = cs.conversationId AND sb.team_id = cs.team_id
 LEFT JOIN lead_optout lo
     ON lo.lead_id = cs.lead_id AND lo.team_id = cs.team_id
+LEFT JOIN campaign_state cst
+    ON cst.lead_id = cs.lead_id AND cst.team_id = cs.team_id
 LEFT JOIN quality_by_call q
     ON q.callId = cs.callId
 LEFT JOIN conv_hours ch
