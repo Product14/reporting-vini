@@ -190,6 +190,13 @@ export interface FetchResult {
   // Absent on the mock/error fallback → callers fall back to hasData (prior, window-scoped behavior).
   everLive?: boolean;
   fetchedAt: number; // epoch ms — drives the "last synced" label
+  // The fetch failed or the server degraded (transient Supabase blip / cold-start timeout). A degraded
+  // result is NOT cached and must NEVER flip the report to the "Coming soon" gate — an outage is not the
+  // same as a rooftop that never went live. Callers treat it as "still loading" and retry.
+  degraded?: boolean;
+  // The request was rejected 401/403 (missing/invalid or wrong-team credential). TERMINAL — not degraded,
+  // so the self-heal re-arm never fires. Locally this just means no ?auth_key= on the URL.
+  unauthorized?: boolean;
   prior: Record<string, Basis>; // per-agent-id totals for the prior window (for fleet deltas)
   // The window the server actually resolved (store-local when a timezone was known) + that timezone.
   // Informational — lets the UI label the period / note the zone. Absent on the mock/error fallback.
@@ -325,32 +332,51 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
     ? { team_id: teamId, start: opts.start, end: opts.end }
     : { team_id: teamId, bucket: opts.bucket ?? "last30" };
 
-  let result: FetchResult;
-  try {
-    const qs = new URLSearchParams(query);
-    // Forward the host's Spyne token (prod) as a Bearer header so /api/reports can resolve timezone +
-    // onboarded agents. Omitted locally → the server falls back to its env token.
-    const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
-    const r = await fetch(`/api/reports?${qs.toString()}`, { cache: "no-store", headers });
-    const j = (await r.json().catch(() => null)) as Partial<FetchResult> | null;
-    if (!r.ok || !j || !Array.isArray(j.agents)) throw new Error("bad /api/reports response");
-    result = {
-      agents: j.agents as AgentData[],
-      hasData: Boolean(j.hasData),
-      everLive: typeof j.everLive === "boolean" ? j.everLive : undefined,
-      fetchedAt: typeof j.fetchedAt === "number" ? j.fetchedAt : Date.now(),
-      prior: (j.prior as Record<string, Basis>) ?? {},
-      start: j.start,
-      end: j.end,
-      timezone: j.timezone ?? null,
-    };
-  } catch {
-    // On error, render nothing rather than mock numbers — hasData:false drives the "coming soon" state.
-    result = { agents: [], hasData: false, fetchedAt: Date.now(), prior: {} };
+  // Forward the host's Spyne token (prod) as a Bearer header so /api/reports can resolve timezone +
+  // onboarded agents. Omitted locally → the server falls back to its env token.
+  const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
+
+  // Retry transient failures before giving up. A cold serverless start, a 504, or a momentary Supabase
+  // blip makes the FIRST call fail/degrade — and a degraded response (no everLive, hasData:false) is
+  // indistinguishable from "never live", so without a retry an established rooftop wrongly flips to the
+  // "Coming soon" gate until the user manually refreshes. We retry with backoff and cache ONLY a clean
+  // response, so a failure is never pinned for the 5-min TTL.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const qs = new URLSearchParams(query);
+      const r = await fetch(`/api/reports?${qs.toString()}`, { cache: "no-store", headers });
+      // Auth failures are TERMINAL — no credential to retry with. Retrying (and the page's self-heal
+      // re-arm) would hammer the endpoint forever. Return a non-degraded result so the re-arm never fires.
+      if (r.status === 401 || r.status === 403) {
+        return { agents: [], hasData: false, unauthorized: true, fetchedAt: Date.now(), prior: {} };
+      }
+      const j = (await r.json().catch(() => null)) as (Partial<FetchResult> & { degraded?: boolean }) | null;
+      if (!r.ok || !j || !Array.isArray(j.agents)) throw new Error("bad /api/reports response");
+      // Server flags a Supabase read failure as degraded (200 body, no everLive) → treat as transient.
+      if (j.degraded) throw new Error("degraded /api/reports response");
+      const result: FetchResult = {
+        agents: j.agents as AgentData[],
+        hasData: Boolean(j.hasData),
+        everLive: typeof j.everLive === "boolean" ? j.everLive : undefined,
+        fetchedAt: typeof j.fetchedAt === "number" ? j.fetchedAt : Date.now(),
+        prior: (j.prior as Record<string, Basis>) ?? {},
+        start: j.start,
+        end: j.end,
+        timezone: j.timezone ?? null,
+      };
+      CACHE.set(cacheKey, result); // cache ONLY a clean response
+      return result;
+    } catch {
+      // back off then retry; ~0.4s, ~0.8s between attempts
+      if (attempt < MAX_ATTEMPTS - 1) await new Promise((res) => setTimeout(res, 400 * (attempt + 1)));
+    }
   }
 
-  CACHE.set(cacheKey, result);
-  return result;
+  // All attempts failed/degraded → return a degraded result WITHOUT caching, so the next view or refresh
+  // re-hits the server. degraded:true keeps the UI in the "syncing" state instead of the "coming soon"
+  // gate or fake zeros.
+  return { agents: [], hasData: false, degraded: true, fetchedAt: Date.now(), prior: {} };
 }
 
 /* Coming-soon metrics derived from ClickHouse and stored in Supabase by scripts/push_metrics.py — read

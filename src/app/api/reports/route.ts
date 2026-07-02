@@ -3,7 +3,7 @@ import { buildResult } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
-import { getStoreTimeZone, getOnboardedSlots } from "@/lib/spyne/teamContext";
+import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames } from "@/lib/spyne/teamContext";
 import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
@@ -16,6 +16,11 @@ import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
  * rpc degrades to the prior multi-read behavior on error, so an un-migrated DB still works. */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// A cold invocation cold-starts the function AND opens a fresh Supabase connection before running five
+// sequential round-trips (readFacts → detail + lead-counts + source-counts + ever-live). Under Vercel's
+// short default timeout that cold path can 504, which the client can't distinguish from "never live" and
+// shows "report is on its way". Give the cold path room to finish so the first load succeeds.
+export const maxDuration = 30;
 
 // Equal-length window immediately before [start, end) — basis for period deltas.
 function priorWindow(start: string, end: string): { start: string; end: string } {
@@ -166,9 +171,10 @@ export async function GET(request: Request): Promise<Response> {
 
   // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
   // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).
-  const [timezone, onboardedSlots] = await Promise.all([
+  const [timezone, onboardedSlots, onboardedNames] = await Promise.all([
     getStoreTimeZone(teamId, spyneToken),
     getOnboardedSlots(teamId, spyneToken),
+    getOnboardedNames(teamId, spyneToken),
   ]);
 
   // Relative buckets resolve to a window in the STORE's timezone (so a Pacific rooftop's "Today" is a
@@ -185,7 +191,7 @@ export async function GET(request: Request): Promise<Response> {
   const sb = getSupabase();
   if (!sb) {
     // No backend configured → return mock-shaped result so the UI still renders.
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots }), ...meta });
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames }), ...meta });
   }
 
   // agent_daily is read ONCE across the combined [prior.start, end) range and split in-memory into the
@@ -214,7 +220,7 @@ export async function GET(request: Request): Promise<Response> {
     // from a genuinely quiet day and SUPPRESS the email instead of sending all-zeros. HTTP stays 200 so
     // existing healthy callers that rely on 200 don't break.
     console.error(`[/api/reports] Supabase read failed for team ${teamId}: ${err.message}`);
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots }), ...meta, degraded: true }, {
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames }), ...meta, degraded: true }, {
       headers: { "X-Reports-Degraded": "supabase-read-error" },
     });
   }
@@ -245,6 +251,7 @@ export async function GET(request: Request): Promise<Response> {
     campaigns,
     outcomes,
     onboardedSlots,
+    onboardedNames,
     leadCounts: lc.cur,
     priorLeadCounts: lc.prior,
     sourceCounts,

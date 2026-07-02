@@ -118,6 +118,18 @@ function AgentReportsView() {
       .catch(() => { if (on) setMetrics(null); });
     return () => { on = false; };
   }, [teamId, spyneToken]);
+  // Self-heal a degraded fetch (fetchAgents already retried 3× in-line): re-hit the server ONCE more
+  // shortly after so the report fills in on its own. Depends on the degraded BOOLEAN (not fetchedAt) so a
+  // still-degraded retry can't re-trigger it — never a perpetual poll. 401s aren't degraded → never fires.
+  useEffect(() => {
+    if (!teamId || feed?.degraded !== true) return;
+    let on = true;
+    const t = setTimeout(() => {
+      fetchAgents({ teamId, ...rangeOpts, force: true }).then((res) => { if (on) setFeed(res); }).catch(() => {});
+    }, 4000);
+    return () => { on = false; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, bucket, custom, feed?.degraded]);
   const refresh = () => {
     if (!teamId) return;
     track("report_refreshed", { tab: "agents", team_id: teamId });
@@ -135,7 +147,10 @@ function AgentReportsView() {
   // Gated on lifetime "ever live", NOT the selected window — a live rooftop with an empty window (e.g.
   // "Today" before its first synced call) renders the report with zeros instead of the on-its-way gate.
   // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
-  const comingSoon = hasTeam && feed !== null && !(feed.everLive ?? feed.hasData); // rooftop selected, never live yet
+  // A degraded fetch (transient outage / cold-start timeout) is NOT "never live" — hold the syncing
+  // state and let the re-arm effect retry, rather than flip to the on-its-way gate.
+  const degraded = feed?.degraded === true;
+  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData); // rooftop selected, never live yet
   const skeleton = useMemo(() => agentsForAccount(MOCK_AGENTS, account), [account]);
   // A live rooftop whose feed has RESOLVED but carries no agents for the selected window. We must NOT
   // fall back to the mock skeleton's numbers here (that rendered a fake "168 leads attempted" report for
@@ -309,13 +324,13 @@ function AgentReportsView() {
             </div>
           )}
 
-          {scenario !== "first_time" && live && hasTeam && feed === null && <ReportSkeleton />}
+          {scenario !== "first_time" && live && hasTeam && (feed === null || degraded) && <ReportSkeleton />}
 
           {scenario !== "first_time" && live && hasTeam && comingSoon && <RooftopComingSoon name={account.name} />}
 
           {/* Live, resolved rooftop whose feed carries no agents/activity for the window — show the empty
               state, NOT the mock skeleton's switcher pills + fake report (the P1-3 bug). */}
-          {scenario !== "first_time" && live && hasTeam && feed !== null && !comingSoon && feedEmpty && (
+          {scenario !== "first_time" && live && hasTeam && feed !== null && !degraded && !comingSoon && feedEmpty && (
             <NoActivity name={account.name || "this rooftop"} onWiden={() => { setPreset("last30"); track("empty_window_widened", { team_id: teamId, agent: activeId }); }} />
           )}
 

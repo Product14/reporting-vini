@@ -86,6 +86,20 @@ function OverviewReportView() {
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, bucket, custom]);
+  // Self-heal: if the fetch degraded (fetchAgents already retried 3× in-line), quietly re-hit the server
+  // ONCE more a moment later so the report fills in on its own instead of leaving the user to refresh.
+  // Depends on the degraded BOOLEAN (not fetchedAt): a still-degraded retry keeps it true → the effect
+  // does NOT re-run, so this can never become a perpetual poll. Auth failures aren't degraded, so a 401
+  // never triggers it.
+  useEffect(() => {
+    if (!teamId || feed?.degraded !== true) return;
+    let on = true;
+    const t = setTimeout(() => {
+      fetchAgents({ teamId, ...rangeOpts, force: true }).then((res) => { if (on) setFeed(res); }).catch(() => {});
+    }, 4000);
+    return () => { on = false; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, bucket, custom, feed?.degraded]);
   const refresh = () => {
     if (!teamId) return;
     track("report_refreshed", { tab: "overview", team_id: teamId });
@@ -123,9 +137,12 @@ function OverviewReportView() {
   // selected window. A live account whose window happens to be empty (e.g. "Today" before the day's
   // first call syncs) renders the real report with zeros + an inline note, not the on-its-way gate.
   // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
-  const comingSoon = hasTeam && feed !== null && !(feed.everLive ?? feed.hasData);
+  // A degraded fetch (transient outage / cold-start timeout) is NOT "never live" — keep the UI in the
+  // syncing state and let the re-arm effect below retry, rather than flip to the "coming soon" gate.
+  const degraded = feed?.degraded === true;
+  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData);
   const showReport = scenario !== "first_time" && scenario !== "onboarding";
-  const liveReady = showReport && hasTeam && feed !== null && !comingSoon;
+  const liveReady = showReport && hasTeam && feed !== null && !degraded && !comingSoon;
   // Live rooftop, but the selected window has no activity yet → gentle inline note above the report.
   const emptyWindow = liveReady && feed !== null && !feed.hasData;
 
@@ -201,7 +218,7 @@ function OverviewReportView() {
           {scenario === "onboarding" && <OnboardingOverview view={view} />}
 
           {showReport && !hasTeam && <NoRooftop />}
-          {showReport && hasTeam && feed === null && <OverviewSkeleton />}
+          {showReport && hasTeam && (feed === null || degraded) && <OverviewSkeleton />}
           {showReport && hasTeam && comingSoon && (
             <ComingSoon
               title={`${account.name}'s report is on its way`}

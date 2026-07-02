@@ -63,20 +63,49 @@ function slotOf(a: OnboardedAgent): SlotId | null {
   return null;
 }
 
+/* The raw onboarded-agents list for a team (cached), or null when unavailable. Both getOnboardedSlots
+ * and getOnboardedNames derive from this, so a report costs at most ONE call to the endpoint. */
+async function getOnboardedAgents(teamId: string, token?: string | null): Promise<OnboardedAgent[] | null> {
+  if (!teamId) return null;
+  return cached(`oa:${teamId}`, async () => {
+    const list = await spyneGet<OnboardedAgent[]>(`/conversation/agents/team/${encodeURIComponent(teamId)}/onboarded-agents`, token);
+    return Array.isArray(list) ? list : null;
+  });
+}
+
 /* The set of slot ids the dealer has onboarded (isOnboarded === true), or null when the list is
  * unavailable. Null means "don't gate" — the report shows all slots, as before. An empty set means the
  * call succeeded but nothing is onboarded (a real, gated-to-empty rooftop). */
 export async function getOnboardedSlots(teamId: string, token?: string | null): Promise<Set<SlotId> | null> {
-  if (!teamId) return null;
-  return cached(`oa:${teamId}`, async () => {
-    const list = await spyneGet<OnboardedAgent[]>(`/conversation/agents/team/${encodeURIComponent(teamId)}/onboarded-agents`, token);
-    if (!Array.isArray(list)) return null;
-    const slots = new Set<SlotId>();
-    for (const a of list) {
-      if (a.isOnboarded === false) continue; // dealer hasn't turned this one on
-      const s = slotOf(a);
-      if (s) slots.add(s);
-    }
-    return slots;
-  });
+  const list = await getOnboardedAgents(teamId, token);
+  if (!list) return null;
+  const slots = new Set<SlotId>();
+  for (const a of list) {
+    if (a.isOnboarded === false) continue; // dealer hasn't turned this one on
+    const s = slotOf(a);
+    if (s) slots.add(s);
+  }
+  return slots;
+}
+
+/* The dealer's REAL agent display name per slot (from the onboarded-agents config) — replaces the mock
+ * personas (Emily/Jenny/Mia/Theo) so the report shows the name the dealer actually gave each agent.
+ * A slot with more than one onboarded agent (e.g. two service-outbound campaigns) joins its distinct
+ * names with " & ". Null / a missing slot → caller keeps the mock persona. */
+export async function getOnboardedNames(teamId: string, token?: string | null): Promise<Partial<Record<SlotId, string>> | null> {
+  const list = await getOnboardedAgents(teamId, token);
+  if (!list) return null;
+  const perSlot = new Map<SlotId, string[]>();
+  for (const a of list) {
+    if (a.isOnboarded === false) continue;
+    const s = slotOf(a);
+    const name = (a.name || "").trim();
+    if (!s || !name) continue;
+    const arr = perSlot.get(s) ?? [];
+    if (!arr.includes(name)) arr.push(name); // de-dupe repeated names within a slot
+    perSlot.set(s, arr);
+  }
+  const names: Partial<Record<SlotId, string>> = {};
+  for (const [s, arr] of perSlot) names[s] = arr.join(" & ");
+  return names;
 }

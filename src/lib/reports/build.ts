@@ -69,6 +69,10 @@ export interface BuildInput {
   // the report is GATED to these slots — agents the dealer hasn't paid for are dropped (personas kept
   // as-is). null/undefined → don't gate (show all four), the previous behavior.
   onboardedSlots?: Set<AgentData["id"]> | null;
+  // The dealer's REAL agent name per slot (from the onboarded-agents API), e.g. { service_ob: "Mark" }.
+  // Overrides the mock persona (summary.person) so the report shows the name the dealer actually gave
+  // the agent instead of a fabricated one. A missing slot / undefined → keep the mock persona.
+  onboardedNames?: Partial<Record<AgentData["id"], string>> | null;
   // EXACT window-distinct lead counts per agent_type (from report_lead_counts). When present, used for
   // "Leads dialed" (= unique leads contacted) + distinct appointments instead of summing per-day
   // distincts (which over-counts cross-day leads). undefined → fall back to the daily sum.
@@ -112,7 +116,7 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, openFunnel, recoverable, onboardedSlots, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, openFunnel, recoverable, onboardedSlots, onboardedNames, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
   // Rooftop-level detail mapped once into the UI shapes. Appointments/callbacks attach to inbound
@@ -295,6 +299,8 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
         : [],
       summary: {
         ...a.report.summary,
+        // Real agent name from the dealer's onboarded-agents config; fall back to the mock persona.
+        person: onboardedNames?.[base.id]?.trim() || a.report.summary.person,
         conversations: connected,
         apptsBooked: appointments,
         bookingRate: leadQualified ? Math.round((appointments / leadQualified) * 100) : 0,
