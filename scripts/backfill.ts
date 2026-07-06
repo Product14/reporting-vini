@@ -29,7 +29,7 @@ import { fetchTeamTzs, storeLocalDay, teamsInRows } from "../src/lib/reports/tzM
 import { saveTzMap, loadTzMap } from "../src/lib/reports/tzStore";
 import { queryRows } from "../src/lib/reports/clickhouseQuery";
 import { loadSpineSql } from "../src/lib/reports/spineSql";
-import { campaignsSql, outcomesSql, callbacksSql } from "../src/lib/reports/detailQueries";
+import { campaignsSql, outcomesSql, callbacksSql, appointmentsSql } from "../src/lib/reports/detailQueries";
 import type { RawRow } from "../src/lib/reports/schema";
 
 function loadEnv() {
@@ -261,12 +261,20 @@ function deltaSql(effWm: string, cap: string): string {
     const cbRows = cbs
       .map((c) => ({ team_id: String(c.team_id ?? ""), service_type: (c.service_type as string) ?? null, customer_name: c.customer_name ?? null, callback_due: c.callback_due ?? null, intent: c.intent ?? null, priority: c.priority ?? null, assigned_to: c.assigned_to ?? null, requested_on: c.requested_on ?? null }))
       .filter((r) => r.team_id);
-    for (const [t, rows] of [["report_campaigns", campRows], ["report_outcomes", outcomeRows], ["report_callbacks", cbRows]] as const) {
+    // AI-booked appointment snapshot (revived report_appointments) — the digest's appt list + top vehicles.
+    // FIXED 120d floor (not firstStart): this is a full delete+replace snapshot, so it must always hold the
+    // last ~120 days of bookings regardless of the incremental watermark window — else an incremental run
+    // whose window starts today would wipe yesterday's appointments from the snapshot.
+    const appts = await queryRows<Record<string, unknown>>(appointmentsSql({}));
+    const apptRows = appts
+      .map((a) => ({ team_id: String(a.team_id ?? ""), enterprise_id: (a.enterprise_id as string) ?? null, service_type: (a.service_type as string) ?? null, lead_id: (a.lead_id as string) ?? null, meeting_id: (a.meeting_id as string) ?? null, customer_name: a.customer_name ?? null, phone: a.phone ?? null, vehicle: a.vehicle ?? null, intent: a.intent ?? null, meeting_start: a.meeting_start ?? null, booked_at: a.booked_at ?? null }))
+      .filter((r) => r.team_id && r.meeting_id);
+    for (const [t, rows] of [["report_campaigns", campRows], ["report_outcomes", outcomeRows], ["report_callbacks", cbRows], ["report_appointments", apptRows]] as const) {
       const { error } = await sb.from(t).delete().gte("synced_at", "1900-01-01");
       if (error) throw new Error(`${t} delete: ${error.message}`);
       await insertAll(sb, t, rows);
     }
-    console.log(`detail: ${campRows.length} campaigns + ${outcomeRows.length} outcomes + ${cbRows.length} callbacks synced.`);
+    console.log(`detail: ${campRows.length} campaigns + ${outcomeRows.length} outcomes + ${cbRows.length} callbacks + ${apptRows.length} appointments synced.`);
   } catch (e) {
     console.warn(`detail sync skipped: ${(e as Error).message}`);
   }

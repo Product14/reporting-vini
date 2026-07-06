@@ -22,6 +22,9 @@ export const SYNC_STATE = "sync_state";
 // Per-row detail tables, fed directly from ClickHouse by scripts/backfill.ts (see detailQueries.ts).
 // report_appointments / report_open_funnel / report_money_on_table were retired in migration 0011
 // (the first is served live by /api/meetings; the other two were never populated).
+// Revived in 0016 (was retired in 0011): AI-booked appointment snapshot, ClickHouse-sourced. Serves the
+// digest's appointment list + top-vehicles from Supabase instead of the (401-prone) live meetings proxy.
+export const REPORT_APPOINTMENTS = "report_appointments";
 export const REPORT_CALLBACKS = "report_callbacks";
 export const REPORT_CAMPAIGNS = "report_campaigns";
 export const REPORT_OUTCOMES = "report_outcomes";

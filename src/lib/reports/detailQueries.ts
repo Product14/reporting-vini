@@ -231,3 +231,78 @@ WHERE ai.__deleted = 0
 ORDER BY ai.due_date ASC
 SETTINGS join_use_nulls = 1`.trim();
 }
+
+export interface AppointmentsOpts {
+  teamId?: string;
+  startFloor?: string; // ClickHouse date expr; floors the meetings scan (booked_at). Default -120d.
+}
+
+// AI-booked appointments (meetings.source='spyne') → report_appointments (revived; see migration 0016).
+// Replaces the retired live /api/meetings proxy as the source for the digest's appointment LIST + "top
+// vehicles". One row per meeting, resolved with:
+//   • customer name/phone  ← dealer_leads.customer (customer_id)
+//   • vehicle make/model/yr ← first proposed_vins token → inventory.vinMaster, with dealerVinMapping
+//     bridging the dealerVinId (UUID) form. Both inventory tables are semi-joined (vin IN (…)) to only
+//     the VINs a team's meetings reference, so a run never scans all of vinMaster (1.8M) / dealerVinMapping
+//     (21.8M). GROUP BY meeting_id collapses any CDC/join fan-out to one row.
+// Test/demo/reseller enterprises excluded (same predicate as the other detail queries). booked_at floored
+// by ${startFloor} so a full run stays bounded (covers the daily window + the 30d top-vehicles window).
+export function appointmentsSql({ teamId, startFloor = "addDays(today(), -120)" }: AppointmentsOpts = {}): string {
+  return `
+WITH meet AS (
+    SELECT
+        m.team_id AS team_id, m.enterprise_id AS enterprise_id, m.service_type AS service_type,
+        m.lead_id AS lead_id, m.meeting_id AS meeting_id, m.customer_id AS customer_id,
+        m.intent AS intent, m.meeting_start_time AS meeting_start, m.created_at AS booked_at,
+        JSONExtractString(ifNull(m.proposed_vins, ''), 1) AS tok
+    FROM dealer_leads.meetings AS m
+    JOIN eventila.enterprise_details ed FINAL ON ed.enterprise_id = m.enterprise_id
+    WHERE m.__deleted = 0 AND m.is_active = 1 AND m.source = 'spyne'
+      AND m.service_type IN ('sales','service')
+      AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
+      AND toDate(m.created_at) >= ${startFloor}
+      AND ed.is_test_account = 0 AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+      AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
+      AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
+      AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
+      ${teamPred("m.team_id", teamId)}
+),
+-- dealerVinId (UUID) → real VIN, bounded to only the ids these meetings reference.
+dvm AS (
+    SELECT dealerVinId, any(vin) AS vin
+    FROM inventory.dealerVinMapping
+    WHERE __deleted = 0 AND dealerVinId IN (SELECT tok FROM meet WHERE tok != '')
+    GROUP BY dealerVinId
+),
+-- VIN → make/model/year/trim, bounded to the VINs referenced directly OR via dvm.
+vm AS (
+    SELECT vin, any(make) AS make, any(model) AS model, any(year) AS year, any(trimLevel) AS trim
+    FROM inventory.vinMaster
+    WHERE __deleted = 0 AND (vin IN (SELECT tok FROM meet WHERE tok != '') OR vin IN (SELECT vin FROM dvm))
+    GROUP BY vin
+)
+SELECT
+    meet.team_id AS team_id,
+    any(meet.enterprise_id) AS enterprise_id,
+    any(meet.service_type) AS service_type,
+    any(meet.lead_id) AS lead_id,
+    meet.meeting_id AS meeting_id,
+    any(cu.name) AS customer_name,
+    any(cu.mobile_number) AS phone,
+    any(arrayStringConcat(arrayFilter(x -> x != '' AND x != '0', [
+        toString(coalesce(vm.year, vm2.year, 0)),
+        coalesce(vm.make, vm2.make, ''),
+        coalesce(vm.model, vm2.model, ''),
+        coalesce(vm.trim, vm2.trim, '')]), ' ')) AS vehicle,
+    any(meet.intent) AS intent,
+    any(meet.meeting_start) AS meeting_start,
+    any(meet.booked_at) AS booked_at
+FROM meet
+LEFT JOIN dealer_leads.customer AS cu FINAL ON cu.customer_id = meet.customer_id AND cu.__deleted = 0
+LEFT JOIN vm ON vm.vin = meet.tok
+LEFT JOIN dvm ON dvm.dealerVinId = meet.tok
+LEFT JOIN vm AS vm2 ON vm2.vin = dvm.vin
+GROUP BY meet.team_id, meet.meeting_id
+ORDER BY booked_at DESC
+SETTINGS join_use_nulls = 1`.trim();
+}

@@ -196,11 +196,23 @@ export async function fetchMeetings(opts: {
       // the listed rows align with the tile and an inbound agent never shows outbound's appointments.
       const set = new Set(leadIds);
       const seen = new Set<string>();
-      meetings = meetings
+      const scoped = meetings
         .filter((m) => m.leadId && set.has(m.leadId))
         .sort((a, b) => (a.when || "").localeCompare(b.when || ""))
         .filter((m) => (seen.has(m.leadId as string) ? false : (seen.add(m.leadId as string), true)));
-      total = leadIds.length; // authoritative — same agent_lead_days basis as the "Appointments booked" tile
+      if (scoped.length === 0 && bookedStartISO && bookedEndISO) {
+        // Self-heal: the tile counted booked leads, but none matched a live meeting record's leadId (the
+        // agent_lead_days lead_id and the meetings API leadId can diverge — rescheduled/re-keyed leads).
+        // Rather than show an empty list under a nonzero count (the daily digest's "no rows" bug), list
+        // the meetings actually BOOKED (createdAt) in the window, newest booking first.
+        meetings = meetings
+          .filter((m) => m.bookedAt && m.bookedAt >= bookedStartISO && m.bookedAt < bookedEndISO)
+          .sort((a, b) => (b.bookedAt || "").localeCompare(a.bookedAt || ""));
+        total = meetings.length || leadIds.length;
+      } else {
+        meetings = scoped;
+        total = leadIds.length; // authoritative — same agent_lead_days basis as the "Appointments booked" tile
+      }
     } else if (bookedStartISO && bookedEndISO) {
       // booked-in-period: keep meetings whose booking time falls in the window, newest booking first
       meetings = meetings

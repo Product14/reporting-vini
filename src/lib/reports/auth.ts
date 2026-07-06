@@ -86,7 +86,16 @@ export type AuthResult = { ok: true } | { ok: false; status: 401 | 403; error: s
  * no team scope is accepted. No credential at all → 401. */
 export function requireTeamAuth(request: Request, teamId: string): AuthResult {
   const cred = readBearer(request);
-  if (!cred) return { ok: false, status: 401, error: "authentication required" };
+  if (!cred) {
+    // LOCAL DEV bypass. The browser forwards NO credential locally — the host injects the dealer's
+    // Spyne token (as ?auth_key=) only in prod, and the read-API client omits it (see liveData.ts).
+    // Without this, every read route 401s under `next dev` and the report flips to the "on its way"
+    // gate. Allow the request in a non-production runtime only; downstream Spyne enrichment still uses
+    // the env SPYNE_API_TOKEN. Deployed envs (Vercel preview + prod) build with NODE_ENV=production, so
+    // this never applies there and the guard stays fully enforced against un-credentialed reads.
+    if (process.env.NODE_ENV !== "production") return { ok: true };
+    return { ok: false, status: 401, error: "authentication required" };
+  }
 
   // SERVICE path: shared cron secret (header bearer or ?key=). Trusted server caller — any team.
   const secret = process.env.CRON_SECRET;
