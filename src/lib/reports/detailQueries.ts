@@ -28,9 +28,24 @@ const teamPred = (col: string, teamId?: string): string =>
 // 'general engagement' — a generic "they replied" signal that isn't a warm lead and would otherwise
 // dominate the count (e.g. Covina Kia: 382 of 420). Booked / opt-out / no-reach / lost are their own
 // buckets, not warm. Compared against lower(trimBoth(outcome)).
-const WARM_LEAD_OUTCOMES = [
+// Tiered for the named "Work these now" list: hot = a concrete buying signal on the record; warm =
+// engaged, nurture. INVARIANT: hot ∪ warm must equal WARM_LEAD_OUTCOMES exactly, or the campaigns /
+// outcomes cards drift from the warm-leads card.
+const HOT_TIER_OUTCOMES = [
   "purchase intent", "vehicle inquiry", "pricing inquiry", "financing inquiry", "trade inquiry",
-  "customer considering", "customer open to return", "reconnect needed", "ancillary inquiry",
+  "ancillary inquiry",
+];
+const WARM_TIER_OUTCOMES = ["customer considering", "customer open to return", "reconnect needed"];
+const WARM_LEAD_OUTCOMES = [...HOT_TIER_OUTCOMES, ...WARM_TIER_OUTCOMES];
+// Mirror of agentBaseFact.sql `sms_buying_intent_actions` — the canonical concrete-buying-intent
+// action-item vocab (vehicle / availability / price / financing / trade-in / test-drive / booking).
+// The spine's copy is the source of truth; keep in lockstep.
+const BUYING_INTENT_ACTIONS = [
+  "ScheduleAppointment", "RescheduleAppointment", "SALES_SCHEDULE_SHOWROOM_VISIT",
+  "CheckVehicleAvailability", "CheckVehiclePrice", "InquireFinanceStatus",
+  "SALES_CONNECT_TO_FINANCE", "InquireTradeInValue", "SALES_TRADE_IN_FOLLOW_UP",
+  "ScheduleTestDrive", "SALES_SCHEDULE_TEST_DRIVE", "InquireLeaseOptions",
+  "SALES_FOLLOW_UP_WITH_QUOTE", "SERVICE_SCHEDULE_APPOINTMENT", "SERVICE_SEND_ESTIMATE",
 ];
 const sqlList = (xs: string[]): string => xs.map((s) => `'${esc(s)}'`).join(",");
 
@@ -232,6 +247,90 @@ ORDER BY ai.due_date ASC
 SETTINGS join_use_nulls = 1`.trim();
 }
 
+export interface WarmLeadsOpts {
+  teamId?: string;
+  startFloor?: string; // ClickHouse date expr; floors the actionItems/meetings scans. Default -45d.
+}
+
+// Named warm leads → report_warm_leads ("Work these now"). Two sources, one row per lead:
+//   • OB: campaignLeadMappings outcome ∈ WARM_LEAD_OUTCOMES (the same buying-signal list the campaigns
+//     card + outcomes "Warm" bucket use), tiered hot/warm by HOT_TIER_OUTCOMES.
+//   • IB: a windowed concrete buying-intent action item (BUYING_INTENT_ACTIONS — the canonical
+//     qualification vocab), always 'hot'. Narrower than spine-qualified (no IRA-only call matches) but
+//     the operationally right "call these now" list; never summed into a KPI.
+// Leads with ANY meeting in the trailing window (AI or CRM) are excluded — booked ≠ "work now".
+// Bounded: actionItems + meetings floored by ${startFloor}; campaignLeadMappings is mapping-grain (same
+// scan outcomesSql already does); customer joined per-lead. LIMIT 50 BY team caps table size.
+export function warmLeadsSql({ teamId, startFloor = "addDays(today(), -45)" }: WarmLeadsOpts = {}): string {
+  return `
+WITH eligible_leads AS (
+    SELECT DISTINCT l.lead_id AS lead_id, l.team_id AS team_id, l.customer_id AS customer_id,
+                    l.service_type AS service_type
+    FROM dealer_leads.leads AS l FINAL
+    JOIN eventila.enterprise_details ed FINAL ON l.enterprise_id = ed.enterprise_id
+    WHERE l.is_deleted = 0 AND l.__deleted = 0
+      AND l.service_type IN ('sales','service')
+      AND ed.is_test_account = 0 AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+      AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
+      AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
+      AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
+      ${teamPred("l.team_id", teamId)}
+),
+booked_leads AS (
+    SELECT DISTINCT m.lead_id AS lead_id
+    FROM dealer_leads.meetings AS m FINAL
+    WHERE m.__deleted = 0 AND m.is_active = 1
+      AND toDate(m.created_at) >= ${startFloor}
+      ${teamPred("m.team_id", teamId)}
+),
+ob_warm AS (
+    SELECT el.team_id AS team_id, 'ob' AS source, el.service_type AS service_type,
+           clm.leadId AS lead_id,
+           any(cm.name) AS campaign,
+           any(lower(trimBoth(clm.outcome))) AS outcome,
+           max(clm.updatedAt) AS last_activity
+    FROM dealer_leads.campaignLeadMappings AS clm FINAL
+    JOIN eligible_leads el ON el.lead_id = clm.leadId AND el.team_id = clm.teamId
+    LEFT JOIN dealer_leads.campaigns AS cm FINAL ON cm.campaignId = clm.campaignId AND cm.__deleted = 0
+    WHERE clm.__deleted = 0
+      AND lower(trimBoth(clm.outcome)) IN (${sqlList(WARM_LEAD_OUTCOMES)})
+      AND clm.leadId NOT IN (SELECT lead_id FROM booked_leads)
+    GROUP BY el.team_id, el.service_type, clm.leadId
+),
+ib_warm AS (
+    SELECT el.team_id AS team_id, 'ib' AS source, el.service_type AS service_type,
+           ai.lead_id AS lead_id, '' AS campaign,
+           any(ai.intent) AS outcome,
+           max(ai.createdAt) AS last_activity
+    FROM dealer_leads.actionItems AS ai FINAL
+    JOIN eligible_leads el ON el.lead_id = ai.lead_id AND el.team_id = ai.team_id
+    WHERE ai.__deleted = 0
+      AND ifNull(ai.intent,'') IN (${sqlList(BUYING_INTENT_ACTIONS)})
+      AND toDate(ai.createdAt) >= ${startFloor}
+      AND ai.lead_id NOT IN (SELECT lead_id FROM booked_leads)
+      AND ai.lead_id NOT IN (SELECT lead_id FROM ob_warm)
+    GROUP BY el.team_id, el.service_type, ai.lead_id
+)
+SELECT
+    w.team_id AS team_id,
+    w.source AS source,
+    w.service_type AS service_type,
+    w.lead_id AS lead_id,
+    if(w.source = 'ob' AND w.outcome IN (${sqlList(WARM_TIER_OUTCOMES)}), 'warm', 'hot') AS tier,
+    any(cu.name) AS customer_name,
+    any(cu.mobile_number) AS phone,
+    w.campaign AS campaign,
+    w.outcome AS outcome,
+    w.last_activity AS last_activity
+FROM (SELECT * FROM ob_warm UNION ALL SELECT * FROM ib_warm) AS w
+JOIN eligible_leads el2 ON el2.lead_id = w.lead_id AND el2.team_id = w.team_id
+LEFT JOIN dealer_leads.customer AS cu FINAL ON cu.customer_id = el2.customer_id AND cu.__deleted = 0
+GROUP BY w.team_id, w.source, w.service_type, w.lead_id, w.campaign, w.outcome, w.last_activity, tier
+ORDER BY team_id, tier ASC, last_activity DESC
+LIMIT 50 BY team_id
+SETTINGS join_use_nulls = 1`.trim();
+}
+
 export interface AppointmentsOpts {
   teamId?: string;
   startFloor?: string; // ClickHouse date expr; floors the meetings scan (booked_at). Default -120d.
@@ -249,15 +348,28 @@ export interface AppointmentsOpts {
 // by ${startFloor} so a full run stays bounded (covers the daily window + the 30d top-vehicles window).
 export function appointmentsSql({ teamId, startFloor = "addDays(today(), -120)" }: AppointmentsOpts = {}): string {
   return `
-WITH meet AS (
+WITH ob_enrolled AS (
+    -- outbound-campaign enrollment: the canonical AI-assisted gate (a CRM meeting only counts as
+    -- assisted on a lead the AI worked; enrollment + the \`worked\` AI-touch check below mirror the
+    -- spine's appointment_assisted rule at snapshot grain).
+    SELECT DISTINCT clm.leadId AS lead_id
+    FROM dealer_leads.campaignLeadMappings AS clm FINAL
+    WHERE clm.__deleted = 0
+      ${teamPred("clm.teamId", teamId)}
+),
+meet AS (
     SELECT
         m.team_id AS team_id, m.enterprise_id AS enterprise_id, m.service_type AS service_type,
         m.lead_id AS lead_id, m.meeting_id AS meeting_id, m.customer_id AS customer_id,
+        m.conversation_id AS conversation_id, m.call_id AS call_id,
         m.intent AS intent, m.meeting_start_time AS meeting_start, m.created_at AS booked_at,
+        m.status AS status,
+        if(ifNull(m.source,'') = 'spyne', 0, 1) AS assisted,
         JSONExtractString(ifNull(m.proposed_vins, ''), 1) AS tok
     FROM dealer_leads.meetings AS m
     JOIN eventila.enterprise_details ed FINAL ON ed.enterprise_id = m.enterprise_id
-    WHERE m.__deleted = 0 AND m.is_active = 1 AND m.source = 'spyne'
+    WHERE m.__deleted = 0 AND m.is_active = 1
+      AND (m.source = 'spyne' OR m.lead_id IN (SELECT lead_id FROM ob_enrolled))
       AND m.service_type IN ('sales','service')
       AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
       AND toDate(m.created_at) >= ${startFloor}
@@ -266,6 +378,31 @@ WITH meet AS (
       AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
       ${teamPred("m.team_id", teamId)}
+),
+-- agent-worked = ≥1 AI call/SMS touch (trailing window). Keyed to only the assisted meetings' leads
+-- so the conversations scan stays bounded.
+worked AS (
+    SELECT DISTINCT c.leadId AS lead_id
+    FROM dealer_leads.conversations AS c FINAL
+    WHERE c.__deleted = 0 AND ifNull(c.isTest, 0) = 0 AND c.status != 'failed'
+      AND lower(c.type) IN ('sms','call')
+      AND toDate(c.createdAt) >= ${startFloor}
+      AND c.leadId IN (SELECT lead_id FROM meet WHERE assisted = 1)
+),
+-- channel of the AI booking conversation (AI-booked rows only; CRM meetings carry no direction).
+conv_dir AS (
+    SELECT c.conversationId AS conv_id, c.callId AS call_id,
+           any(lower(c.type)) AS conv_type,
+           any(lower(at.agentCallType)) AS direction
+    FROM dealer_leads.conversations AS c FINAL
+    LEFT JOIN dealer_leads.teamAgentMappings AS tam FINAL
+        ON c.teamAgentMappingId = tam.teamAgentMappingId AND tam.__deleted = 0
+    LEFT JOIN dealer_leads.agentTypes AS at FINAL
+        ON tam.agentTypeId = at.agentTypeId AND at.__deleted = 0
+    WHERE c.__deleted = 0
+      AND (c.conversationId IN (SELECT conversation_id FROM meet WHERE assisted = 0)
+           OR c.callId      IN (SELECT call_id        FROM meet WHERE assisted = 0))
+    GROUP BY c.conversationId, c.callId
 ),
 -- dealerVinId (UUID) → real VIN, bounded to only the ids these meetings reference.
 dvm AS (
@@ -296,13 +433,20 @@ SELECT
         coalesce(vm.trim, vm2.trim, '')]), ' ')) AS vehicle,
     any(meet.intent) AS intent,
     any(meet.meeting_start) AS meeting_start,
-    any(meet.booked_at) AS booked_at
+    any(meet.booked_at) AS booked_at,
+    any(meet.status) AS status,
+    meet.assisted AS assisted,
+    any(if(meet.assisted = 1, NULL, coalesce(cd1.direction, cd2.direction))) AS direction,
+    any(if(meet.assisted = 1, NULL, coalesce(cd1.conv_type, cd2.conv_type))) AS booked_via
 FROM meet
 LEFT JOIN dealer_leads.customer AS cu FINAL ON cu.customer_id = meet.customer_id AND cu.__deleted = 0
 LEFT JOIN vm ON vm.vin = meet.tok
 LEFT JOIN dvm ON dvm.dealerVinId = meet.tok
 LEFT JOIN vm AS vm2 ON vm2.vin = dvm.vin
-GROUP BY meet.team_id, meet.meeting_id
+LEFT JOIN conv_dir AS cd1 ON cd1.conv_id = meet.conversation_id
+LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id
+WHERE meet.assisted = 0 OR meet.lead_id IN (SELECT lead_id FROM worked)
+GROUP BY meet.team_id, meet.meeting_id, meet.assisted
 ORDER BY booked_at DESC
 SETTINGS join_use_nulls = 1`.trim();
 }

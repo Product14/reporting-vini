@@ -20,16 +20,13 @@ import {
   DateFilter,
   DeltaPill,
   fmtInt,
-  fmtMoneyFull,
   GhostPreview,
   HOUR_LABELS,
   DayTrend,
   MeetingsModal,
   ProgressBar,
-  QueryBars,
   RAG_STYLE,
   ReportTopBar,
-  Sankey,
   SectionLabel,
   SplitBar,
   StepList,
@@ -37,14 +34,12 @@ import {
   Th,
   TrendBars,
 } from "@/components/reports/kit";
+import { fmtRate, IntentOutcomeTable, NamedApptsTable, RankedOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, hasAgentActivity, addDay, peekAgents, tzShortLabel, valueForAgent, apptValueForId, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
+import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, hasAgentActivity, addDay, peekAgents, tzShortLabel, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
 import { useDateRange, reportNavQuery } from "@/components/reports/dateRange";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { track } from "@/lib/analytics";
-
-// Palette for the outbound-outcomes SplitBar — outcomes are ranked by volume, so colors are positional.
-const OUTCOME_COLORS = ["#6366f1", "#813fed", "#10b981", "#f59e0b", "#0ea5e9", "#94a3b8", "#ef4444", "#14b8a6"];
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
 const MISSED_LABELS: Record<string, string> = {
@@ -191,16 +186,12 @@ function AgentReportsView() {
   const m = a.metrics;
   const r = a.report;
   const inbound = a.dir === "Inbound";
-  const hasStory = !!(r.benchmarks && r.compare); // story-first treatment for every agent that has it
   const live = view.hasData; // recently_live + repeat render the real report
 
-  // Live data from Metabase is already a window total for the selected bucket (liveData re-queries
-  // per bucket), so it must not be re-scaled — factor=1 when live, 0 in the pre-live ghost states.
+  // Live data is already a window total for the selected bucket (liveData re-queries per bucket),
+  // so it must not be re-scaled — factor=1 when live, 0 in the pre-live ghost states.
   const factor = live ? 1 : 0;
   const scale = (n: number) => Math.round(n * factor);
-  // Show the $ "value created" whenever this agent has booked appointments to value — each carries a
-  // fixed per-category dollar value (whiteboard spec), so it's a real delivered-value figure.
-  const showDollarValue = scale(m.appointments) > 0;
   const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
@@ -227,55 +218,14 @@ function AgentReportsView() {
   // have a busy SMS/lead day with zero calls, and a calls-only check wrongly hid it as "no activity"
   // while the overview counted its leads. Both render the NoActivity widen-prompt rather than zeros.
   const agentEmpty = hasTeam && feed !== null && (feedEmpty || (live && !hasAgentActivity(a)));
-  // "Turn rate" = qualified / connected. Use the CENTRAL value (build.ts report.qualifiedPct, computed
-  // on the unique-lead basis) rather than recomputing inline — keeps it identical to the funnel's
-  // qualified→connected step and de-duplicated (was an inline qualified-events / connected-events ratio).
-  const turnRate = r.qualifiedPct;
+  // Unique-lead stage values (same basis everywhere on the page); event-count fallback when
+  // leadFunnel is absent (mock/no-backend).
+  const leadConnected = a.leadFunnel?.connected ?? m.conversations;
+  const leadQualified = a.leadFunnel?.qualified ?? m.qualified;
   // Warm leads (outbound) — total across the agent's active campaigns (campaignLeadMappings outcomes
   // that signal intent/engagement, summed in report_campaigns). Rooftop-wide, like the campaigns table,
   // so it is NOT window-scaled. Shown as a headline activity stat + above the campaigns table.
   const warmLeadsTotal = !inbound ? (r.activeCampaigns ?? []).reduce((s, c) => s + (c.warmLeads || 0), 0) : 0;
-
-  // Lead journey (Sankey) — UNIQUE LEADS at each stage (same basis as the funnel above), so "Connected"
-  // and "Qualified" mean the same thing everywhere on the page. Falls back to event metrics when
-  // leadFunnel is absent (mock/no-backend). Flow conserves end-to-end via min/max.
-  const sankey = useMemo(() => {
-    const total = scale(a.leadFunnel?.contacted ?? r.leadsAttempted);
-    const connected = Math.min(total, scale(a.leadFunnel?.connected ?? m.conversations));
-    const noConvo = Math.max(0, total - connected);
-    const qualified = Math.min(connected, scale(a.leadFunnel?.qualified ?? m.qualified));
-    const notQualified = Math.max(0, connected - qualified);
-    const booked = Math.min(qualified, scale(a.leadFunnel?.appt ?? m.appointments));
-    const nurture = Math.max(0, qualified - booked);
-    const columns = [
-      // canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) · "Real conversations" · "Qualified leads".
-      [{ id: "total", label: inbound ? "Leads reached" : "Leads dialed", color: "#813fed" }],
-      [
-        { id: "connected", label: "Real conversations", color: "#6366f1" },
-        { id: "missed", label: "No conversation", color: "#dc2626" },
-      ],
-      [
-        { id: "qualified", label: "Qualified leads", color: "#10b981" },
-        { id: "notq", label: "Not qualified", color: "#9ca3af" },
-      ],
-      [
-        { id: "booked", label: "Booked", color: "#10b981" },
-        { id: "nurture", label: "Nurture", color: "#f59e0b" },
-        { id: "lost", label: "Lost / no intent", color: "#9ca3af" },
-      ],
-    ];
-    const links = [
-      { from: "total", to: "connected", value: connected },
-      { from: "total", to: "missed", value: noConvo },
-      { from: "connected", to: "qualified", value: qualified },
-      { from: "connected", to: "notq", value: notQualified },
-      { from: "qualified", to: "booked", value: booked },
-      { from: "qualified", to: "nurture", value: nurture },
-      { from: "notq", to: "lost", value: notQualified },
-    ];
-    return { columns, links };
-    // depend on `a` (not a.id) so the flow recomputes when the feed refreshes with new lead counts
-  }, [a, factor, inbound]);
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -410,91 +360,65 @@ function AgentReportsView() {
             />
           )}
 
-          {/* ── value created (live) → industry benchmarks & before/after (no card yet) ── */}
-          {hasStory && (
-            <>
-              {/* value created — cost per appointment is set once in a modal, editable here */}
-              <section className="rounded-3xl border border-[#cdeede] bg-gradient-to-r from-[#f0fdf6] to-white shadow-sm px-7 py-6">
-                {showDollarValue ? (
-                  <div className="flex flex-wrap items-center justify-between gap-x-10 gap-y-4">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#059669]">
-                          Value created · {periodLabel}
-                        </p>
-                        {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
-                      </div>
-                      <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">
-                        {fmtMoneyFull(valueForAgent(a.id, scale(m.appointments)))}
-                      </p>
-                      <p className="mt-2 text-[12px] text-[#6b7280]">
-                        {canDrill ? (
-                          <button
-                            onClick={openApptDrill}
-                            className="font-bold text-[#059669] underline decoration-dotted underline-offset-2 hover:decoration-solid"
-                            title="See the appointments behind this number"
-                          >
-                            {fmtInt(scale(m.appointments))} appointments
-                          </button>
-                        ) : (
-                          <b className="text-[#111]">{fmtInt(scale(m.appointments))} appointments</b>
-                        )}{" "}
-                        ×{" "}
-                        <b className="text-[#111]">{fmtMoneyFull(apptValueForId(a.id))}</b> per appointment
-                      </p>
-                    </div>
-                    <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Value / appointment</p>
-                      <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{fmtMoneyFull(apptValueForId(a.id))}</p>
-                    </div>
-                  </div>
+          {/* ── headline: Appointments — AI-booked (PRIMARY) + AI-assisted (SECONDARY, never folded in) ── */}
+          <section className="rounded-3xl border border-[#cdeede] bg-gradient-to-r from-[#f0fdf6] to-white shadow-sm px-7 py-6">
+            <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  {/* canonical wording: PRIMARY headline = "Appointments — AI-booked" */}
+                  <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#059669]">
+                    Appointments — AI-booked · {periodLabel}
+                  </p>
+                  {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
+                </div>
+                {canDrill ? (
+                  <button
+                    onClick={openApptDrill}
+                    className="group/appt mt-1 block text-left"
+                    title="See the appointments behind this number"
+                  >
+                    <span className="text-[42px] font-extrabold tabular-nums leading-none text-[#059669] underline decoration-dotted decoration-[#059669]/40 underline-offset-[6px] group-hover/appt:decoration-[#059669]">
+                      {fmtInt(scale(m.appointments))}
+                    </span>
+                    <span className="ml-2 align-middle text-[11px] font-semibold text-[#059669]">view leads ↗</span>
+                  </button>
                 ) : (
-                  <div>
-                    <div className="flex items-center gap-2">
-                      {/* canonical wording: PRIMARY headline = "Appointments — AI-booked" */}
-                      <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#059669]">
-                        Appointments — AI-booked · {periodLabel}
-                      </p>
-                      {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
-                    </div>
-                    {canDrill ? (
-                      <button
-                        onClick={openApptDrill}
-                        className="group/appt mt-1 block text-left"
-                        title="See the appointments behind this number"
-                      >
-                        <span className="text-[42px] font-extrabold tabular-nums leading-none text-[#059669] underline decoration-dotted decoration-[#059669]/40 underline-offset-[6px] group-hover/appt:decoration-[#059669]">
-                          {fmtInt(scale(m.appointments))}
-                        </span>
-                        <span className="ml-2 align-middle text-[11px] font-semibold text-[#059669]">view leads ↗</span>
-                      </button>
-                    ) : (
-                      <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">{fmtInt(scale(m.appointments))}</p>
-                    )}
-                    {/* canonical: AI-assisted (CRM) = SECONDARY metric, shown smaller/muted, NEVER added
-                        into the AI-booked headline above. Hidden when zero. */}
-                    {scale(m.appointmentsAssisted ?? 0) > 0 && (
-                      <p className="mt-1 text-[12px] font-semibold text-[#9ca3af]">
-                        +{fmtInt(scale(m.appointmentsAssisted ?? 0))} AI-assisted (CRM)
-                      </p>
-                    )}
-                    <p className="mt-2 max-w-[520px] text-[12px] text-[#6b7280]">
-                      From <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.connected ?? m.conversations))}</b> real conversations · <b className="text-[#111]">{fmtInt(scale(a.leadFunnel?.qualified ?? m.qualified))}</b> qualified leads. Dollar value appears once revenue tracking is on.
-                    </p>
-                  </div>
+                  <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">{fmtInt(scale(m.appointments))}</p>
                 )}
-              </section>
+                {/* canonical: AI-assisted (CRM) = SECONDARY metric, shown smaller/muted, NEVER added
+                    into the AI-booked headline above. Hidden when zero. */}
+                {scale(m.appointmentsAssisted ?? 0) > 0 && (
+                  <p className="mt-1 text-[12px] font-semibold text-[#9ca3af]">
+                    +{fmtInt(scale(m.appointmentsAssisted ?? 0))} AI-assisted (CRM) — booked in your CRM on leads this agent worked
+                  </p>
+                )}
+                <p className="mt-2 max-w-[520px] text-[12px] text-[#6b7280]">
+                  From <b className="text-[#111]">{fmtInt(scale(leadConnected))}</b> real conversations · <b className="text-[#111]">{fmtInt(scale(leadQualified))}</b> qualified leads.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Turn rate</p>
+                  <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{fmtRate(scale(leadQualified), scale(leadConnected))}</p>
+                  <p className="text-[9.5px] text-[#9ca3af]">qualified ÷ conversations</p>
+                </div>
+                <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
+                  <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#059669]">{fmtRate(scale(m.appointments), scale(leadQualified))}</p>
+                  <p className="text-[9.5px] text-[#9ca3af]">AI-booked ÷ qualified</p>
+                </div>
+              </div>
+            </div>
+          </section>
 
-              <button
-                onClick={() => { const next = !showDetail; setShowDetail(next); track("agent_detail_toggled", { team_id: teamId, agent: a.id, shown: next }); }}
-                className="mx-auto mt-1 rounded-lg border border-[#e5e7eb] bg-white px-4 py-2 text-[12px] font-semibold text-[#6b7280] hover:bg-[#faf8ff] hover:text-[#813fed] transition-colors"
-              >
-                {showDetail ? "Hide detailed metrics ▴" : "Show detailed metrics ▾"}
-              </button>
-            </>
-          )}
+          <button
+            onClick={() => { const next = !showDetail; setShowDetail(next); track("agent_detail_toggled", { team_id: teamId, agent: a.id, shown: next }); }}
+            className="mx-auto mt-1 rounded-lg border border-[#e5e7eb] bg-white px-4 py-2 text-[12px] font-semibold text-[#6b7280] hover:bg-[#faf8ff] hover:text-[#813fed] transition-colors"
+          >
+            {showDetail ? "Hide detailed metrics ▴" : "Show detailed metrics ▾"}
+          </button>
 
-          {(!hasStory || showDetail) && (
+          {showDetail && (
           <>
           <SectionLabel hint={periodLabel}>Performance</SectionLabel>
 
@@ -514,11 +438,12 @@ function AgentReportsView() {
               </div>
               <div className="flex items-center gap-2.5 rounded-xl bg-white px-4 py-2 shadow-sm ring-1 ring-[#ece6fb]">
                 <div className="text-right leading-tight">
-                  {/* canonical wording: appts ÷ qualified is the "Close rate" (was "Booking rate"). */}
+                  {/* canonical wording: appts ÷ qualified is the "Close rate" (was "Booking rate").
+                      Fraction (never a rounded "0%") when the numerator is real but rounds to zero. */}
                   <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
                   <DeltaPill delta={r.deltas.abr} />
                 </div>
-                <p className="text-[28px] font-extrabold tabular-nums leading-none text-[#813fed]">{r.abr}%</p>
+                <p className="text-[28px] font-extrabold tabular-nums leading-none text-[#813fed]">{fmtRate(scale(m.appointments), scale(leadQualified))}</p>
               </div>
             </div>
 
@@ -544,8 +469,8 @@ function AgentReportsView() {
             <div className={`grid ${inbound ? "grid-cols-3" : "grid-cols-2 sm:grid-cols-4"} divide-x divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd]`}>
               <ActivityStat label={inbound ? "Total calls" : "Calls dispatched"} value={fmtInt(scale(m.calls))} hint={`${fmtInt(scale(m.talkMinutes))} mins talk`} delta={r.deltas.totalCalls} />
               <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} delta={r.deltas.totalSms} />
-              <ActivityStat label="Turn rate" value={`${turnRate}%`} hint="qualified / connected" />
-              {!inbound && <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="engaged across campaigns" />}
+              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint="qualified / conversations" />
+              {!inbound && <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="buying intent across campaigns" />}
             </div>
 
             {/* tertiary: call breakdown — only the buckets we can derive from live volume */}
@@ -555,14 +480,16 @@ function AgentReportsView() {
                 {[
                   { label: "During hours", value: Math.max(0, m.calls - m.afterHours) },
                   { label: "After hours", value: m.afterHours },
-                  // Conversations/Qualified are UNIQUE LEADS (same basis as the funnel + Sankey) so each label
+                  // Conversations/Qualified are UNIQUE LEADS (same basis as the funnel) so each label
                   // reads one consistent number across the page; the other tiles stay call-activity counts.
-                  { label: "Real conversations", value: a.leadFunnel?.connected ?? m.conversations },
-                  { label: "Qualified leads", value: a.leadFunnel?.qualified ?? m.qualified },
+                  { label: "Real conversations", value: leadConnected },
+                  { label: "Qualified leads", value: leadQualified },
                   // Transferred / Callbacks are an inbound concept — outbound agents (Sales/Service OB) don't show them.
+                  // canonical: failed transfers reported SEPARATELY, never folded into "Transferred".
                   ...(inbound
                     ? [
                         { label: "Transferred", value: r.callFlow.transferred },
+                        ...((r.callFlow.transfersFailed ?? 0) > 0 ? [{ label: "Transfers failed", value: r.callFlow.transfersFailed ?? 0 }] : []),
                         { label: "Callbacks", value: r.callFlow.callbacks ?? 0 },
                       ]
                     : []),
@@ -581,29 +508,18 @@ function AgentReportsView() {
             <DayTrend points={r.dayOnDay} />
           </Card>
 
-          <SectionLabel hint={`${r.qualifiedPct}% qualified`}>Conversations &amp; outcomes</SectionLabel>
-
-          {/* lead journey — Sankey centerpiece (unique leads, same basis as the funnel) */}
-          <Card
-            title="Lead journey"
-            sub="How unique leads move: reached → connected → qualified → booked. Ribbon width = leads."
-          >
-            <Sankey columns={sankey.columns} links={sankey.links} height={300} fmt={(n) => fmtInt(n)} />
-          </Card>
-
-          {/* query resolution + top objections */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <Card title="Query resolution rate" sub="Share of each topic the agent resolved without a human">
-              {r.queries.length ? (
-                <QueryBars topics={r.queries} />
-              ) : (
-                <ComingSoon title="Resolution by topic" note="How often the agent resolves each topic without a human — appears once there's tagged conversation activity in the window." />
-              )}
-            </Card>
-            <Card title="Top objections" sub="What the agent heard most">
-              <ComingSoon title="Objections, ranked by how often they come up" note="The concerns customers raise most on calls — price, timing, trade-in value — so your team can prepare for them and sharpen its talk tracks." />
-            </Card>
-          </div>
+          {/* ── conversations & outcomes ── */}
+          {inbound && (r.intentOutcomes?.length ?? 0) > 0 && (
+            <>
+              <SectionLabel hint="call conversations · totals tie to the funnel">Conversations &amp; outcomes</SectionLabel>
+              <Card
+                title="What customers wanted & how it was handled"
+                sub="Per intent: tagged call conversations, how many were resolved by the agent, and the hand-offs"
+              >
+                <IntentOutcomeTable rows={r.intentOutcomes!} />
+              </Card>
+            </>
+          )}
 
           <SectionLabel>{inbound ? "Inbound operations" : "Outbound campaigns"}</SectionLabel>
 
@@ -634,13 +550,9 @@ function AgentReportsView() {
                   </table>
                 </Card>
               </div>
-              {(a.id === "sales_ib" || a.id === "service_ib") && (
+              {a.id === "sales_ib" && (
                 <Card title="Speed to lead" sub="How fast new CRM leads get a first touch">
-                  {a.id === "service_ib" ? (
-                    // STL is live for Sales Inbound only right now (card 12341 is Sales-IB scoped); show
-                    // a coming-soon state for Service Inbound until a service-side funnel exists.
-                    <EmptyState icon="⏱️" title="Coming soon" body="Speed-to-lead tracking isn't live for the service inbound agent yet — it'll appear here once enabled." />
-                  ) : r.speedToLead && r.speedToLead.medianUnderMin ? (
+                  {r.speedToLead && r.speedToLead.medianUnderMin ? (
                     <div className="flex flex-col gap-4">
                       <div>
                         <p className="text-[30px] font-extrabold tabular-nums text-[#813fed] leading-none">{r.speedToLead.avg}</p>
@@ -694,11 +606,9 @@ function AgentReportsView() {
                   )}
                 </Card>
               </div>
-              <Card title="Outbound outcomes" sub="How outbound conversations ended">
+              <Card title="Outbound outcomes" sub="Where every worked lead stands — best outcome first">
                 {r.outcomes?.length ? (
-                  <SplitBar
-                    segments={r.outcomes.map((o, i) => ({ label: o.label, value: o.value, color: OUTCOME_COLORS[i % OUTCOME_COLORS.length] }))}
-                  />
+                  <OutcomesTableTracked slices={r.outcomes} teamId={teamId} agent={a.id} />
                 ) : (
                   <EmptyState icon="📊" title="No outbound activity yet" body="The outbound outcome breakdown appears once this rooftop starts outbound calling." />
                 )}
@@ -706,20 +616,32 @@ function AgentReportsView() {
             </div>
           )}
 
+          {/* ── named appointments + warm leads for THIS agent ── */}
+          {((r.namedAppointments?.length ?? 0) > 0 || (r.warmLeads?.length ?? 0) > 0) && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              {(r.namedAppointments?.length ?? 0) > 0 && (
+                <Card title="Appointments — named" sub={`${periodLabel} · AI-booked and AI-assisted (CRM), by customer`}>
+                  <NamedApptsTable items={r.namedAppointments!} teamId={teamId} />
+                </Card>
+              )}
+              {(r.warmLeads?.length ?? 0) > 0 && (
+                <Card title="Hot & warm leads — work these now" sub="Buying intent on record, no appointment yet">
+                  <WarmLeadChips items={r.warmLeads!} teamId={teamId} maxHot={10} maxWarm={8} />
+                </Card>
+              )}
+            </div>
+          )}
+
           {/* multi-day reply effectiveness + channel mix */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <Card title="Multi-day reply effectiveness" sub="When replies land, relative to the first touch">
-              {r.multiDayReply.length ? (
-                <>
-                  <TrendBars values={r.multiDayReply.map((d) => d.pct)} labels={r.multiDayReply.map((d) => d.day)} height={96} />
-                  <p className="mt-3 text-[11px] text-[#6b7280]">
-                    {r.multiDayReply[0].pct}% of replies arrive the same day — the rest justify the multi-day cadence.
-                  </p>
-                </>
-              ) : (
-                <ComingSoon title="Reply timing" note="When replies land relative to the first touch — appears once this agent has SMS reply activity in the window." />
-              )}
-            </Card>
+            {r.multiDayReply.length > 0 && (
+              <Card title="Multi-day reply effectiveness" sub="When replies land, relative to the first touch">
+                <TrendBars values={r.multiDayReply.map((d) => d.pct)} labels={r.multiDayReply.map((d) => d.day)} height={96} />
+                <p className="mt-3 text-[11px] text-[#6b7280]">
+                  {r.multiDayReply[0].pct}% of replies arrive the same day — the rest justify the multi-day cadence.
+                </p>
+              </Card>
+            )}
             <Card title="Channel mix" sub="Share of contacts by channel">
               <SplitBar
                 segments={[
@@ -741,22 +663,18 @@ function AgentReportsView() {
 
           <SectionLabel>Quality &amp; trend</SectionLabel>
 
-          {/* quality health — full width (the flow funnel lives in the Sankey above) */}
+          {/* quality health — only the live-backed cells; nothing fabricated, no placeholders */}
           <Card title="Conversation quality" sub="From live calls — the metrics we can measure today">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} />
               <QCell label="Avg handle time" value={a.quality.handleTime} />
               <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
-              <ComingSoon title="CSAT" inline />
-              <ComingSoon title="Positive sentiment" inline />
-              {metrics?.transfer_quality?.success_rate != null && a.quality.fourthLabel.toLowerCase().includes("transfer") ? (
+              {metrics?.transfer_quality?.success_rate != null && a.quality.fourthLabel.toLowerCase().includes("transfer") && (
                 <QCell
                   label={a.quality.fourthLabel}
                   value={`${Math.round(metrics.transfer_quality.success_rate * 100)}%`}
                   status={metrics.transfer_quality.success_rate >= 0.8 ? "green" : metrics.transfer_quality.success_rate >= 0.6 ? "amber" : "red"}
                 />
-              ) : (
-                <ComingSoon title={a.quality.fourthLabel} inline />
               )}
             </div>
           </Card>
@@ -771,9 +689,10 @@ function AgentReportsView() {
             </Card>
           </div>
 
-          {/* highlights & missed — rooftop-level, from ClickHouse via /api/reports/metrics */}
+          {/* highlights & missed — rooftop-level, from ClickHouse via /api/reports/metrics; renders
+              only when the snapshot has rows (no placeholder). */}
+          {metrics && (metrics.highlights.length > 0 || metrics.missed.length > 0) && (
           <Card title="Highlights & missed opportunities" sub="Standout moments worth a closer look" pad={false}>
-            {metrics && (metrics.highlights.length > 0 || metrics.missed.length > 0) ? (
               <div className="grid grid-cols-1 sm:grid-cols-2">
                 <div className="px-6 py-5 sm:border-r sm:border-[#f0f0f0]">
                   <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#059669]">Wins · best booked calls</p>
@@ -808,46 +727,38 @@ function AgentReportsView() {
                   )}
                 </div>
               </div>
-            ) : (
-              <div className="px-6 py-5">
-                <ComingSoon title="Your wins — and the ones that got away" note="The best moments the agent caught, plus the deals worth a second look, gathered in one place so you can act on them quickly." />
-              </div>
-            )}
           </Card>
+          )}
 
-          {/* activity (inbound — calls by reason; outbound campaigns covered above) */}
+          {/* activity (inbound — calls by reason; outbound campaigns covered above). Renders only when
+              the snapshot has rows — no placeholder. */}
           {inbound && (() => {
             const reasons = (metrics?.calls_by_reason ?? [])
               .filter((rr) => (rr.direction ?? "") === "inbound" && rr.reason && rr.reason !== "Unknown")
               .sort((x, y) => y.calls - x.calls);
+            if (!reasons.length) return null;
             return (
               <Card title={a.activityTitle} sub={periodLabel} pad={false}>
-                {reasons.length ? (
-                  <table className="w-full">
-                    <thead className="bg-[#fafafa]">
-                      <tr>
-                        <Th align="left">Reason</Th>
-                        <Th align="right">Calls</Th>
-                        <Th align="right">Booked</Th>
-                        <Th align="right">Book rate</Th>
+                <table className="w-full">
+                  <thead className="bg-[#fafafa]">
+                    <tr>
+                      <Th align="left">Reason</Th>
+                      <Th align="right">Calls</Th>
+                      <Th align="right">Booked</Th>
+                      <Th align="right">Book rate</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reasons.map((rr) => (
+                      <tr key={rr.reason} className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] transition-colors">
+                        <Td align="left"><span className="text-[12.5px] font-semibold text-[#111]">{rr.reason}</span></Td>
+                        <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{fmtInt(rr.calls)}</span></Td>
+                        <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#111]">{fmtInt(rr.booked)}</span></Td>
+                        <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#10b981]">{rr.calls ? Math.round((rr.booked / rr.calls) * 100) : 0}%</span></Td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {reasons.map((rr) => (
-                        <tr key={rr.reason} className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] transition-colors">
-                          <Td align="left"><span className="text-[12.5px] font-semibold text-[#111]">{rr.reason}</span></Td>
-                          <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{fmtInt(rr.calls)}</span></Td>
-                          <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#111]">{fmtInt(rr.booked)}</span></Td>
-                          <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#10b981]">{rr.calls ? Math.round((rr.booked / rr.calls) * 100) : 0}%</span></Td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <div className="px-6 py-5">
-                    <ComingSoon title="Why customers are calling" note="A breakdown of call reasons — and how often each one turns into a booking — so you can staff and script for what matters most." />
-                  </div>
-                )}
+                    ))}
+                  </tbody>
+                </table>
               </Card>
             );
           })()}
@@ -1115,24 +1026,27 @@ function SummaryStat({ label, value, accent }: { label: string; value: string; a
   );
 }
 
-/* Open-funnel split for Sales Inbound (card 12341 via report_open_funnel): appointments booked / leads
- * handled, per acquisition path. `data` absent (no ETL row yet) → coming-soon. */
+/* Open-funnel split for Sales Inbound: appointments booked / leads handled, per acquisition path.
+ * Renders nothing when the data isn't populated — no placeholder. */
 function StlOpenFunnel({ data }: { data?: { stlLeadsHandled: number; stlAppts: number; stlRate: number; followupLeadsHandled: number; followupAppts: number; followupRate: number } }) {
+  if (!data) return null;
   return (
     <div className="border-t border-[#f0f0f3] pt-4">
       <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Leads handled → appointments booked <span className="font-semibold normal-case text-[#c4c4cc]">· all-time</span></p>
-      {data ? (
-        <div className="grid grid-cols-2 gap-3">
-          <SummaryStat label="Via speed-to-lead" value={`${fmtInt(data.stlAppts)} / ${fmtInt(data.stlLeadsHandled)}`} accent="#813fed" />
-          <SummaryStat label="Via follow-ups" value={`${fmtInt(data.followupAppts)} / ${fmtInt(data.followupLeadsHandled)}`} accent="#10b981" />
-          <SummaryStat label="STL booked rate" value={`${data.stlRate}%`} />
-          <SummaryStat label="Follow-up booked rate" value={`${data.followupRate}%`} />
-        </div>
-      ) : (
-        <p className="text-[11.5px] text-[#9ca3af]">Coming soon — appointments split by speed-to-lead vs follow-up.</p>
-      )}
+      <div className="grid grid-cols-2 gap-3">
+        <SummaryStat label="Via speed-to-lead" value={`${fmtInt(data.stlAppts)} / ${fmtInt(data.stlLeadsHandled)}`} accent="#813fed" />
+        <SummaryStat label="Via follow-ups" value={`${fmtInt(data.followupAppts)} / ${fmtInt(data.followupLeadsHandled)}`} accent="#10b981" />
+        <SummaryStat label="STL booked rate" value={`${data.stlRate}%`} />
+        <SummaryStat label="Follow-up booked rate" value={`${data.followupRate}%`} />
+      </div>
     </div>
   );
+}
+
+/* Ranked outbound-outcomes table + a once-per-mount "viewed" event (depth signal). */
+function OutcomesTableTracked({ slices, teamId, agent }: { slices: NonNullable<AgentData["report"]["outcomes"]>; teamId: string; agent: string }) {
+  useEffect(() => { track("outcome_table_viewed", { team_id: teamId, agent }); }, [teamId, agent]);
+  return <RankedOutcomeTable slices={slices} />;
 }
 
 function QCell({ label, value, status }: { label: string; value: string; status?: "green" | "amber" | "red" }) {
@@ -1159,7 +1073,6 @@ function UpcomingAppointments({ teamId, enterpriseId, spyneToken, service }: { t
     // isn't worth it here — upcoming bookings are small and change rarely)
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!teamId) { setState({ loading: false, meetings: [] }); return; }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState({ loading: true, meetings: [] });
     fetchMeetings({ teamId, enterpriseId, service, scope: "upcoming", spyneToken })
       .then((r) => { if (on) setState({ loading: false, meetings: r.meetings }); })

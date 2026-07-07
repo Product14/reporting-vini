@@ -28,6 +28,8 @@ export const REPORT_APPOINTMENTS = "report_appointments";
 export const REPORT_CALLBACKS = "report_callbacks";
 export const REPORT_CAMPAIGNS = "report_campaigns";
 export const REPORT_OUTCOMES = "report_outcomes";
+// Named warm leads ("Work these now"), ClickHouse-sourced snapshot (migration 0017, v3 reporting tab).
+export const REPORT_WARM_LEADS = "report_warm_leads";
 // "Coming soon" metrics derived from ClickHouse (dealer_leads) by scripts/push_metrics.py and ingested
 // via POST /api/reports/metrics. Read by GET /api/reports/metrics. See 0009_report_coming_soon.sql.
 export const REPORT_APPT_STATUS = "report_appt_status"; // showed / no-show / show rate (widget: `showed`)

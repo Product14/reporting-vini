@@ -29,7 +29,7 @@ import { fetchTeamTzs, storeLocalDay, teamsInRows } from "../src/lib/reports/tzM
 import { saveTzMap, loadTzMap } from "../src/lib/reports/tzStore";
 import { queryRows } from "../src/lib/reports/clickhouseQuery";
 import { loadSpineSql } from "../src/lib/reports/spineSql";
-import { campaignsSql, outcomesSql, callbacksSql, appointmentsSql } from "../src/lib/reports/detailQueries";
+import { campaignsSql, outcomesSql, callbacksSql, appointmentsSql, warmLeadsSql } from "../src/lib/reports/detailQueries";
 import type { RawRow } from "../src/lib/reports/schema";
 
 function loadEnv() {
@@ -267,14 +267,20 @@ function deltaSql(effWm: string, cap: string): string {
     // whose window starts today would wipe yesterday's appointments from the snapshot.
     const appts = await queryRows<Record<string, unknown>>(appointmentsSql({}));
     const apptRows = appts
-      .map((a) => ({ team_id: String(a.team_id ?? ""), enterprise_id: (a.enterprise_id as string) ?? null, service_type: (a.service_type as string) ?? null, lead_id: (a.lead_id as string) ?? null, meeting_id: (a.meeting_id as string) ?? null, customer_name: a.customer_name ?? null, phone: a.phone ?? null, vehicle: a.vehicle ?? null, intent: a.intent ?? null, meeting_start: a.meeting_start ?? null, booked_at: a.booked_at ?? null }))
+      .map((a) => ({ team_id: String(a.team_id ?? ""), enterprise_id: (a.enterprise_id as string) ?? null, service_type: (a.service_type as string) ?? null, lead_id: (a.lead_id as string) ?? null, meeting_id: (a.meeting_id as string) ?? null, customer_name: a.customer_name ?? null, phone: a.phone ?? null, vehicle: a.vehicle ?? null, intent: a.intent ?? null, meeting_start: a.meeting_start ?? null, booked_at: a.booked_at ?? null, status: a.status ?? null, assisted: num(a.assisted) > 0, direction: a.direction ?? null, booked_via: a.booked_via ?? null }))
       .filter((r) => r.team_id && r.meeting_id);
-    for (const [t, rows] of [["report_campaigns", campRows], ["report_outcomes", outcomeRows], ["report_callbacks", cbRows], ["report_appointments", apptRows]] as const) {
+    // Named warm leads ("Work these now"). Same FIXED-floor rationale as appointments: a "now" snapshot
+    // (45d), never the incremental watermark window.
+    const warm = await queryRows<Record<string, unknown>>(warmLeadsSql({}));
+    const warmRows = warm
+      .map((w) => ({ team_id: String(w.team_id ?? ""), source: (w.source as string) ?? null, service_type: (w.service_type as string) ?? null, lead_id: (w.lead_id as string) ?? null, tier: (w.tier as string) ?? null, customer_name: w.customer_name ?? null, phone: w.phone ?? null, campaign: w.campaign ?? null, outcome: w.outcome ?? null, last_activity: w.last_activity ?? null }))
+      .filter((r) => r.team_id && (r.customer_name || r.phone));
+    for (const [t, rows] of [["report_campaigns", campRows], ["report_outcomes", outcomeRows], ["report_callbacks", cbRows], ["report_appointments", apptRows], ["report_warm_leads", warmRows]] as const) {
       const { error } = await sb.from(t).delete().gte("synced_at", "1900-01-01");
       if (error) throw new Error(`${t} delete: ${error.message}`);
       await insertAll(sb, t, rows);
     }
-    console.log(`detail: ${campRows.length} campaigns + ${outcomeRows.length} outcomes + ${cbRows.length} callbacks + ${apptRows.length} appointments synced.`);
+    console.log(`detail: ${campRows.length} campaigns + ${outcomeRows.length} outcomes + ${cbRows.length} callbacks + ${apptRows.length} appointments + ${warmRows.length} warm leads synced.`);
   } catch (e) {
     console.warn(`detail sync skipped: ${(e as Error).message}`);
   }

@@ -85,3 +85,12 @@ body {
 .animate-shimmer-pulse {
   animation: shimmer-pulse 2.2s ease-in-out infinite;
 }
+
+/* ── print: the Overview doubles as the dealer's shareable scorecard ──
+ * .no-print hides interactive chrome (date filter, refresh, tabs); .print-card keeps each
+ * section whole across page breaks. */
+@media print {
+  body { background: #fff !important; }
+  .no-print { display: none !important; }
+  .print-card { break-inside: avoid; box-shadow: none !important; }
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AGENT_OPTIONS,
@@ -9,14 +9,14 @@ import {
   SUB_TYPES,
   useNewCampaign,
 } from "@/context/NewCampaignContext";
-import { Bucket, BUCKET_LABELS, BucketToggle, CalibratingBanner, ComingSoon, fmtInt, ReportTopBar, Td, Th } from "@/components/reports/kit";
+import { ActiveCampaign, CalibratingBanner, EmptyState, fmtInt, ReportTopBar, Td, Th } from "@/components/reports/kit";
 import { useScenario } from "@/components/reports/scenario";
+import { fetchAgents, agentsForAccount, peekAgents, type FetchResult } from "@/components/reports/liveData";
+import { useDateRange, reportNavQuery } from "@/components/reports/dateRange";
 import { track } from "@/lib/analytics";
 
-/* Per-campaign audience size — the ONLY genuinely-real field we have client-side (from the launch
- * form's contactsCount, else the selected audience segments). Run-outcome metrics (dispatched /
- * connected / converted / errored) have no real data source wired yet, so they are NOT fabricated here
- * — the performance surface shows a "coming soon" state instead (see Phase 2 / GET /campaign/list). */
+/* Per-campaign audience size — the ONLY genuinely-real field we have client-side for a campaign
+ * launched THIS session (from the launch form's contactsCount, else the selected audience segments). */
 function deriveAudience(c: LaunchedCampaign): number {
   const audienceFromSegments = c.selectedSegments.reduce(
     (sum, id) => sum + (AUDIENCE_SEGMENTS.find((s) => s.id === id)?.count ?? 0),
@@ -25,17 +25,59 @@ function deriveAudience(c: LaunchedCampaign): number {
   return c.contactsCount > 0 ? c.contactsCount : audienceFromSegments;
 }
 
+// useDateRange() reads the selected window from the URL — needs a Suspense boundary above useSearchParams.
 export default function CampaignsReportPage() {
+  return (
+    <Suspense fallback={null}>
+      <CampaignsReportView />
+    </Suspense>
+  );
+}
+
+function CampaignsReportView() {
   const router = useRouter();
   const { launchedCampaigns } = useNewCampaign();
-  const { scenario, view, teamId } = useScenario();
-  const [bucket, setBucket] = useState<Bucket>("yesterday");
+  const { scenario, view, teamId, account, spyneToken } = useScenario();
+  // The window rides in the URL only so tab navigation keeps it — campaign run metrics themselves are a
+  // CUMULATIVE (~120d) snapshot from report_campaigns and are NOT windowed by the date filter.
+  const { bucket, custom } = useDateRange();
+  const navQuery = reportNavQuery(teamId, bucket, custom);
   const [filterSubType, setFilterSubType] = useState<string>("all");
-  const periodLabel = scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
   // Engagement: fires once per opened campaigns report (the rooftop is resolved by mount).
   useEffect(() => { track("report_viewed", { tab: "campaigns", team_id: teamId }); }, [teamId]);
 
-  // Real per-campaign rows: launch metadata + the genuine audience size. No fabricated run metrics.
+  // Live rooftop feed — the campaigns list rides on the same /api/reports payload the other tabs use
+  // (report_campaigns attached per outbound agent). Window doesn't matter for this table; use the
+  // default bucket so the cache is shared with the Overview.
+  const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, bucket: "last30", spyneToken }));
+  useEffect(() => {
+    if (!teamId) return;
+    let on = true;
+    const cached = peekAgents({ teamId, bucket: "last30", spyneToken });
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFeed(cached);
+    fetchAgents({ teamId, bucket: "last30", spyneToken })
+      .then((res) => { if (on) setFeed(res); })
+      .catch(() => { if (on && !cached) setFeed(null); });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, spyneToken]);
+
+  // Union of every outbound agent's campaigns (each campaign belongs to one agent_type → no dupes),
+  // ranked by appointments — the canonical "what's working" order.
+  const liveCampaigns = useMemo<(ActiveCampaign & { dept: string })[]>(() => {
+    const agents = agentsForAccount(feed?.agents ?? [], account);
+    return agents
+      .filter((a) => a.dir === "Outbound")
+      .flatMap((a) => (a.report.activeCampaigns ?? []).map((c) => ({ ...c, dept: a.dept })))
+      .sort((a, b) => b.appts - a.appts || b.warmLeads - a.warmLeads);
+  }, [feed, account]);
+  const totals = useMemo(() => liveCampaigns.reduce(
+    (t, c) => ({ enrolled: t.enrolled + c.enrolled, appts: t.appts + c.appts, warm: t.warm + c.warmLeads }),
+    { enrolled: 0, appts: 0, warm: 0 },
+  ), [liveCampaigns]);
+
+  // Session-local launches (the launch form) — metadata only, no fabricated run metrics.
   const rows = useMemo(
     () => launchedCampaigns.map((c) => ({ campaign: c, audience: deriveAudience(c) })),
     [launchedCampaigns],
@@ -44,7 +86,6 @@ export default function CampaignsReportPage() {
     () => (filterSubType === "all" ? rows : rows.filter((r) => r.campaign.subType === filterSubType)),
     [rows, filterSubType],
   );
-  const totalAudience = useMemo(() => filteredRows.reduce((s, r) => s + r.audience, 0), [filteredRows]);
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -52,15 +93,14 @@ export default function CampaignsReportPage() {
 
         <ReportTopBar
           title="Campaigns"
-          subtitle="Per-campaign run history — what ran, what worked, who picked up."
+          subtitle="Every outbound campaign — enrolled leads, appointments, warm leads and opt-outs."
           active="campaigns"
           teamId={teamId}
+          query={navQuery}
           right={
-            scenario === "repeat" ? (
-              <BucketToggle bucket={bucket} onChange={(b) => { setBucket(b); track("date_range_changed", { tab: "campaigns", range: b, team_id: teamId }); }} />
-            ) : (
-              <span className="rounded-lg bg-[#f3eaff] px-3 py-1.5 text-[12px] font-semibold text-[#813fed]">{view.liveLabel}</span>
-            )
+            <span className="no-print rounded-lg bg-[#f3f4f6] px-3 py-1.5 text-[11.5px] font-semibold text-[#6b7280]" title="Campaign outcomes accumulate over a campaign's life — they aren't sliced by the report date filter.">
+              Cumulative · last ~120 days
+            </span>
           }
         />
 
@@ -74,77 +114,95 @@ export default function CampaignsReportPage() {
           {scenario === "recently_live" && (
             <CalibratingBanner
               title="Early days — only your first campaigns have run."
-              body="Connect and convert rates here are based on a small sample and will firm up over the next few weeks."
+              body="Appointment and warm-lead rates here are based on a small sample and will firm up over the next few weeks."
             />
           )}
-          {/* at a glance — real launch facts only (campaign count + audience). Per-campaign RUN metrics
-              (dispatched / connect rate / conversions / errors) have no data source wired yet, so we show
-              a "coming soon" state instead of fabricating numbers in a dealer-facing table. */}
-          <section className="rounded-2xl border border-[#e5e7eb] bg-white shadow-sm overflow-hidden">
-            <div className="border-b border-[#f0f0f0] px-6 py-4 bg-gradient-to-r from-[#faf8ff] to-white">
-              <p className="text-[10.5px] font-bold uppercase tracking-wider text-[#813fed]">At a glance</p>
-              <p className="text-[15px] font-bold text-[#111] mt-0.5">{periodLabel}</p>
-            </div>
-            <div className="grid grid-cols-2 divide-x divide-[#f3f4f6]">
-              <div className="px-5 py-4 flex flex-col gap-0.5">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Campaigns launched</p>
-                <p className="text-[22px] font-bold tabular-nums text-[#111]">{filteredRows.length.toLocaleString()}</p>
+
+          {/* ── live per-campaign performance (report_campaigns via /api/reports) ── */}
+          <section className="print-card rounded-2xl border border-[#e5e7eb] bg-white shadow-sm overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#f0f0f0] px-6 py-4 bg-gradient-to-r from-[#faf8ff] to-white">
+              <div>
+                <p className="text-[14px] font-bold text-[#111]">Campaign performance</p>
+                <p className="text-[11.5px] text-[#6b7280] mt-0.5">Ranked by appointments booked · campaigns with ≥20 enrolled leads</p>
               </div>
-              <div className="px-5 py-4 flex flex-col gap-0.5">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Total audience</p>
-                <p className="text-[22px] font-bold tabular-nums text-[#111]">{fmtInt(totalAudience)}</p>
-                <p className="text-[11px] text-[#6b7280]">contacts across these campaigns</p>
+              {liveCampaigns.length > 0 && (
+                <div className="flex gap-6">
+                  {([
+                    ["Campaigns", fmtInt(liveCampaigns.length)],
+                    ["Enrolled", fmtInt(totals.enrolled)],
+                    ["Appointments", fmtInt(totals.appts)],
+                    ["Warm leads", fmtInt(totals.warm)],
+                  ] as const).map(([k, v]) => (
+                    <div key={k} className="text-right">
+                      <p className="text-[17px] font-extrabold tabular-nums leading-none text-[#111]">{v}</p>
+                      <p className="mt-0.5 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">{k}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {liveCampaigns.length === 0 ? (
+              <div className="px-6 py-6">
+                <EmptyState icon="📣" title="No campaigns have run yet" body="Once this rooftop runs outbound campaigns, each one shows up here with enrolled leads, appointments, warm leads and opt-outs." />
               </div>
-            </div>
-            <div className="border-t border-[#f0f0f0] px-6 py-5">
-              <ComingSoon
-                title="Coming soon — campaign performance"
-                note="Per-campaign dispatched, connect rate, conversions and errors land here once campaign run-outcome reporting is wired up. We don't show estimated numbers in the meantime."
-              />
-            </div>
-            {launchedCampaigns.length === 0 && (
-              <div className="border-t border-[#f0f0f0] px-6 py-4 bg-[#fffbeb] flex items-center gap-3">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#92400e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
-                </svg>
-                <p className="text-[12px] text-[#92400e]">
-                  No campaigns launched in this session yet. Launched campaigns appear here — see the
-                  Overview tab for fleet-level reporting.
-                </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[720px]">
+                  <thead className="bg-[#fafafa]">
+                    <tr>
+                      <Th>Campaign</Th>
+                      <Th align="right">Enrolled</Th>
+                      <Th align="right">Appointments</Th>
+                      <Th align="right">Appt rate</Th>
+                      <Th align="right">Warm</Th>
+                      <Th align="right">Opt-outs</Th>
+                      <Th align="right">No reach</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {liveCampaigns.map((c, i) => (
+                      <tr key={`${c.name}-${i}`} className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] transition-colors">
+                        <Td>
+                          <p className="text-[12.5px] font-semibold text-[#111]">{c.name}</p>
+                          <p className="text-[10.5px] text-[#9ca3af]">{c.useCase || "—"} · {c.dept}</p>
+                        </Td>
+                        <Td align="right"><span className="text-[12.5px] tabular-nums text-[#111]">{fmtInt(c.enrolled)}</span></Td>
+                        <Td align="right"><span className="text-[12.5px] font-bold tabular-nums text-[#10b981]">{fmtInt(c.appts)}</span></Td>
+                        <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{c.apptRate}%</span></Td>
+                        <Td align="right"><span className="text-[12.5px] font-semibold tabular-nums text-[#c2410c]">{fmtInt(c.warmLeads)}</span></Td>
+                        <Td align="right"><span className="text-[12.5px] tabular-nums text-[#6b7280]">{fmtInt(c.optOuts)}</span></Td>
+                        <Td align="right"><span className="text-[12.5px] tabular-nums text-[#6b7280]">{fmtInt(c.noReach)}</span></Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </section>
 
-          {/* campaigns table */}
-          <section className="rounded-2xl border border-[#e5e7eb] bg-white shadow-sm overflow-hidden">
-            <div className="flex items-center justify-between border-b border-[#f0f0f0] px-6 py-4">
-              <div className="flex items-center gap-3">
-                <p className="text-[14px] font-bold text-[#111]">Campaigns</p>
-                <span className="text-[11px] text-[#9ca3af]">{filteredRows.length} of {rows.length}</span>
+          {/* ── campaigns launched from this console session (launch metadata; run outcomes above) ── */}
+          {rows.length > 0 && (
+            <section className="rounded-2xl border border-[#e5e7eb] bg-white shadow-sm overflow-hidden">
+              <div className="flex items-center justify-between border-b border-[#f0f0f0] px-6 py-4">
+                <div className="flex items-center gap-3">
+                  <p className="text-[14px] font-bold text-[#111]">Launched from this console</p>
+                  <span className="text-[11px] text-[#9ca3af]">{filteredRows.length} of {rows.length}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px] text-[#6b7280]">Sub-type</label>
+                  <select
+                    value={filterSubType}
+                    onChange={(e) => { setFilterSubType(e.target.value); track("campaigns_filtered", { team_id: teamId, subtype: e.target.value }); }}
+                    className="rounded-lg border border-[#e5e7eb] bg-white px-2.5 py-1.5 text-[12px] text-[#111] focus:border-[#813fed] focus:outline-none"
+                  >
+                    <option value="all">All</option>
+                    {[...SUB_TYPES.sales, ...SUB_TYPES.service].map((s) => (
+                      <option key={s.value} value={s.value}>{s.label}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <label className="text-[11px] text-[#6b7280]">Sub-type</label>
-                <select
-                  value={filterSubType}
-                  onChange={(e) => { setFilterSubType(e.target.value); track("campaigns_filtered", { team_id: teamId, subtype: e.target.value }); }}
-                  className="rounded-lg border border-[#e5e7eb] bg-white px-2.5 py-1.5 text-[12px] text-[#111] focus:border-[#813fed] focus:outline-none"
-                >
-                  <option value="all">All</option>
-                  {[...SUB_TYPES.sales, ...SUB_TYPES.service].map((s) => (
-                    <option key={s.value} value={s.value}>{s.label}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
 
-            {filteredRows.length === 0 ? (
-              <div className="px-6 py-16 text-center flex flex-col items-center gap-2">
-                <p className="text-[14px] font-semibold text-[#111]">No campaigns yet</p>
-                <p className="text-[12.5px] text-[#6b7280] max-w-[340px]">
-                  Campaigns launched in the main app will show up here with live progress and outcome counts.
-                </p>
-              </div>
-            ) : (
               <table className="w-full">
                 <thead className="bg-[#fafafa]">
                   <tr>
@@ -194,8 +252,8 @@ export default function CampaignsReportPage() {
                   })}
                 </tbody>
               </table>
-            )}
-          </section>
+            </section>
+          )}
         </main>
       </div>
     </div>

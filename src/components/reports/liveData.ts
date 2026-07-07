@@ -3,7 +3,9 @@
  * AgentData[] the reporting UI already consumes. Replaces the old ~84 Metabase card round-trips.
  * Used by /reports (Overview) and /reports/agents (By agent) — no component/JSX changes. */
 
-import { type AgentData, type Bucket, type Meeting, type MeetingsResult, type RAG } from "./data";
+import { type AgentData, type Bucket, type Meeting, type MeetingsResult, type NamedAppt, type WarmLeadItem } from "./data";
+
+export type { NamedAppt, WarmLeadItem } from "./data";
 import { type Account } from "./accounts";
 
 // Maps the CSM sheet's agent-type labels to this report's agent ids.
@@ -102,66 +104,9 @@ export function addDay(iso: string): string {
 // from an empty prior window is misleading.
 const pctDelta = (curr: number, prev: number): number | null => (prev ? Math.round(((curr - prev) / prev) * 100) : null);
 
-/* ── Per-appointment dollar value (whiteboard spec) ──────────────────────────
- * The dollar value a booked appointment is worth, by agent slot. SINGLE SOURCE OF TRUTH —
- * the same per-category rates as the Programs dashboard in vini-daily-calls
- * (src/agents/AgentsDashboard.tsx COST_PER_APPT). Hardcoded by design (leadership spec),
- * not a user-set cost, so every surface values an appointment identically. */
-export const APPT_VALUE_BY_AGENT: Record<AgentData["id"], number> = {
-  sales_ib: 200,
-  sales_ob: 250,
-  service_ib: 100,
-  service_ob: 200,
-};
-
-// Department-average per-appointment value — the fallback when an agent id isn't one of the four
-// known slots, so an unmapped id values its appointments at a sensible dept rate instead of $0
-// (which silently zeroed real bookings in "Value created"). Sales avg $225, Service avg $150.
-export const DEPT_AVG_APPT_VALUE = { sales: 225, service: 150 } as const;
-
-// Per-appointment value for an agent id: the exact slot rate when known, else the department average
-// inferred from the id ("service" → Service avg, else Sales avg). Warns once per unmapped id (dev only)
-// so the gap is visible rather than silent.
-const warnedUnmappedIds = new Set<string>();
-function warnUnmappedId(id: string): void {
-  if (process.env.NODE_ENV === "production" || warnedUnmappedIds.has(id)) return;
-  warnedUnmappedIds.add(id);
-  console.warn(`[liveData] unmapped agent id "${id}" — valuing appointments at the department average`);
-}
-export const apptValueForId = (id: string): number => {
-  const known = APPT_VALUE_BY_AGENT[id as AgentData["id"]];
-  if (known != null) return known;
-  warnUnmappedId(id);
-  return /service/i.test(id) ? DEPT_AVG_APPT_VALUE.service : DEPT_AVG_APPT_VALUE.sales;
-};
-
-// Value created by ONE agent slot = its appointments × that slot's per-appointment value (falling back
-// to the department average for an unmapped id rather than $0).
-export const valueForAgent = (id: AgentData["id"], appointments: number): number =>
-  appointments * apptValueForId(id);
-
-// Fleet value = Σ per-agent (each agent's appointments × its own rate). Use this — NOT a single
-// flat rate — so a rooftop's mix of Sales/Service × IB/OB is valued correctly.
-export const fleetValue = (agents: AgentData[]): number =>
-  agents.reduce((s, a) => s + valueForAgent(a.id, a.metrics.appointments), 0);
-
-// Appointment-weighted blended $/appt across a set of agents — for copy and pooled figures
-// (e.g. money-on-table) where the per-lead agent slot isn't known. Falls back to 0 when no appts.
-export const blendedApptValue = (agents: AgentData[]): number => {
-  const appts = agents.reduce((s, a) => s + a.metrics.appointments, 0);
-  return appts > 0 ? Math.round(fleetValue(agents) / appts) : 0;
-};
-
-/* ROI factor → RAG (whiteboard spec, same thresholds as the Programs dashboard):
- *   ≥ 3 → Green · ≥ 1.5 → Amber · else Red. The factor itself (value ÷ run-cost or MRR) needs a
- *   cost/MRR source that reporting-vini doesn't carry yet — this helper is the shared classifier. */
-export const ROI_GREEN = 3;
-export const ROI_AMBER = 1.5;
-export const roiRAG = (factor: number): RAG => (factor >= ROI_GREEN ? "green" : factor >= ROI_AMBER ? "amber" : "red");
-
-/* @deprecated flat-rate value — superseded by valueForAgent/fleetValue (per-category whiteboard rates).
- * Kept only so any out-of-tree caller keeps compiling; in-tree code uses the per-agent helpers. */
-export const appointmentValue = (appointments: number, apptCost: number): number => appointments * apptCost;
+/* Dollar-value layer removed in v3 (user decision 2026-07-07): the report leads with real counts —
+ * appointments, conversations, hand-offs, time — not appts × a hardcoded rate, which dealers read as
+ * fake. Value framing (avg-RO / gross-per-copy) can return later as a dealer-configurable model. */
 
 export interface LiveOpts {
   teamId?: string;
@@ -173,6 +118,7 @@ export interface LiveOpts {
 }
 
 // Minimal per-agent totals for the prior equal-length window — the basis for real period deltas.
+// The v3 fields are optional so older cached payloads (and the mock path) still parse.
 export interface Basis {
   calls: number;
   conversations: number;
@@ -180,6 +126,12 @@ export interface Basis {
   appointments: number;
   leads: number;
   sms: number;
+  appointmentsAssisted?: number;
+  transfers?: number;
+  transfersFailed?: number;
+  callbacks?: number;
+  talkMinutes?: number;
+  afterHours?: number;
 }
 
 export interface FetchResult {
@@ -203,15 +155,44 @@ export interface FetchResult {
   start?: string;
   end?: string;
   timezone?: string | null;
+  // v3 named lists (rooftop-wide; the per-agent scoped copies live on agent.report). Absent on the
+  // mock/degraded path — sections omit. LIVE-ONLY, never fabricated.
+  namedAppointments?: NamedAppt[];
+  warmLeads?: WarmLeadItem[];
+}
+
+// Per-direction sums for the hero tiles' Inbound/Outbound tri-split rows.
+export interface FleetSplit {
+  leads: number;
+  conversations: number;
+  qualified: number;
+  appointments: number;
+  appointmentsAssisted: number;
+  transfers: number;
+  transfersFailed: number;
+  callbacks: number;
+  handoffs: number; // transfers + callbacks (canonical "Hand-offs to team")
+  calls: number;
+  smsSent: number;
+  talkMinutes: number;
+  afterHours: number;
 }
 
 // Live fleet roll-up for the Overview: sums the account's live agents and computes real deltas
-// from the prior-window basis. Money/deals/showed are intentionally absent — they have no card.
+// from the prior-window basis. Dollar figures are intentionally absent (v3: counts, not $).
 export interface FleetLive {
   calls: number;
   conversations: number;
   qualified: number;
   appointments: number;
+  appointmentsAssisted: number; // canonical: AI-assisted (CRM) — SECONDARY, never folded into appointments
+  transfers: number; // canonical: completed hand-offs (lead-level when RPC available)
+  transfersFailed: number; // reported separately, never folded in
+  callbacks: number;
+  handoffs: number; // transfers + callbacks
+  // % of real conversations the AI handled end-to-end (no transfer) — the workload-offload headline.
+  // null when there are no conversations.
+  handledEndToEndPct: number | null;
   afterHours: number;
   talkMinutes: number;
   smsSent: number;
@@ -223,8 +204,13 @@ export interface FleetLive {
   // "Connect / answer" cell, which is an inbound concept; null when the fleet has no inbound calls.
   answerRateInbound: number | null;
   // null === no prior-window basis ("new"); a number is a real % change (incl. 0).
-  deltas: { appointments: number | null; calls: number | null; conversations: number | null; qualified: number | null; sms: number | null };
+  deltas: {
+    appointments: number | null; calls: number | null; conversations: number | null;
+    qualified: number | null; sms: number | null; handoffs: number | null;
+    talkMinutes: number | null; afterHours: number | null;
+  };
   funnel: { label: string; value: number }[];
+  bySplit: { inbound: FleetSplit; outbound: FleetSplit };
 }
 
 export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>): FleetLive {
@@ -250,31 +236,69 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const conversations = hasLeadFunnel ? lf((f) => f.connected) : connectedCalls; // unique connected leads
   const qualified = hasLeadFunnel ? lf((f) => f.qualified) : sum((a) => a.metrics.qualified); // unique qualified leads
   const appointments = sum((a) => a.metrics.appointments); // already lead-based (build sets metrics.appointments = apptLeads)
+  const appointmentsAssisted = sum((a) => a.metrics.appointmentsAssisted ?? 0);
+  // Hand-offs: transfers are lead-level (build prefers report_lead_counts), callbacks call-level daily
+  // sums — both windowed. Failed transfers tracked separately, never added into transfers/handoffs.
+  const cf = (f: (c: NonNullable<AgentData["report"]["callFlow"]>) => number) =>
+    agents.reduce((s, a) => s + (a.report?.callFlow ? f(a.report.callFlow) : 0), 0);
+  const transfers = cf((c) => c.transferred);
+  const transfersFailed = cf((c) => c.transfersFailed ?? 0);
+  const callbacks = cf((c) => c.callbacks ?? 0);
+  const handoffs = transfers + callbacks;
+
+  // Per-direction split for the hero tri-rows.
+  const splitFor = (dir: "Inbound" | "Outbound"): FleetSplit => {
+    const mine = agents.filter((a) => a.dir === dir);
+    const s = (f: (a: AgentData) => number) => mine.reduce((acc, a) => acc + f(a), 0);
+    const tr = s((a) => a.report?.callFlow?.transferred ?? 0);
+    const cb = s((a) => a.report?.callFlow?.callbacks ?? 0);
+    return {
+      leads: s((a) => a.leadFunnel?.contacted ?? a.report?.leadsAttempted ?? 0),
+      conversations: s((a) => a.leadFunnel?.connected ?? a.metrics.conversations),
+      qualified: s((a) => a.leadFunnel?.qualified ?? a.metrics.qualified),
+      appointments: s((a) => a.metrics.appointments),
+      appointmentsAssisted: s((a) => a.metrics.appointmentsAssisted ?? 0),
+      transfers: tr,
+      transfersFailed: s((a) => a.report?.callFlow?.transfersFailed ?? 0),
+      callbacks: cb,
+      handoffs: tr + cb,
+      calls: s((a) => a.metrics.calls),
+      smsSent: s((a) => a.metrics.smsSent),
+      talkMinutes: s((a) => a.metrics.talkMinutes),
+      afterHours: s((a) => a.metrics.afterHours),
+    };
+  };
 
   // call-weighted quality so a low-volume agent can't swing the fleet number
   const wAvg = (f: (a: AgentData) => number) => (calls ? agents.reduce((s, a) => s + f(a) * a.metrics.calls, 0) / calls : 0);
   const pSum = (f: (b: Basis) => number) => agents.reduce((s, a) => s + (prior?.[a.id] ? f(prior[a.id]) : 0), 0);
 
-  // Funnel: every stage is distinct leads (monotonic: contacted ≥ connected ≥ qualified ≥ appt). Falls
-  // back to activity volumes only when no agent carries leadFunnel (pure-mock / no-backend).
+  // Funnel: every stage is distinct leads (monotonic: contacted ≥ connected ≥ qualified ≥ appt), with
+  // the canonical wordings. Falls back to activity volumes only when no agent carries leadFunnel.
   const funnel = hasLeadFunnel
     ? [
         { label: "Leads reached", value: lf((f) => f.contacted) },
-        { label: "Conversations", value: conversations },
-        { label: "Qualified", value: qualified },
-        { label: "Appointments", value: appointments },
+        { label: "Real conversations", value: conversations },
+        { label: "Qualified leads", value: qualified },
+        { label: "Appointments — AI-booked", value: appointments },
       ]
     : [
         { label: "Outreach & calls", value: calls + smsSent },
-        { label: "Conversations", value: connectedCalls },
-        { label: "Qualified / engaged", value: qualified },
-        { label: "Appointments set", value: appointments },
+        { label: "Real conversations", value: connectedCalls },
+        { label: "Qualified leads", value: qualified },
+        { label: "Appointments — AI-booked", value: appointments },
       ];
   return {
     calls,
     conversations,
     qualified,
     appointments,
+    appointmentsAssisted,
+    transfers,
+    transfersFailed,
+    callbacks,
+    handoffs,
+    handledEndToEndPct: conversations > 0 ? Math.max(0, Math.round(((conversations - transfers) / conversations) * 100)) : null,
     afterHours,
     talkMinutes,
     smsSent,
@@ -289,8 +313,12 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
       conversations: pctDelta(conversations, pSum((b) => b.conversations)),
       qualified: pctDelta(qualified, pSum((b) => b.qualified)),
       sms: pctDelta(smsSent, pSum((b) => b.sms)),
+      handoffs: pctDelta(handoffs, pSum((b) => (b.transfers ?? 0) + (b.callbacks ?? 0))),
+      talkMinutes: pctDelta(talkMinutes, pSum((b) => b.talkMinutes ?? 0)),
+      afterHours: pctDelta(afterHours, pSum((b) => b.afterHours ?? 0)),
     },
     funnel,
+    bySplit: { inbound: splitFor("Inbound"), outbound: splitFor("Outbound") },
   };
 }
 
@@ -364,6 +392,8 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
         start: j.start,
         end: j.end,
         timezone: j.timezone ?? null,
+        namedAppointments: Array.isArray(j.namedAppointments) ? (j.namedAppointments as NamedAppt[]) : undefined,
+        warmLeads: Array.isArray(j.warmLeads) ? (j.warmLeads as WarmLeadItem[]) : undefined,
       };
       CACHE.set(cacheKey, result); // cache ONLY a clean response
       return result;

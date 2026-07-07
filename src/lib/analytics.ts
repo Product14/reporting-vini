@@ -34,6 +34,10 @@ export interface ReportEvents {
   agent_switched: { team_id: string; agent: string }; // agents-tab picker
   agent_detail_toggled: { team_id: string; agent: string; shown: boolean }; // show/hide detailed metrics
   campaign_opened: { team_id: string; campaign_id: string };
+  // v3 named sections (no PII — tier/flags only, never names or phones)
+  warm_lead_phone_clicked: { team_id: string; tier: string }; // "Work these now" tel: tap
+  named_appointment_row_clicked: { team_id: string; assisted: boolean };
+  outcome_table_viewed: { team_id: string; agent: string }; // OB ranked-outcomes table rendered
 
   // ── ROI setup funnel: prompted → set (and edited) — powers the $ value story ──
   cost_per_appt_prompted: { team_id: string };

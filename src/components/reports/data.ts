@@ -240,6 +240,45 @@ export interface NoInteraction {
 export interface OutcomeSlice {
   label: string;
   value: number;
+  bucket?: string; // raw sort-prefixed bucket (e.g. "5 Booked") — drives the canonical best→least order
+}
+
+// Per-intent outcome mix for the inbound "What customers wanted & how it was handled" table.
+// conversations = tagged call conversations; resolved/booked/transferred/callback = how they ended.
+export interface IntentOutcomeRow {
+  label: string;
+  conversations: number;
+  resolved: number;
+  booked: number;
+  transferred: number;
+  callback: number;
+}
+
+// Named appointment row ("Appointments — named"). PII — flows only through the authed /api/reports.
+// how: "AI-booked, on call" | "AI-booked, via SMS" | "AI-assisted → CRM".
+export interface NamedAppt {
+  customer: string;
+  phone: string;
+  channel: "Inbound" | "Outbound" | null; // null on AI-assisted rows (CRM meetings carry no direction)
+  how: string;
+  vehicle: string;
+  when: string | null; // meeting_start ISO
+  bookedAt: string | null;
+  status: string; // scheduled | cancelled | show | noshow | completed | ""
+  assisted: boolean; // AI-assisted (CRM) — SECONDARY, never folded into the AI-booked headline
+  serviceType: string; // 'sales' | 'service'
+}
+
+// Named warm lead ("Work these now"). PII — authed API only.
+export interface WarmLeadItem {
+  customer: string;
+  phone: string;
+  tier: "hot" | "warm";
+  interest: string; // prettified outcome / action-item intent
+  campaign: string;
+  lastActivity: string | null;
+  serviceType: string; // 'sales' | 'service'
+  source: "ib" | "ob";
 }
 // The 3-pitch inbound story, each shown against the industry/human-team average.
 export interface Benchmark {
@@ -283,6 +322,11 @@ export interface AgentReport {
   activeCampaigns?: ActiveCampaign[];
   noInteraction?: NoInteraction;
   outcomes?: OutcomeSlice[]; // outbound disposition mix (from card 12231 / report_outcomes), biggest first
+
+  // v3 (live-only; undefined on mock/degraded — sections omit)
+  intentOutcomes?: IntentOutcomeRow[]; // inbound: per-intent conversations/resolved/booked/transferred/callback
+  namedAppointments?: NamedAppt[]; // this agent's named appointments (dept + direction scoped)
+  warmLeads?: WarmLeadItem[]; // this agent's named warm leads (dept + direction scoped)
 
   // inbound-only — the 3-pitch story (vs industry) + month-on-month before/after
   benchmarks?: Benchmark[];

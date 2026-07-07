@@ -27,6 +27,8 @@ const sb = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_
       meeting_id: (a.meeting_id as string) ?? null, customer_name: a.customer_name ?? null,
       phone: a.phone ?? null, vehicle: a.vehicle ?? null, intent: a.intent ?? null,
       meeting_start: a.meeting_start ?? null, booked_at: a.booked_at ?? null,
+      status: a.status ?? null, assisted: Number(a.assisted ?? 0) > 0,
+      direction: a.direction ?? null, booked_via: a.booked_via ?? null,
     }))
     .filter((r) => r.team_id && r.meeting_id);
   console.log(`clickhouse → ${rows.length} appointment rows`);

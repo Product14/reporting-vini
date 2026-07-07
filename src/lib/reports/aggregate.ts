@@ -86,12 +86,12 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   // truth than summing conversation events, which over-counts every lead by its number of touches.
   const srcMap = new Map<string, { activity_day: string; team_id: string; agent_type: string; source: string; leads: Set<string>; engaged: Set<string>; appt: Set<string> }>();
 
-  const bump = (g: { activity_day: string; team_id: string; agent_type: string }, dim: BreakdownDim, val: string, count: number, qualified: number, appts: number) => {
+  const bump = (g: { activity_day: string; team_id: string; agent_type: string }, dim: BreakdownDim, val: string, count: number, qualified: number, appts: number, transferred = 0, callbacks = 0) => {
     if (!val) return;
     const k = bkey(key(g.activity_day, g.team_id, g.agent_type), dim, val);
     let b = breaks.get(k);
-    if (!b) { b = { activity_day: g.activity_day, team_id: g.team_id, agent_type: g.agent_type, dim, dim_value: val, count: 0, qualified: 0, appts: 0 }; breaks.set(k, b); }
-    b.count += count; b.qualified += qualified; b.appts += appts;
+    if (!b) { b = { activity_day: g.activity_day, team_id: g.team_id, agent_type: g.agent_type, dim, dim_value: val, count: 0, qualified: 0, appts: 0, transferred: 0, callbacks: 0 }; breaks.set(k, b); }
+    b.count += count; b.qualified += qualified; b.appts += appts; b.transferred += transferred; b.callbacks += callbacks;
   };
 
   for (const r of rows) {
@@ -157,7 +157,10 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     if (q != null && Number.isFinite(Number(q))) { a.quality_score_sum += num(q); a.quality_basis += 1; }
 
     const intent = str(r.primary_intent);
-    if (intent) bump(a, "intent", intent, 1, num(r.query_resolved), num(r.appointment_booked));
+    // intent rows carry the full per-intent outcome mix: count / resolved / booked / transferred /
+    // callbacks (the IB "what customers wanted & how it was handled" table). transferred prefers the
+    // canonical disposition flag, same as the daily column.
+    if (intent) bump(a, "intent", intent, 1, num(r.query_resolved), num(r.appointment_booked), r.transferred != null ? num(r.transferred) : num(r.had_transfer), num(r.had_callback));
     // source breakdown is lead-distinct (see srcMap above), so it needs the lead id — not an event bump.
     // This per-day breakdown is now only a FALLBACK; the window-distinct truth comes from agent_lead_days
     // via report_source_counts (build.ts prefers it). Kept so a degraded read still shows something.
@@ -197,7 +200,7 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   // appts = distinct leads that booked (all per day; build.ts maps these onto Interacted/Total/Booked).
   for (const s of srcMap.values()) {
     const k = bkey(key(s.activity_day, s.team_id, s.agent_type), "source", s.source);
-    breaks.set(k, { activity_day: s.activity_day, team_id: s.team_id, agent_type: s.agent_type, dim: "source", dim_value: s.source, count: s.leads.size, qualified: s.engaged.size, appts: s.appt.size });
+    breaks.set(k, { activity_day: s.activity_day, team_id: s.team_id, agent_type: s.agent_type, dim: "source", dim_value: s.source, count: s.leads.size, qualified: s.engaged.size, appts: s.appt.size, transferred: 0, callbacks: 0 });
   }
   return { daily, breakdown: Array.from(breaks.values()), leadDays: Array.from(leadMap.values()) };
 }

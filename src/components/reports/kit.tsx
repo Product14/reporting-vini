@@ -18,6 +18,7 @@ export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamI
   const tabs = [
     { id: "overview", label: "Overview", href: `/reports${q}` },
     { id: "agents", label: "By agent", href: `/reports/agents${q}` },
+    { id: "campaigns", label: "Campaigns", href: `/reports/campaigns${q}` },
   ] as const;
   return (
     <div className="mx-auto max-w-[1400px] mt-4 flex items-center gap-1">

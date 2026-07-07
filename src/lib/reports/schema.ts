@@ -103,6 +103,44 @@ export interface BreakdownRow {
   count: number;
   qualified: number; // resolved (intent) / appts-eligible — dim-specific
   appts: number;
+  // intent-dim only (0 elsewhere): per-intent hand-off outcomes for the IB "what customers wanted"
+  // table. transferred = canonical disposition; callbacks = had_callback. Historical rows stay 0
+  // until a --full re-aggregate (migration 0017).
+  transferred: number;
+  callbacks: number;
+}
+
+// Named warm lead → report_warm_leads ("Work these now"). Snapshot, not windowed.
+export interface WarmLeadRow {
+  team_id: string;
+  source: string | null; // 'ib' (buying-intent action item) | 'ob' (campaign outcome)
+  service_type: string | null; // 'sales' | 'service'
+  lead_id: string | null;
+  tier: string | null; // 'hot' | 'warm'
+  customer_name: string | null;
+  phone: string | null;
+  campaign: string | null;
+  outcome: string | null;
+  last_activity: string | null;
+}
+
+// Named appointment snapshot row → report_appointments (0016 + v3 columns from 0017).
+export interface ReportAppointmentRow {
+  team_id: string;
+  enterprise_id: string | null;
+  service_type: string | null;
+  lead_id: string | null;
+  meeting_id: string | null;
+  customer_name: string | null;
+  phone: string | null;
+  vehicle: string | null;
+  intent: string | null;
+  meeting_start: string | null;
+  booked_at: string | null;
+  status: string | null; // scheduled | cancelled | show | noshow | completed
+  assisted?: boolean; // AI-assisted (CRM) — SECONDARY, never folded into the AI-booked headline
+  direction?: string | null; // 'inbound' | 'outbound' (AI-booked rows only)
+  booked_via?: string | null; // 'call' | 'sms' (AI-booked rows only)
 }
 
 // One row per (team_id, agent_type, lead_id, activity_day). Retains lead identity so window-distinct

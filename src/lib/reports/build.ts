@@ -7,9 +7,9 @@
  * Returns a FetchResult so the rewritten client `fetchAgents()` can pass it through unchanged and
  * pages keep calling aggregateFleet(agents, prior). */
 
-import { AGENTS as MOCK_AGENTS, type AgentData } from "@/components/reports/data";
+import { AGENTS as MOCK_AGENTS, type AgentData, type NamedAppt, type WarmLeadItem } from "@/components/reports/data";
 import type { FetchResult, Basis } from "@/components/reports/liveData";
-import type { AgentDailyRow, BreakdownRow, AppointmentRow, CallbackRow, CampaignRow, OutcomeRow, OpenFunnelRow, RecoverableRow } from "./schema";
+import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "./schema";
 
 const AGENT_TYPE_BY_ID: Record<AgentData["id"], string> = {
   sales_ib: "Sales Inbound",
@@ -34,15 +34,44 @@ function shortDay(d: string): string {
 const sum = (rows: AgentDailyRow[], f: (r: AgentDailyRow) => number) => rows.reduce((s, r) => s + (f(r) || 0), 0);
 
 // Collapse breakdown rows (already filtered to one agent_type) into value → totals, biggest first.
-function rollupDim(rows: BreakdownRow[], dim: BreakdownRow["dim"]): { value: string; count: number; qualified: number; appts: number }[] {
-  const m = new Map<string, { value: string; count: number; qualified: number; appts: number }>();
+// transferred/callbacks are intent-dim measures (0 elsewhere; 0 on pre-0017 rows until a --full re-aggregate).
+function rollupDim(rows: BreakdownRow[], dim: BreakdownRow["dim"]): { value: string; count: number; qualified: number; appts: number; transferred: number; callbacks: number }[] {
+  const m = new Map<string, { value: string; count: number; qualified: number; appts: number; transferred: number; callbacks: number }>();
   for (const r of rows) {
     if (r.dim !== dim) continue;
     let e = m.get(r.dim_value);
-    if (!e) { e = { value: r.dim_value, count: 0, qualified: 0, appts: 0 }; m.set(r.dim_value, e); }
+    if (!e) { e = { value: r.dim_value, count: 0, qualified: 0, appts: 0, transferred: 0, callbacks: 0 }; m.set(r.dim_value, e); }
     e.count += r.count; e.qualified += r.qualified; e.appts += r.appts;
+    e.transferred += r.transferred ?? 0; e.callbacks += r.callbacks ?? 0;
   }
   return Array.from(m.values()).sort((a, b) => b.count - a.count);
+}
+
+// Friendly labels for the buying-intent action-item vocab shown on warm-lead chips; anything unmapped
+// falls back to a sentence-cased version of the raw value ("purchase intent" → "Purchase intent").
+const INTENT_PRETTY: Record<string, string> = {
+  ScheduleAppointment: "Asked to book",
+  RescheduleAppointment: "Wants to reschedule",
+  SALES_SCHEDULE_SHOWROOM_VISIT: "Showroom visit",
+  CheckVehicleAvailability: "Vehicle availability",
+  CheckVehiclePrice: "Vehicle price",
+  InquireFinanceStatus: "Financing",
+  SALES_CONNECT_TO_FINANCE: "Financing",
+  InquireTradeInValue: "Trade-in value",
+  SALES_TRADE_IN_FOLLOW_UP: "Trade-in follow-up",
+  ScheduleTestDrive: "Test drive",
+  SALES_SCHEDULE_TEST_DRIVE: "Test drive",
+  InquireLeaseOptions: "Lease options",
+  SALES_FOLLOW_UP_WITH_QUOTE: "Waiting on a quote",
+  SERVICE_SCHEDULE_APPOINTMENT: "Service appointment",
+  SERVICE_SEND_ESTIMATE: "Service estimate",
+};
+function prettyInterest(raw: string | null | undefined): string {
+  if (!raw) return "";
+  const mapped = INTENT_PRETTY[raw];
+  if (mapped) return mapped;
+  const s = raw.replace(/_/g, " ").trim().toLowerCase();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 }
 
 const REPLY_LABEL: Record<string, string> = { "0": "Same day", "1": "Day 1", "2": "Day 2", "3+": "Day 3+" };
@@ -52,19 +81,16 @@ export interface BuildInput {
   daily: AgentDailyRow[]; // current window, this team
   breakdown: BreakdownRow[]; // current window, this team
   priorDaily: AgentDailyRow[]; // prior equal-length window, this team (basis for deltas)
-  // rooftop-level detail (from the dedicated cards); attached to the relevant agents below.
-  appointments?: AppointmentRow[];
+  // rooftop-level detail (fed from ClickHouse by scripts/backfill.ts); attached to the relevant agents below.
   callbacks?: CallbackRow[];
   campaigns?: CampaignRow[];
   // Outbound disposition mix (from card 12231 via report_outcomes); attached to the matching outbound
   // agent. Replaces the dead Q12227 `outbound_outcome` path (that column never existed in Q12227).
   outcomes?: OutcomeRow[];
-  // Sales-IB open funnel (card 12341 via report_open_funnel) → the STL card's "leads handled →
-  // appointments booked" split (speed-to-lead vs follow-up). Attached to sales_ib only.
-  openFunnel?: OpenFunnelRow[];
-  // Recoverable inbound leads by bucket (card 12236 via report_money_on_table) → the Overview's
-  // "Money on the table" card. Attached per inbound agent_type; the Overview sums across agents.
-  recoverable?: RecoverableRow[];
+  // v3 named lists (report_appointments already window-filtered by the route; report_warm_leads is a
+  // "now" snapshot). Scoped per agent below AND returned rooftop-wide on the FetchResult.
+  namedAppointments?: ReportAppointmentRow[];
+  warmLeads?: WarmLeadRow[];
   // Slot ids the dealer has actually onboarded (from the Spyne onboarded-agents API). When provided,
   // the report is GATED to these slots — agents the dealer hasn't paid for are dropped (personas kept
   // as-is). null/undefined → don't gate (show all four), the previous behavior.
@@ -116,16 +142,9 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, appointments, callbacks, campaigns, outcomes, openFunnel, recoverable, onboardedSlots, onboardedNames, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, warmLeads, onboardedSlots, onboardedNames, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
-  // Rooftop-level detail mapped once into the UI shapes. Appointments/callbacks attach to inbound
-  // agents, campaigns to outbound — the cards aren't split by agent, so each relevant agent shows
-  // the rooftop's list.
-  const apptItems = (appointments ?? []).map((a) => ({
-    customer: a.customer_name ?? "—", when: fmtWhen(a.appointment_time),
-    vehicle: fmtVehicle(a.vehicle), status: a.status ?? "",
-  }));
   // Keep service_type so each agent shows only its department's callbacks (sales agents → sales leads,
   // service → service) — a service-heavy rooftop's callbacks must not leak onto the Sales cards.
   const callbackItems = (callbacks ?? []).map((c) => ({
@@ -136,15 +155,56 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
     agentType: c.agent_type, name: c.campaign, useCase: c.use_case ?? "", enrolled: c.enrolled, appts: c.appointments,
     apptRate: c.appt_rate_pct ?? 0, warmLeads: c.warm_leads, optOuts: c.opt_outs, noReach: c.no_reach,
   }));
-  // Outbound disposition slices — strip the numeric sort-prefix ("1 No reach" → "No reach") for display.
+  // Outbound disposition slices — keep the raw bucket (canonical best→least ordering) and strip the
+  // numeric sort-prefix ("1 No reach" → "No reach") for display.
   const outcomeItems = (outcomes ?? []).map((o) => ({
-    agentType: o.agent_type, label: o.outcome_bucket.replace(/^\d+\s+/, ""), value: o.mappings,
+    agentType: o.agent_type, bucket: o.outcome_bucket, label: o.outcome_bucket.replace(/^\d+\s+/, ""), value: o.mappings,
   }));
-  // Recoverable leads by bucket — strip the letter sort-prefix ("A. Warm…" → "Warm…") for display.
-  const recoverableItems = (recoverable ?? []).map((r) => ({
-    agentType: r.agent_type ?? "", bucket: r.recoverable_bucket,
-    label: r.recoverable_bucket.replace(/^[A-Za-z]\.\s*/, ""), leads: r.recoverable_leads,
-  }));
+
+  // ── v3 named lists (display shapes; PII stays behind the authed API) ──
+  // Named appointments: one row per LEAD (reschedules create multiple active meeting records — keep
+  // the AI-booked row over an assisted one, then the latest booking). canonical: `assisted` rows are
+  // AI-assisted (CRM) — labeled distinctly, never counted into the AI-booked headline.
+  const namedApptItems: (NamedAppt & { direction: string })[] = (() => {
+    const rows = (namedAppointments ?? [])
+      .map((a) => ({
+        customer: a.customer_name?.trim() || "—",
+        phone: a.phone ?? "",
+        channel: (a.assisted ? null : a.direction === "inbound" ? "Inbound" : a.direction === "outbound" ? "Outbound" : null) as NamedAppt["channel"],
+        how: a.assisted ? "AI-assisted → CRM" : a.booked_via === "sms" ? "AI-booked, via SMS" : "AI-booked, on call",
+        vehicle: fmtVehicle(a.vehicle),
+        when: a.meeting_start ?? null,
+        bookedAt: a.booked_at ?? null,
+        status: a.status ?? "",
+        assisted: Boolean(a.assisted),
+        serviceType: (a.service_type ?? "").toLowerCase(),
+        direction: (a.direction ?? "").toLowerCase(),
+        leadId: a.lead_id ?? a.meeting_id ?? "",
+      }))
+      .sort((x, y) => (x.assisted === y.assisted ? (y.bookedAt ?? "").localeCompare(x.bookedAt ?? "") : x.assisted ? 1 : -1));
+    const seen = new Set<string>();
+    const out: (NamedAppt & { direction: string })[] = [];
+    for (const r of rows) {
+      if (r.leadId && seen.has(r.leadId)) continue;
+      if (r.leadId) seen.add(r.leadId);
+      const { leadId, ...item } = r; // eslint-disable-line @typescript-eslint/no-unused-vars
+      out.push(item);
+    }
+    return out.sort((x, y) => (y.bookedAt ?? "").localeCompare(x.bookedAt ?? ""));
+  })();
+  const warmLeadItems: WarmLeadItem[] = (warmLeads ?? [])
+    .filter((w) => (w.customer_name ?? "").trim() || (w.phone ?? "").trim())
+    .map((w) => ({
+      customer: w.customer_name?.trim() || "—",
+      phone: w.phone ?? "",
+      tier: (w.tier === "warm" ? "warm" : "hot") as WarmLeadItem["tier"],
+      interest: prettyInterest(w.outcome),
+      campaign: w.campaign?.trim() ?? "",
+      lastActivity: w.last_activity ?? null,
+      serviceType: (w.service_type ?? "").toLowerCase(),
+      source: (w.source === "ib" ? "ib" : "ob") as WarmLeadItem["source"],
+    }))
+    .sort((x, y) => (x.tier === y.tier ? (y.lastActivity ?? "").localeCompare(x.lastActivity ?? "") : x.tier === "hot" ? -1 : 1));
 
   // prior-window per-agent basis (drives report.deltas + fleet deltas)
   const prior: Record<string, Basis> = {};
@@ -160,6 +220,13 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       appointments: plc ? plc.apptLeads : sum(pr, (r) => r.appointments),
       leads: plc ? plc.contacted : sum(pr, (r) => r.leads_attempted),
       sms: sum(pr, (r) => r.sms_sent),
+      // v3 hero deltas: hand-offs (transfers lead-level when available + callbacks), talk, after-hours.
+      appointmentsAssisted: plc ? plc.apptLeadsAssisted : sum(pr, (r) => r.appointments_assisted),
+      transfers: plc ? plc.transferLeads : sum(pr, (r) => r.transfers),
+      transfersFailed: plc ? plc.transferFailedLeads : sum(pr, (r) => r.transfers_failed),
+      callbacks: sum(pr, (r) => r.callbacks),
+      talkMinutes: Math.round(sum(pr, (r) => r.talk_seconds) / 60),
+      afterHours: sum(pr, (r) => r.after_hours),
     };
   }
 
@@ -291,6 +358,11 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       queries: intents.length
         ? intents.slice(0, 8).map((r) => ({ label: r.value, total: r.count, resolved: r.qualified }))
         : [],
+      // v3: per-intent outcome mix (IB "what customers wanted & how it was handled"). Call-side only —
+      // intent comes from IRA, which exists only for calls. Inbound agents only.
+      intentOutcomes: inbound && intents.length
+        ? intents.slice(0, 8).map((r) => ({ label: r.value, conversations: r.count, resolved: r.qualified, booked: r.appts, transferred: r.transferred, callback: r.callbacks }))
+        : undefined,
       multiDayReply: replies.length
         ? REPLY_ORDER.filter((o) => replies.some((r) => r.value === o)).map((o) => {
             const r = replies.find((x) => x.value === o)!;
@@ -351,19 +423,6 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
             note: "",
           }
         : undefined;
-      // Open-funnel split (card 12341 → report_open_funnel): appts booked / leads handled by acquisition
-      // path. All-time (12341 isn't windowed yet), attached onto the windowed STL card. Sales IB only.
-      const ofRow = openFunnel?.find((o) => o.agent_type === type);
-      if (ofRow && a.report.speedToLead) {
-        a.report.speedToLead.openFunnel = {
-          stlLeadsHandled: ofRow.stl_leads_handled,
-          stlAppts: ofRow.stl_appointments_booked,
-          stlRate: Math.round((ofRow.stl_handled_to_booked_rate || 0) * 100),
-          followupLeadsHandled: ofRow.followup_leads_handled,
-          followupAppts: ofRow.followup_appointments_booked,
-          followupRate: Math.round((ofRow.followup_handled_to_booked_rate || 0) * 100),
-        };
-      }
     } else {
       a.report.speedToLead = undefined;
     }
@@ -389,41 +448,55 @@ export function buildResult({ daily, breakdown, priorDaily, appointments, callba
       a.trend7 = a.trend7.map(() => 0);
       a.hourly = a.hourly.map(() => 0);
       a.channelSplit = { voice: 0, sms: 0 };
-      a.report = { ...a.report, intent: [], queries: [], multiDayReply: [], leadsBySource: undefined, speedToLead: undefined, outcomes: undefined };
+      a.report = { ...a.report, intent: [], queries: [], multiDayReply: [], leadsBySource: undefined, speedToLead: undefined, outcomes: undefined, intentOutcomes: undefined };
     }
 
-    // Rooftop-level detail. Appointments + callbacks are rooftop-wide → show on EVERY agent card.
-    // Campaigns are tagged by agent_type → only the matching outbound agent shows them.
-    // Attached after the zeroing above so it survives for quiet agents.
-    a.report.upcomingAppointments = apptItems.length ? apptItems : undefined;
+    // Rooftop-level detail, attached after the zeroing above so it survives for quiet agents (a warm
+    // lead or callback is still workable on a day the agent made no calls).
+    // Dead legacy fields — explicitly undefined so the cloned mock never leaks fabricated rows.
+    a.report.upcomingAppointments = undefined; // served live by /api/meetings (agents page card)
+    a.report.moneyOnTable = undefined; // retired with the $ layer (source table dropped in 0011)
     // Callbacks scoped to the agent's DEPARTMENT (sales agents → sales leads' callbacks, service →
     // service) so a service-heavy rooftop's follow-ups don't leak onto the Sales cards. Rows with an
     // unknown/blank service_type fall back to showing (better than hiding a real callback).
     const dept = base.dept === "Service" ? "service" : "sales";
+    const dir = inbound ? "ib" : "ob";
     const myCallbacks = callbackItems.filter((c) => !c.serviceType || c.serviceType === dept);
     a.report.followUps = myCallbacks.length
       ? myCallbacks.map((c) => ({ customer: c.customer, due: c.due, intent: c.intent, priority: c.priority }))
       : undefined;
-    // Money on the table (card 12236): recoverable leads by bucket for this agent's inbound type.
-    // Summed across agents on the Overview; outbound agents match no rows → undefined.
-    const mineRec = recoverableItems.filter((r) => r.agentType === type);
-    a.report.moneyOnTable = mineRec.length
-      ? mineRec.map((r) => ({ bucket: r.bucket, label: r.label, leads: r.leads })).sort((x, y) => x.bucket.localeCompare(y.bucket))
+    // v3 named lists scoped to this agent: dept always; direction when the row carries one (assisted
+    // CRM rows have none → shown on both directions of the dept, matching their lead-level attribution).
+    const myAppts = namedApptItems.filter((n) => n.serviceType === dept && (n.assisted || !n.direction || n.direction === (inbound ? "inbound" : "outbound")));
+    a.report.namedAppointments = myAppts.length
+      ? myAppts.map(({ direction: _d, ...rest }) => rest) // eslint-disable-line @typescript-eslint/no-unused-vars
       : undefined;
+    const myWarm = warmLeadItems.filter((w) => w.serviceType === dept && w.source === dir);
+    a.report.warmLeads = myWarm.length ? myWarm : undefined;
     if (!inbound) {
       const mine = campaignItems.filter((c) => c.agentType === type);
       a.report.activeCampaigns = mine.length
         ? mine.map((c) => ({ name: c.name, useCase: c.useCase, enrolled: c.enrolled, appts: c.appts, apptRate: c.apptRate, warmLeads: c.warmLeads, optOuts: c.optOuts, noReach: c.noReach }))
         : undefined;
       // Disposition mix, biggest slice first (the widget computes its own percentages from value).
+      // `bucket` (raw, sort-prefixed) rides along for the canonical best→least table ordering.
       const mineOutcomes = outcomeItems.filter((o) => o.agentType === type);
       a.report.outcomes = mineOutcomes.length
-        ? [...mineOutcomes].sort((x, y) => y.value - x.value).slice(0, 8).map((o) => ({ label: o.label, value: o.value }))
+        ? [...mineOutcomes].sort((x, y) => y.value - x.value).slice(0, 12).map((o) => ({ label: o.label, value: o.value, bucket: o.bucket }))
         : undefined;
     }
 
     return a;
   });
 
-  return { agents, hasData, fetchedAt: Date.now(), prior };
+  // Rooftop-wide named lists for the Overview (per-agent scoped copies live on agent.report).
+  const namedApptsOut: NamedAppt[] = namedApptItems.map(({ direction: _d, ...rest }) => rest); // eslint-disable-line @typescript-eslint/no-unused-vars
+  return {
+    agents,
+    hasData,
+    fetchedAt: Date.now(),
+    prior,
+    namedAppointments: namedApptsOut.length ? namedApptsOut : undefined,
+    warmLeads: warmLeadItems.length ? warmLeadItems : undefined,
+  };
 }

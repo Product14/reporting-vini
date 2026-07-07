@@ -1,6 +1,6 @@
-import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES } from "@/lib/reports/supabase";
+import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS } from "@/lib/reports/supabase";
 import { buildResult } from "@/lib/reports/build";
-import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow } from "@/lib/reports/schema";
+import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames } from "@/lib/spyne/teamContext";
@@ -95,13 +95,13 @@ async function sourceCountsFor(sb: any, teamId: string, start: string, end: stri
   }
 }
 
-type Detail = { callbacks: CallbackRow[]; campaigns: CampaignRow[]; outcomes: OutcomeRow[] };
-const EMPTY_DETAIL: Detail = { callbacks: [], campaigns: [], outcomes: [] };
+type Detail = { callbacks: CallbackRow[]; campaigns: CampaignRow[]; outcomes: OutcomeRow[]; appointments: ReportAppointmentRow[]; warmLeads: WarmLeadRow[] };
+const EMPTY_DETAIL: Detail = { callbacks: [], campaigns: [], outcomes: [], appointments: [], warmLeads: [] };
 
-/* The per-team detail tables in ONE report_detail() rpc (callbacks / campaigns / outcomes — all now fed
- * directly from ClickHouse by scripts/backfill.ts). On any error returns null so the caller falls back
- * to the independent reads — output identical. (appointments / open-funnel / money-on-table were retired
- * in migration 0011: the first is served live by /api/meetings, the other two were never populated.) */
+/* The per-team detail tables in ONE report_detail() rpc (callbacks / campaigns / outcomes + the v3
+ * named appointments / warm leads — all fed directly from ClickHouse by scripts/backfill.ts). On any
+ * error returns null so the caller falls back to the independent reads — output identical. An
+ * un-migrated DB (pre-0017 rpc) simply omits the two new keys → []. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function fetchDetailCombined(sb: any, teamId: string): Promise<Detail | null> {
   try {
@@ -112,6 +112,8 @@ async function fetchDetailCombined(sb: any, teamId: string): Promise<Detail | nu
       callbacks: (d.callbacks ?? []) as CallbackRow[],
       campaigns: (d.campaigns ?? []) as CampaignRow[],
       outcomes: (d.outcomes ?? []) as OutcomeRow[],
+      appointments: (d.appointments ?? []) as ReportAppointmentRow[],
+      warmLeads: (d.warmLeads ?? []) as WarmLeadRow[],
     };
   } catch {
     return null;
@@ -143,12 +145,14 @@ async function fetchDetailPerTable(sb: any, teamId: string): Promise<Detail> {
   const safe = async <T,>(p: PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> => {
     try { const { data, error } = await p; return error ? [] : ((data ?? []) as T[]); } catch { return []; }
   };
-  const [callbacks, campaigns, outcomes] = await Promise.all([
+  const [callbacks, campaigns, outcomes, appointments, warmLeads] = await Promise.all([
     safe<CallbackRow>(sb.from(REPORT_CALLBACKS).select("*").eq("team_id", teamId)),
     safe<CampaignRow>(sb.from(REPORT_CAMPAIGNS).select("*").eq("team_id", teamId)),
     safe<OutcomeRow>(sb.from(REPORT_OUTCOMES).select("*").eq("team_id", teamId)),
+    safe<ReportAppointmentRow>(sb.from(REPORT_APPOINTMENTS).select("*").eq("team_id", teamId)),
+    safe<WarmLeadRow>(sb.from(REPORT_WARM_LEADS).select("*").eq("team_id", teamId)),
   ]);
-  return { callbacks, campaigns, outcomes };
+  return { callbacks, campaigns, outcomes, appointments, warmLeads };
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -237,7 +241,15 @@ export async function GET(request: Request): Promise<Response> {
     sourceCountsFor(sb, teamId, start, end),
     teamEverLive(sb, teamId),
   ]);
-  const { callbacks, campaigns, outcomes } = detail ?? EMPTY_DETAIL;
+  const { callbacks, campaigns, outcomes, appointments, warmLeads } = detail ?? EMPTY_DETAIL;
+  // Named appointments are shown for the report window — filter the ~120d snapshot by booking date.
+  // UTC date-slice vs the store-local window can drift ±1 day at boundaries; the COUNTS stay canonical
+  // (they come from report_lead_counts_2 / agent_lead_days, not this list). Warm leads are a "now"
+  // snapshot — deliberately NOT windowed.
+  const windowedAppointments = appointments.filter((a) => {
+    const day = (a.booked_at ?? "").slice(0, 10);
+    return day >= start && day < end;
+  });
   // Invariant: a rooftop that returned real rows in THIS request can't be "never live" — don't let a
   // separate probe (even a clean-but-stale empty read) demote it. The probe still gates brand-new
   // rooftops whose selected window AND lifetime are both empty.
@@ -250,6 +262,8 @@ export async function GET(request: Request): Promise<Response> {
     callbacks,
     campaigns,
     outcomes,
+    namedAppointments: windowedAppointments,
+    warmLeads,
     onboardedSlots,
     onboardedNames,
     leadCounts: lc.cur,
