@@ -57,6 +57,10 @@ export async function GET(request: Request): Promise<Response> {
   const channel = (searchParams.get("channel") || "call").toLowerCase();
   const wantCall = channel === "call" || channel === "both";
   const wantSms = channel === "sms" || channel === "both";
+  // Optional lead scope: when set, return THIS lead's calls/SMS (its full recent history) regardless of
+  // the time window — used by the "review conversation" drill-down on named leads. Validated like team_id.
+  const leadId = (searchParams.get("leadId") || "").trim();
+  const leadScoped = idOk(leadId);
   const sinceClause = (col: string) =>
     since && ISO_RE.test(since) ? `${col} >= parseDateTimeBestEffort('${chEsc(since)}')` : `${col} >= now() - INTERVAL ${minutes} MINUTE`;
 
@@ -68,7 +72,9 @@ export async function GET(request: Request): Promise<Response> {
       `e.teamId='${chEsc(teamId)}'`,
       "e.isActive=1", "e.__deleted=0", "e.isTestCall=0",
     ];
-    where.push(sinceClause("e.createdAt"));
+    // Lead-scoped drill-down ignores the time window (show the lead's history); otherwise bound by since/minutes.
+    if (leadScoped) where.push(`e.leadId='${chEsc(leadId)}'`);
+    else where.push(sinceClause("e.createdAt"));
     // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. (an exact '=' dropped those
     // valid rows). `service`/`both` are validated against the SERVICE allow-list above, so the literal is safe.
     if (service !== "both") where.push(`lower(e.callDetails_agentInfo_agentType) LIKE '${service}%'`);
@@ -81,9 +87,14 @@ export async function GET(request: Request): Promise<Response> {
     const sql =
       "SELECT e.id AS id, e.leadId AS leadId, e.callId AS callId," +
       " coalesce(nullIf(c.mobile_number,''), e.callDetails_mobile) AS phone, ifNull(c.name,'') AS customer," +
-      " e.callDetails_agentInfo_agentType AS agentType," +
+      " arrayElement(c.emails,1) AS email," +
+      " e.callDetails_agentInfo_agentType AS agentType, ifNull(e.callDetails_agentInfo_agentName,'') AS agent," +
       " lower(ifNull(e.report_inOutType,'')) AS direction, ifNull(e.report_title,'') AS title," +
       " ifNull(e.report_summary, ifNull(e.callDetails_analysis_summary,'')) AS summary," +
+      " ifNull(e.report_aiScore_totalScore, 0) AS score10," +
+      " JSONExtractString(arrayElement(JSONExtractArrayRaw(assumeNotNull(ifNull(e.report_sales,'{}')),'vehicleRequested'),1),'vehicleName') AS vehicle," +
+      " ifNull(dateDiff('second', parseDateTimeBestEffortOrNull(e.callDetails_startedAt), parseDateTimeBestEffortOrNull(e.callDetails_endedAt)), 0) AS durationSec," +
+      " ifNull(e.callDetails_recordingUrl,'') AS recordingUrl," +
       " lower(ifNull(e.report_overview_appointmentScheduled,'')) AS apptScheduled," +
       " lower(ifNull(e.report_queryResolved,'')) AS queryResolved," +
       " ifNull(e.report_actionItems,'') AS actionItems," +
@@ -91,25 +102,37 @@ export async function GET(request: Request): Promise<Response> {
       " formatDateTime(e.createdAt,'%Y-%m-%dT%H:%i:%SZ') AS at" +
       " FROM dealer_leads.endcallreports e" +
       " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
-      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number, any(emails) emails FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
       " LEFT JOIN (SELECT callId, any(scorePercentage) score, any(overallGrade) grade, any(customerFrustrated) frustrated FROM dealer_leads.conversationQualities WHERE createdAt >= now()-INTERVAL 30 DAY GROUP BY callId) q ON e.callId=q.callId" +
       " WHERE " + where.join(" AND ") +
       ` ORDER BY e.createdAt DESC LIMIT ${limit}`;
-    const rows = await runClickhouse<Record<string, string>>(sql);
-    for (const r of rows) out.push({
-      id: r.id, leadId: r.leadId || null, callId: r.callId || null,
-      phone: r.phone || null, customer: r.customer || null,
-      channel: "call", dept: deptOf(r.agentType || ""),
+    const rows = await runClickhouse<Record<string, string | number>>(sql);
+    for (const r of rows) {
+      const frustrated = Number(r.frustrated) === 1;
+      const resolved = String(r.queryResolved) === "true";
+      out.push({
+      id: String(r.id), leadId: r.leadId ? String(r.leadId) : null, callId: r.callId ? String(r.callId) : null,
+      phone: r.phone ? String(r.phone) : null, customer: r.customer ? String(r.customer) : null,
+      email: r.email ? String(r.email).replace(/^"+|"+$/g, "").trim() || null : null,
+      channel: "call", dept: deptOf(String(r.agentType || "")),
+      agent: r.agent ? String(r.agent) : null,
       direction: r.direction === "outbound" ? "outbound" : "inbound",
-      title: r.title || "", summary: r.summary || "",
+      title: String(r.title || ""), summary: String(r.summary || ""),
+      vehicle: r.vehicle ? String(r.vehicle) : null,
+      durationSec: Number(r.durationSec) || 0,
+      recordingUrl: r.recordingUrl ? String(r.recordingUrl) : null,
+      score: Number(r.score10) || 0,
+      sentiment: frustrated ? "Negative" : "Neutral",
+      outcome: resolved ? "Resolved" : "Not Resolved",
       appointmentScheduled: r.apptScheduled === "true",
-      queryResolved: r.queryResolved === "true",
-      hasActionItem: !!(r.actionItems && !["", "[]", "{}"].includes(r.actionItems)),
+      queryResolved: resolved,
+      hasActionItem: !!(r.actionItems && !["", "[]", "{}"].includes(String(r.actionItems))),
       aiScore: r.aiScore != null && r.aiScore !== "" ? Number(r.aiScore) : null,
-      grade: r.grade || null,
-      frustrated: Number(r.frustrated) === 1,
-      at: r.at || "",
-    });
+      grade: r.grade ? String(r.grade) : null,
+      frustrated,
+      at: r.at ? String(r.at) : "",
+      });
+    }
   }
 
   if (wantSms) {
@@ -127,7 +150,7 @@ export async function GET(request: Request): Promise<Response> {
       " groupArray(lower(ifNull(s.status,''))) AS statuses, groupArray(formatDateTime(s.createdAt,'%Y-%m-%dT%H:%i:%SZ')) AS ats" +
       " FROM dealer_leads.smsMessages s" +
       " INNER JOIN (SELECT conversationId, any(teamId) teamId, any(leadId) leadId FROM dealer_leads.conversations GROUP BY conversationId) cv ON s.conversationId=cv.conversationId" +
-      ` WHERE cv.teamId='${chEsc(teamId)}' AND s.__deleted=0 AND ${sinceClause("s.createdAt")}` +
+      ` WHERE cv.teamId='${chEsc(teamId)}' AND s.__deleted=0 AND ${leadScoped ? `cv.leadId='${chEsc(leadId)}'` : sinceClause("s.createdAt")}` +
       ` GROUP BY s.conversationId ORDER BY at DESC LIMIT ${limit}` +
       ") t" +
       " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON t.leadId=l.lead_id" +

@@ -45,3 +45,7 @@ export const STL_LEAD_FIRST = "stl_lead_first";
 // Persisted rooftop timezone map (see supabase/migrations/0006_team_tz.sql). Seeded by the sync when a
 // Spyne token is available; read as a fallback so bucketing stays store-local across token outages.
 export const TEAM_TZ = "team_tz";
+// Per-account report layout customization (hide/reorder sections) — see 0018_report_layouts.sql. Keyed
+// by (enterprise_id, page_key); shared across every user + rooftop of the account. "Just me" layouts are
+// client-side (localStorage) since there's no per-user identity to key a server row on.
+export const REPORT_LAYOUTS = "report_layouts";

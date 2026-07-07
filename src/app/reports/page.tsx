@@ -3,34 +3,42 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Bucket,
   BUCKET_LABELS,
   Card,
   ComingSoon,
   DateFilter,
   Eyebrow,
   fmtInt,
-  ActiveCampaign,
   GhostPreview,
-  MeetingsModal,
   ReportTopBar,
   SectionLabel,
-  StepFunnel,
   StepList,
 } from "@/components/reports/kit";
 import {
+  ActionItemList,
+  ActionItemsScoreboard,
   AgentFunnelCard,
   DefinitionsFooter,
   fmtDuration,
   fmtRate,
+  fmtSecs,
+  fmtWhenShort,
+  MetricTile,
+  Modal,
   NamedApptsTable,
+  RecentConversationsCard,
   ValueTile,
   WarmLeadChips,
+  WarmLeadsModal,
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult } from "@/components/reports/liveData";
-import { useDateRange, reportNavQuery } from "@/components/reports/dateRange";
+import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
+import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { track } from "@/lib/analytics";
+
+// Customizable section ids for the Overview (stable module constant → identity-stable across renders).
+const OVERVIEW_SECTION_IDS = ["value", "agents", "work", "conversations"];
 
 // useDateRange() reads the selected window from the URL (?range / ?start&?end), which needs a Suspense
 // boundary above useSearchParams. The window now lives in the URL so it survives tab navigation.
@@ -100,21 +108,64 @@ function OverviewReportView() {
       .catch(() => { track("report_load_failed", { tab: "overview", team_id: teamId }); setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
   };
 
-  // Scope to the agents this rooftop actually runs, then aggregate the live numbers.
-  const agents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
+  // Department switcher (All / Sales / Service) — scopes the WHOLE report: agents (fleet + IB/OB split),
+  // named appointments, warm leads, action items and recent conversations. "all" → both departments.
+  const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
+  const svc = dept === "all" ? "both" : dept;
+
+  // Action-item scoreboard (created/closed for the window + open/overdue/due-today now + who-closed-most).
+  // Fetched separately from /api/action-items (direct ClickHouse), keyed on the server-resolved window so
+  // it matches the report's dates. null until loaded / on error → the tile + section show "—".
+  const [aiStats, setAiStats] = useState<{ stats: ActionItemStats; closers: ActionItemCloser[] } | null>(null);
+  useEffect(() => {
+    // Wait for the server-resolved window (feed.start/end) before fetching, so the tile never flashes a
+    // count for the wrong (server-default) window on cold load.
+    if (!teamId || !feed?.start || !feed?.end) { setAiStats(null); return; }
+    let on = true;
+    fetchActionItemStats(teamId, { start: feed.start, end: feed.end, service: svc, spyneToken }).then((r) => { if (on) setAiStats(r); });
+    return () => { on = false; };
+  }, [teamId, feed?.start, feed?.end, svc, spyneToken]);
+
+  // Open action items → the "Work these now" queue (overdue / soonest-due first). Separate from the
+  // scoreboard counts above; a small named list the team can action directly.
+  const [openItems, setOpenItems] = useState<ActionItem[]>([]);
+  useEffect(() => {
+    if (!teamId) { setOpenItems([]); return; }
+    let on = true;
+    fetchActionItems(teamId, { scope: "open", service: svc, limit: 40, spyneToken }).then((r) => { if (on) setOpenItems(r); });
+    return () => { on = false; };
+  }, [teamId, svc, spyneToken]);
+  // Items with a due date, soonest first (so overdue surfaces at the top); undated ones drop off the queue.
+  const workItems = useMemo(
+    () => openItems.filter((i) => i.dueAt).sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime()),
+    [openItems],
+  );
+
+  // Recent conversations (calls + SMS) for the Overview preview list + drawer, scoped to dept + window.
+  const [conversations, setConversations] = useState<Conversation[] | null>(null);
+  useEffect(() => {
+    if (!teamId) { setConversations([]); return; }
+    let on = true;
+    setConversations(null);
+    fetchConversations(teamId, { channel: "both", service: svc, since: feed?.start, limit: 12, spyneToken }).then((r) => { if (on) setConversations(r); });
+    return () => { on = false; };
+  }, [teamId, svc, feed?.start, spyneToken]);
+
+  // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
+  const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
+  const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
   const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
 
   const hasTeam = teamId !== "";
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
   // chosen date range survives navigation to the By-agent view.
-  const navQuery = reportNavQuery(teamId, bucket, custom);
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
   const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : BUCKET_LABELS[bucket];
-  // Appointment drill-down — clicking the headline count lists the rooftop's appointments (sales +
-  // service) for the shown window. Window = the server-resolved dates when we have them, else the bucket.
+  // Appointment drill-down — clicking the headline count opens a modal listing the rooftop's appointments
+  // for the shown window, served from the report's OWN internal data (report_appointments), never Spyne.
   const [apptModalOpen, setApptModalOpen] = useState(false);
   const openApptModal = () => { setApptModalOpen(true); track("appointments_drilldown_opened", { tab: "overview", team_id: teamId }); };
-  const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
-    feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
+  const [warmModalOpen, setWarmModalOpen] = useState(false);
   // "Coming soon" is gated on whether the rooftop has EVER produced data (lifetime) — NOT on the
   // selected window. A live account whose window happens to be empty (e.g. "Today" before the day's
   // first call syncs) renders the real report with zeros + an inline note, not the on-its-way gate.
@@ -129,29 +180,173 @@ function OverviewReportView() {
   const emptyWindow = liveReady && feed !== null && !feed.hasData;
 
   const ranked = useMemo(() => [...agents].sort((a, b) => b.metrics.appointments - a.metrics.appointments), [agents]);
-  // Rooftop campaigns (attached to outbound agents in build.ts; the same list per agent). Top by appointments.
-  const campaigns = useMemo<ActiveCampaign[]>(() => {
-    // Union across ALL outbound agents (each campaign belongs to one agent_type, so no dupes) — a rooftop
-    // running both Sales-OB and Service-OB campaigns showed only the first agent's before. Top by appts.
-    const all = agents.flatMap((a) => a.report.activeCampaigns ?? []);
-    return [...all].sort((a, b) => b.appts - a.appts);
-  }, [agents]);
-  // Rooftop follow-ups: each agent carries its department's callbacks (both directions of a dept share
-  // the list), so union + dedupe to one rooftop-wide "asked for a call back" queue.
-  const followUps = useMemo(() => {
-    const seen = new Set<string>();
-    const out: { customer: string; due: string; intent: string; priority: string }[] = [];
-    for (const a of agents) for (const f of a.report.followUps ?? []) {
-      const k = `${f.customer}|${f.due}|${f.intent}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(f);
-    }
-    return out;
-  }, [agents]);
-  const warmLeads = feed?.warmLeads ?? [];
-  const namedAppts = feed?.namedAppointments ?? [];
+  // Named lists, scoped to the selected department (both carry serviceType).
+  const warmLeads = useMemo(() => (feed?.warmLeads ?? []).filter((w) => dept === "all" || w.serviceType === dept), [feed, dept]);
+  const namedAppts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
   const split = fleet.bySplit;
+  // slot ("sales|inbound" → the AI's real name) so the recent-conversations table shows the SAME agent
+  // name as the rest of the report (onboarded/persona), not the unreliable raw per-call agentName.
+  const agentNames = useMemo(
+    () => Object.fromEntries(allAgents.map((a) => [`${a.dept.toLowerCase()}|${a.dir.toLowerCase()}`, a.report.summary.person || a.name])),
+    [allAgents],
+  );
+
+  // Customizable layout — the customer can hide/reorder these sections (persisted per rooftop). The
+  // manifest drives the Customize modal: sections (reorderable + hideable) + the individual tiles/cards.
+  const ctrl = useCustomize("overview", { teamId, enterpriseId, spyneToken }, OVERVIEW_SECTION_IDS);
+  const customizeGroups: CustomizeGroup[] = [
+    { id: "value", label: "The value delivered", items: [
+      { id: "tile.leads", label: "Leads touched" },
+      { id: "tile.conversations", label: "Real conversations" },
+      { id: "tile.qualified", label: "Qualified leads" },
+      { id: "tile.appts", label: "Appointments — AI-booked" },
+      { id: "tile.handoffs", label: "Hand-offs to team" },
+      { id: "tile.response", label: "Response time" },
+      { id: "tile.actions", label: "Action items created" },
+      { id: "tile.callstexts", label: "Calls & texts" },
+      { id: "tile.talk", label: "Talk time" },
+      { id: "tile.afterhours", label: "After-hours captured" },
+    ] },
+    { id: "agents", label: "Who drove it" },
+    { id: "work", label: "Work these now", items: [
+      { id: "card.warm", label: "Hot & warm leads" },
+      { id: "card.appts", label: "Appointments" },
+      { id: "card.actions", label: "Action items" },
+    ] },
+    { id: "conversations", label: "Recent conversations" },
+  ];
+  const sections: SectionDef[] = [
+    {
+      id: "value",
+      label: "The value delivered",
+      node: (
+        <div className="flex flex-col gap-3.5">
+          <SectionLabel hint={periodLabel}>The value delivered</SectionLabel>
+          {/* MAIN — the outcome story, IB/OB split + period deltas */}
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
+            <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
+            <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
+            <Hideable id="tile.qualified" ctrl={ctrl}><ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} delta={fleet.deltas.qualified} accent="violet" subtext={<>concrete buying intent</>} /></Hideable>
+            <Hideable id="tile.appts" ctrl={ctrl}><ValueTile label="Appointments — AI-booked" total={fmtInt(fleet.appointments)} inbound={fmtInt(split.inbound.appointments)} outbound={fmtInt(split.outbound.appointments)} delta={fleet.deltas.appointments} accent="green" subtext={fleet.appointmentsAssisted > 0 ? <>+{fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>} onClick={fleet.appointments > 0 ? openApptModal : undefined} /></Hideable>
+          </div>
+          {/* SECONDARY — operational quality, one compact row */}
+          <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+            <Hideable id="tile.handoffs" ctrl={ctrl}><MetricTile label="Hand-offs to team" value={fmtInt(fleet.handoffs)} accent="#2563eb" sub={<>{fmtInt(fleet.transfers)} transfers · {fmtInt(fleet.callbacks)} callbacks</>} title="Completed transfers + requested callbacks. Failed transfers are reported separately." /></Hideable>
+            {fleet.responseTimeSec != null && (
+              <Hideable id="tile.response" ctrl={ctrl}><MetricTile label="Response time" value={fmtSecs(fleet.responseTimeSec)} accent="#0ea5e9" sub={<>avg first response · speed-to-lead</>} title="Average time from a new lead arriving to the AI's first touch (speed-to-lead, Sales Inbound)." /></Hideable>
+            )}
+            <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Action items created" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} closed · {fmtInt(aiStats.stats.open)} open</> : <>syncing…</>} onClick={() => router.push(`/reports/action-items${navQuery}`)} title="Follow-up tasks the AI logged for the team this period. Click for the full list." /></Hideable>
+            <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label="Calls & texts" value={fmtInt(fleet.calls + fleet.smsSent)} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsSent)} texts</>} title="Total AI conversations handled across voice and SMS." /></Hideable>
+            <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
+            <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: "agents",
+      label: "Who drove it",
+      node: (
+        <div className="flex flex-col gap-3.5">
+          <div className="flex items-center justify-between gap-3">
+            <SectionLabel hint="Click an agent for the full report">Who drove it</SectionLabel>
+            {hasTeam && (
+              <span className="no-print flex-none text-[11px] text-[#9ca3af]" title={feed?.timezone ? `Report days & times use this rooftop's timezone (${feed.timezone})` : undefined}>
+                {feed?.timezone ? `Times in ${tzShortLabel(feed.timezone)}` : ""}
+                {feed?.timezone && (feed === null || feed?.fetchedAt) ? " · " : ""}
+                {feed === null ? "Syncing…" : feed?.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {ranked.map((a) => {
+              const lf = a.leadFunnel;
+              const inboundDir = a.dir === "Inbound";
+              const qualifiedLeads = lf?.qualified ?? a.metrics.qualified;
+              return (
+                <AgentFunnelCard
+                  key={a.id}
+                  icon={a.icon}
+                  name={a.report.summary.person || a.name}
+                  role={`${a.dept} · ${a.dir}`}
+                  closeRateLabel={fmtRate(a.metrics.appointments, qualifiedLeads)}
+                  closeRateSub={`${fmtInt(a.metrics.appointments)} of ${fmtInt(qualifiedLeads)} qualified`}
+                  stages={[
+                    { label: inboundDir ? "Leads reached" : "Leads dialed", value: lf?.contacted ?? a.report.leadsAttempted },
+                    { label: "Real conversations", value: lf?.connected ?? a.metrics.conversations },
+                    { label: "Qualified leads", value: qualifiedLeads },
+                    { label: "Appointments — AI-booked", value: a.metrics.appointments },
+                  ]}
+                  assisted={a.metrics.appointmentsAssisted}
+                  ministats={{ calls: a.metrics.calls, sms: a.metrics.smsSent, talkMinutes: a.metrics.talkMinutes, handoffs: (a.report.callFlow?.transferred ?? 0) + (a.report.callFlow?.callbacks ?? 0) }}
+                  onClick={() => { track("agent_opened", { team_id: teamId, agent: a.id }); router.push(`/reports/agents${navQuery}${navQuery ? "&" : "?"}agent=${a.id}`); }}
+                />
+              );
+            })}
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: "work",
+      label: "Work these now",
+      node: (warmLeads.length > 0 || namedAppts.length > 0 || (aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0))) ? (
+        <div className="flex flex-col gap-3.5">
+          <SectionLabel hint="reviewed, in-market, unworked — the fastest net-new appointments">Work these now</SectionLabel>
+          <div className="grid gap-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+            {warmLeads.length > 0 && (
+              <Hideable id="card.warm" ctrl={ctrl}>
+                <Card title="Hot & warm leads" sub="Buying intent on record, no appointment yet — call these first" right={<button onClick={() => setWarmModalOpen(true)} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+                  <WarmLeadChips items={warmLeads} teamId={teamId} maxHot={6} maxWarm={5} />
+                </Card>
+              </Hideable>
+            )}
+            {namedAppts.length > 0 && (
+              <Hideable id="card.appts" ctrl={ctrl}>
+              <Card title="Appointments" sub="On the books — AI-booked & AI-assisted" right={<button onClick={() => router.push(`/reports/appointments${navQuery}`)} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+                <div className="flex flex-col gap-2">
+                  {namedAppts.slice(0, 6).map((a, i) => (
+                    <div key={`${a.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f5f5f5] pb-2 last:border-0 last:pb-0">
+                      <div className="min-w-0">
+                        <p className="truncate text-[12.5px] font-semibold text-[#111]">{a.customer}{a.vehicle ? <span className="ml-2 text-[10.5px] font-normal text-[#9ca3af]">{a.vehicle}</span> : null}</p>
+                        <p className="truncate text-[10.5px] font-medium" style={{ color: a.assisted ? "#6d28d9" : "#059669" }}>{a.how}</p>
+                      </div>
+                      <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{fmtWhenShort(a.when)}</p>
+                    </div>
+                  ))}
+                  {namedAppts.length > 6 && <p className="text-[11px] font-semibold text-[#9ca3af]">+{namedAppts.length - 6} more on the Appointments tab</p>}
+                </div>
+              </Card>
+              </Hideable>
+            )}
+          </div>
+          {aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0) && (
+            <Hideable id="card.actions" ctrl={ctrl}>
+            <Card title="Action items" sub="Created & closed this window · open, overdue and due-today are live counts" right={<button onClick={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); router.push(`/reports/action-items${navQuery}`); }} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+              <ActionItemsScoreboard stats={aiStats.stats} periodLabel={periodLabel} />
+              {workItems.length > 0 && (
+                <div className="mt-4 border-t border-[#f3f4f6] pt-3">
+                  <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Overdue / due soon — work these next</p>
+                  <ActionItemList items={workItems} max={6} onMore={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); router.push(`/reports/action-items${navQuery}`); }} />
+                </div>
+              )}
+            </Card>
+            </Hideable>
+          )}
+        </div>
+      ) : false,
+    },
+    {
+      id: "conversations",
+      label: "Recent conversations",
+      node: (
+        <div className="flex flex-col gap-3.5">
+          <SectionLabel hint={conversations ? `${conversations.length} recent · calls & texts` : "loading…"}>Recent conversations</SectionLabel>
+          <RecentConversationsCard items={conversations ?? []} loading={conversations === null} agentNames={agentNames} onViewAll={() => { track("report_tab_clicked", { from: "overview", to: "calls", team_id: teamId }); router.push(`/reports/calls${navQuery}`); }} onOpen={(c) => track("call_row_opened", { team_id: teamId, channel: c.channel })} teamId={teamId} />
+        </div>
+      ),
+    },
+  ];
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -166,14 +361,7 @@ function OverviewReportView() {
           right={
             hasTeam ? (
               <div className="no-print flex items-center gap-3">
-                {feed?.timezone ? (
-                  <span className="hidden text-[11px] text-[#9ca3af] md:inline" title={`Report days & times use this rooftop's timezone (${feed.timezone})`}>
-                    Times in {tzShortLabel(feed.timezone)}
-                  </span>
-                ) : null}
-                <span className="hidden text-[11px] text-[#9ca3af] md:inline">
-                  {feed === null ? "Syncing…" : feed.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
-                </span>
+                {liveReady && <CustomizeToggle ctrl={ctrl} />}
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
@@ -226,237 +414,38 @@ function OverviewReportView() {
             </div>
           )}
 
-          {/* ─────────── 1 · The value delivered — canonical headline counts, IB/OB split ─────────── */}
-          <div className="flex flex-col gap-3.5">
-            <SectionLabel hint={periodLabel}>The value delivered</SectionLabel>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-              <ValueTile
-                label="Appointments — AI-booked"
-                total={fmtInt(fleet.appointments)}
-                inbound={fmtInt(split.inbound.appointments)}
-                outbound={fmtInt(split.outbound.appointments)}
-                delta={fleet.deltas.appointments}
-                accent="green"
-                subtext={fleet.appointmentsAssisted > 0 ? <>+{fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>}
-                onClick={fleet.appointments > 0 ? openApptModal : undefined}
-              />
-              <ValueTile
-                label="Real conversations"
-                total={fmtInt(fleet.conversations)}
-                inbound={fmtInt(split.inbound.conversations)}
-                outbound={fmtInt(split.outbound.conversations)}
-                delta={fleet.deltas.conversations}
-                accent="purple"
-                subtext={<>customer spoke or replied — voicemail excluded</>}
-              />
-              <ValueTile
-                label="Qualified leads"
-                total={fmtInt(fleet.qualified)}
-                inbound={fmtInt(split.inbound.qualified)}
-                outbound={fmtInt(split.outbound.qualified)}
-                delta={fleet.deltas.qualified}
-                accent="violet"
-                subtext={<>concrete buying intent</>}
-              />
-              <ValueTile
-                label="Hand-offs to team"
-                total={fmtInt(fleet.handoffs)}
-                inbound={fmtInt(split.inbound.handoffs)}
-                outbound={fmtInt(split.outbound.handoffs)}
-                delta={fleet.deltas.handoffs}
-                accent="blue"
-                subtext={
-                  <>
-                    {fmtInt(fleet.transfers)} transfers · {fmtInt(fleet.callbacks)} callbacks
-                    {fleet.transfersFailed > 0 && <><br />+{fmtInt(fleet.transfersFailed)} transfers failed</>}
-                  </>
-                }
-              />
-              <ValueTile
-                label="SMS sent"
-                total={fmtInt(fleet.smsSent)}
-                inbound={fmtInt(split.inbound.smsSent)}
-                outbound={fmtInt(split.outbound.smsSent)}
-                delta={fleet.deltas.sms}
-                accent="orange"
-                subtext={<>two-way texting</>}
-              />
-              <ValueTile
-                label="Talk time"
-                total={fmtDuration(fleet.talkMinutes)}
-                inbound={fmtDuration(split.inbound.talkMinutes)}
-                outbound={fmtDuration(split.outbound.talkMinutes)}
-                delta={fleet.deltas.talkMinutes}
-                accent="gray"
-                subtext={<>zero staff minutes spent</>}
-              />
-            </div>
-            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-              <ContextChip label="Calls handled" value={fmtInt(fleet.calls)} />
-              <ContextChip label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" />
-              <ContextChip
-                label="Handled end-to-end"
-                value={fleet.handledEndToEndPct != null ? `${fleet.handledEndToEndPct}%` : "—"}
-                accent="#813fed"
-                title="Share of real conversations the AI completed without transferring to a human — staff time your team got back."
-              />
-            </div>
-          </div>
-
-          {/* ─────────── 2 · The pipeline — whole dealership ─────────── */}
-          <div className="flex flex-col gap-3.5">
-            <SectionLabel hint={periodLabel}>The pipeline — whole dealership</SectionLabel>
-            <Card title="Leads reached → Real conversations → Qualified → Appointments" sub="Each step is the unique leads that reached that stage; the pill is conversion from the step before">
-              <StepFunnel stages={fleet.funnel} />
-              <div className="mt-5 grid grid-cols-2 gap-2.5 border-t border-[#f3f4f6] pt-4 sm:grid-cols-4">
-                <ContextChip
-                  label="Turn rate"
-                  value={fmtRate(fleet.qualified, fleet.conversations)}
-                  accent="#6d28d9"
-                  title="Qualified leads ÷ real conversations"
-                />
-                <ContextChip
-                  label="Close rate"
-                  value={fmtRate(fleet.appointments, fleet.qualified)}
-                  accent="#059669"
-                  title="Appointments — AI-booked ÷ qualified leads"
-                />
-                <ContextChip
-                  label={fleet.answerRateInbound != null ? "Inbound answer rate" : "Connect rate (IB+OB)"}
-                  value={`${fleet.answerRateInbound ?? fleet.connectRate}%`}
-                />
-                <ContextChip label="Talk time" value={fmtDuration(fleet.talkMinutes)} />
-              </div>
-            </Card>
-          </div>
-
-          {/* ─────────── 3 · Who drove it — per-agent funnels ─────────── */}
-          <div className="flex flex-col gap-3.5">
-            <SectionLabel hint="Click an agent for the full report">Who drove it</SectionLabel>
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              {ranked.map((a) => {
-                const lf = a.leadFunnel;
-                const inboundDir = a.dir === "Inbound";
-                const qualifiedLeads = lf?.qualified ?? a.metrics.qualified;
-                return (
-                  <AgentFunnelCard
-                    key={a.id}
-                    icon={a.icon}
-                    name={a.report.summary.person || a.name}
-                    role={`${a.dept} · ${a.dir}`}
-                    closeRateLabel={fmtRate(a.metrics.appointments, qualifiedLeads)}
-                    closeRateSub={`${fmtInt(a.metrics.appointments)} of ${fmtInt(qualifiedLeads)} qualified`}
-                    stages={[
-                      { label: inboundDir ? "Leads reached" : "Leads dialed", value: lf?.contacted ?? a.report.leadsAttempted },
-                      { label: "Real conversations", value: lf?.connected ?? a.metrics.conversations },
-                      { label: "Qualified leads", value: qualifiedLeads },
-                      { label: "Appointments — AI-booked", value: a.metrics.appointments },
-                    ]}
-                    assisted={a.metrics.appointmentsAssisted}
-                    ministats={{
-                      calls: a.metrics.calls,
-                      sms: a.metrics.smsSent,
-                      talkMinutes: a.metrics.talkMinutes,
-                      handoffs: (a.report.callFlow?.transferred ?? 0) + (a.report.callFlow?.callbacks ?? 0),
-                    }}
-                    onClick={() => { track("agent_opened", { team_id: teamId, agent: a.id }); router.push(`/reports/agents${navQuery}${navQuery ? "&" : "?"}agent=${a.id}`); }}
-                  />
-                );
-              })}
-            </div>
-          </div>
-
-          {/* ─────────── 4 · Appointments — named ─────────── */}
-          {(namedAppts.length > 0 || fleet.appointments > 0) && (
-            <div className="flex flex-col gap-3.5">
-              <SectionLabel hint={`${fmtInt(fleet.appointments)} AI-booked · ${fmtInt(fleet.appointmentsAssisted)} AI-assisted`}>
-                Appointments — named
-              </SectionLabel>
-              <Card
-                title="Every appointment on the books"
-                sub="AI-booked = the AI created the meeting · AI-assisted = booked in your CRM on a lead the AI worked (never counted in the headline)"
-                pad={namedAppts.length > 0}
-              >
-                {namedAppts.length > 0 ? (
-                  <NamedApptsTable items={namedAppts} teamId={teamId} />
-                ) : (
-                  <div className="px-6 py-5">
-                    <p className="text-[12.5px] text-[#6b7280]">
-                      Appointment details are syncing — the counts above are correct. Click the appointments tile for the live drill-down.
-                    </p>
-                  </div>
-                )}
-              </Card>
-            </div>
-          )}
-
-          {/* ─────────── 5 · Work these now — named leads for the team ─────────── */}
-          {(warmLeads.length > 0 || followUps.length > 0) && (
-            <div className="flex flex-col gap-3.5">
-              <SectionLabel hint="reviewed, in-market, unworked — the fastest net-new appointments">Work these now</SectionLabel>
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                {warmLeads.length > 0 && (
-                  <Card title="Hot & warm leads" sub="Buying intent on record, no appointment yet — call these first">
-                    <WarmLeadChips items={warmLeads} teamId={teamId} />
-                  </Card>
-                )}
-                {followUps.length > 0 && (
-                  <Card title="Priority follow-ups" sub="Customers who explicitly asked for a return call">
-                    <div className="flex flex-col gap-2">
-                      {followUps.slice(0, 8).map((f, i) => (
-                        <div key={i} className="flex items-center justify-between gap-3 border-b border-[#f5f5f5] pb-2 last:border-0 last:pb-0">
-                          <div className="min-w-0">
-                            <p className="truncate text-[12.5px] font-semibold text-[#111]">{f.customer}</p>
-                            <p className="truncate text-[10.5px] text-[#9ca3af]">{f.intent || "Callback requested"}</p>
-                          </div>
-                          <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{f.due}</p>
-                        </div>
-                      ))}
-                      {followUps.length > 8 && (
-                        <p className="text-[11px] font-semibold text-[#9ca3af]">+{followUps.length - 8} more in the By-agent view</p>
-                      )}
-                    </div>
-                  </Card>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ─────────── 6 · Campaign highlights ─────────── */}
-          {campaigns.length > 0 && (
-            <div className="flex flex-col gap-3.5">
-              <SectionLabel hint="cumulative · last ~120 days">Campaign highlights</SectionLabel>
-              <Card title="Top campaigns" sub="Your outbound campaigns, ranked by appointments booked — full list on the Campaigns tab">
-                <div className="grid grid-cols-1 gap-x-8 gap-y-2.5 md:grid-cols-2">
-                  {campaigns.slice(0, 6).map((c, i) => (
-                    <div key={i} className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-[12.5px] font-semibold text-[#111]">{c.name}</p>
-                        <p className="truncate text-[10.5px] text-[#9ca3af]">{c.useCase || "—"} · {fmtInt(c.enrolled)} enrolled · {fmtInt(c.warmLeads)} warm</p>
-                      </div>
-                      <div className="flex-none text-right">
-                        <p className="text-[13px] font-bold tabular-nums text-[#10b981]">{fmtInt(c.appts)} appts</p>
-                        <p className="text-[10.5px] text-[#9ca3af]">{c.apptRate}% appt rate</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            </div>
-          )}
+          {/* Customizable layout — hide / reorder sections (Customize control lives in the header). */}
+          <CustomizeSections ctrl={ctrl} sections={sections} />
 
           <DefinitionsFooter tzLabel={feed?.timezone ? tzShortLabel(feed.timezone) : undefined} />
           </>
           )}
         </main>
       </div>
-      <MeetingsModal
+      {/* Internal-data modal — shows the report's own appointments (report_appointments), NOT the live
+          Spyne API, so the modal always matches the numbers above. */}
+      <Modal
         open={apptModalOpen}
         onClose={() => setApptModalOpen(false)}
         title={`Appointments · ${periodLabel}`}
-        sub="Every booked appointment across this rooftop — sales & service"
-        fetchOpts={{ teamId, enterpriseId, service: "both", scope: "window", ...meetingWindow, spyneToken }}
+        sub="AI-booked & AI-assisted — straight from your report data, so it always matches the tiles above"
+        wide
+      >
+        {namedAppts.length > 0 ? (
+          <NamedApptsTable items={namedAppts} teamId={teamId} />
+        ) : (
+          <p className="text-[12.5px] text-[#6b7280]">No appointment details for {periodLabel} yet — the counts above are correct; the named list syncs shortly.</p>
+        )}
+      </Modal>
+      {/* Warm-leads "view all" — click a lead to review its conversation (calls + SMS) in the drawer. */}
+      <WarmLeadsModal
+        open={warmModalOpen}
+        onClose={() => setWarmModalOpen(false)}
+        items={warmLeads}
+        loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken })}
       />
+      {/* Customize layout — hide/reorder sections + hide individual cards/tiles (opened from the header). */}
+      <CustomizeModal ctrl={ctrl} groups={customizeGroups} accountLabel={account.name} />
     </div>
   );
 }
@@ -499,14 +488,6 @@ function OverviewSkeleton() {
   );
 }
 
-function ContextChip({ label, value, accent, title }: { label: string; value: string; accent?: string; title?: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-xl bg-[#fafafa] px-3.5 py-2.5" title={title}>
-      <span className="text-[11.5px] text-[#6b7280]">{label}</span>
-      <span className="text-[14px] font-bold tabular-nums" style={{ color: accent ?? "#111" }}>{value}</span>
-    </div>
-  );
-}
 
 /* ── First-time experience — no agents live yet ── */
 function FirstTimeOverview() {

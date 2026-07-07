@@ -85,6 +85,12 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   // per-day sets over a window gives lead-days (≈ distinct leads for short windows) — vastly closer to
   // truth than summing conversation events, which over-counts every lead by its number of touches.
   const srcMap = new Map<string, { activity_day: string; team_id: string; agent_type: string; source: string; leads: Set<string>; engaged: Set<string>; appt: Set<string> }>();
+  // intent breakdown ("what customers wanted") — REAL-CONVERSATION, LEAD-DISTINCT (not per-call). One
+  // representative intent per connected lead per day (the lead's latest connected call), with lead-level
+  // outcomes. Keyed per (day,team,type,lead); materialized into dim='intent' after the loop. This makes
+  // Σ(intent) tie to the funnel's distinct "Real conversations" — the old per-call, non-connected-gated
+  // bump inflated it (e.g. 116/126 vs the real ~88: per-call double-counts + voicemail/hangup intents).
+  const intentLeadMap = new Map<string, { activity_day: string; team_id: string; agent_type: string; lead: string; ts: string; intent: string; resolved: boolean; appt: boolean; transferred: boolean; callback: boolean }>();
 
   const bump = (g: { activity_day: string; team_id: string; agent_type: string }, dim: BreakdownDim, val: string, count: number, qualified: number, appts: number, transferred = 0, callbacks = 0) => {
     if (!val) return;
@@ -157,10 +163,22 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     if (q != null && Number.isFinite(Number(q))) { a.quality_score_sum += num(q); a.quality_basis += 1; }
 
     const intent = str(r.primary_intent);
-    // intent rows carry the full per-intent outcome mix: count / resolved / booked / transferred /
-    // callbacks (the IB "what customers wanted & how it was handled" table). transferred prefers the
-    // canonical disposition flag, same as the daily column.
-    if (intent) bump(a, "intent", intent, 1, num(r.query_resolved), num(r.appointment_booked), r.transferred != null ? num(r.transferred) : num(r.had_transfer), num(r.had_callback));
+    // intent breakdown ("what customers wanted & how it was handled") — accumulated LEAD-DISTINCT and
+    // CONNECTED-GATED: only real conversations count, one representative intent per lead (its latest
+    // connected call), with lead-level outcomes. Materialized after the loop so Σ(intent) ties to the
+    // funnel's distinct "Real conversations" instead of the old inflated per-call, non-connected count.
+    if (intent && lead && num(r.connected) > 0) {
+      const ik = `${day}|${team}|${type}|${lead}`;
+      const ts = str(r.activity_ts);
+      let il = intentLeadMap.get(ik);
+      if (!il) { il = { activity_day: day, team_id: team, agent_type: type, lead, ts: "", intent, resolved: false, appt: false, transferred: false, callback: false }; intentLeadMap.set(ik, il); }
+      if (ts >= il.ts) { il.ts = ts; il.intent = intent; } // representative = the lead's latest connected call
+      // lead-level outcomes (OR across the lead's connected calls) — transferred prefers the canonical flag.
+      if (num(r.query_resolved) > 0) il.resolved = true;
+      if (num(r.appointment_booked) > 0) il.appt = true;
+      if ((r.transferred != null ? num(r.transferred) : num(r.had_transfer)) > 0) il.transferred = true;
+      if (num(r.had_callback) > 0) il.callback = true;
+    }
     // source breakdown is lead-distinct (see srcMap above), so it needs the lead id — not an event bump.
     // This per-day breakdown is now only a FALLBACK; the window-distinct truth comes from agent_lead_days
     // via report_source_counts (build.ts prefers it). Kept so a degraded read still shows something.
@@ -201,6 +219,25 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   for (const s of srcMap.values()) {
     const k = bkey(key(s.activity_day, s.team_id, s.agent_type), "source", s.source);
     breaks.set(k, { activity_day: s.activity_day, team_id: s.team_id, agent_type: s.agent_type, dim: "source", dim_value: s.source, count: s.leads.size, qualified: s.engaged.size, appts: s.appt.size, transferred: 0, callbacks: 0 });
+  }
+  // Materialize the lead-distinct, connected-gated intent breakdown into dim='intent'. Each connected lead
+  // lands in exactly ONE intent bucket (its representative intent), so Σcount = distinct connected leads —
+  // matching the funnel's "Real conversations". qualified column carries RESOLVED (query_resolved), same
+  // meaning build.ts reads for the outcome table; appts/transferred/callbacks are lead-distinct too.
+  const intentAgg = new Map<string, { activity_day: string; team_id: string; agent_type: string; intent: string; count: number; resolved: number; appt: number; transferred: number; callback: number }>();
+  for (const il of intentLeadMap.values()) {
+    const ak = `${il.activity_day}|${il.team_id}|${il.agent_type}|${il.intent}`;
+    let g = intentAgg.get(ak);
+    if (!g) { g = { activity_day: il.activity_day, team_id: il.team_id, agent_type: il.agent_type, intent: il.intent, count: 0, resolved: 0, appt: 0, transferred: 0, callback: 0 }; intentAgg.set(ak, g); }
+    g.count += 1;
+    if (il.resolved) g.resolved += 1;
+    if (il.appt) g.appt += 1;
+    if (il.transferred) g.transferred += 1;
+    if (il.callback) g.callback += 1;
+  }
+  for (const g of intentAgg.values()) {
+    const k = bkey(key(g.activity_day, g.team_id, g.agent_type), "intent", g.intent);
+    breaks.set(k, { activity_day: g.activity_day, team_id: g.team_id, agent_type: g.agent_type, dim: "intent", dim_value: g.intent, count: g.count, qualified: g.resolved, appts: g.appt, transferred: g.transferred, callbacks: g.callback });
   }
   return { daily, breakdown: Array.from(breaks.values()), leadDays: Array.from(leadMap.values()) };
 }

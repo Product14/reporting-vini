@@ -14,6 +14,10 @@ import type { Bucket } from "./data";
 
 const BUCKETS: Bucket[] = ["today", "yesterday", "last7", "last14", "last30", "mtd", "lifetime"];
 
+/* Department scope — sales / service / all. Like the date window, it lives in the URL (?dept=…, omitted
+ * for the default "all") so it SURVIVES tab navigation and is a single top-level scope for every tab. */
+export type Dept = "all" | "sales" | "service";
+
 export interface DateRangeState {
   bucket: Bucket;
   custom: { start: string; end: string } | null;
@@ -32,10 +36,32 @@ export function dateQS(bucket: Bucket, custom: { start: string; end: string } | 
 /* Build a ?team_id=…&<date> query string for tab/back/drill links. enterprise_id and the Spyne token
  * are NOT carried here on purpose — they're held in the ScenarioProvider context, which survives
  * client-side navigation, so only the rooftop scope + window need to ride the URL. */
-export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: string; end: string } | null): string {
-  const dq = dateQS(bucket, custom);
-  if (teamId) return `?team_id=${teamId}${dq ? `&${dq}` : ""}`;
-  return dq ? `?${dq}` : "";
+export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: string; end: string } | null, dept: Dept = "all"): string {
+  const parts = [dateQS(bucket, custom), dept !== "all" ? `dept=${dept}` : ""].filter(Boolean);
+  const tail = parts.length ? parts.join("&") : "";
+  if (teamId) return `?team_id=${teamId}${tail ? `&${tail}` : ""}`;
+  return tail ? `?${tail}` : "";
+}
+
+/* Read + write the department scope via the URL (shared across all report tabs). */
+export function useDept(): { dept: Dept; setDept: (d: Dept) => void } {
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const p = params.get("dept");
+  const dept: Dept = p === "sales" || p === "service" ? p : "all";
+  const setDept = useCallback(
+    (d: Dept) => {
+      const sp = new URLSearchParams(params.toString());
+      if (d === "all") sp.delete("dept");
+      else sp.set("dept", d);
+      const qs = sp.toString();
+      // replace (not push) so toggling scope doesn't stack browser-history entries.
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    },
+    [params, pathname, router],
+  );
+  return { dept, setDept };
 }
 
 /* Read + write the selected window via the URL. Returns memoized `bucket`/`custom` (stable references

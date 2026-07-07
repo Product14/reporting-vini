@@ -18,8 +18,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SERVICE = new Set(["sales", "service", "both"]);
-const SCOPE = new Set(["recent", "open", "overdue"]);
+const SCOPE = new Set(["recent", "open", "overdue", "stats"]);
 const idOk = (s: string) => /^[A-Za-z0-9_-]{1,64}$/.test(s);
+const dateOk = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
 // Explicit dept label from the service-type string. Prefix-based and exhaustive: only a value that
 // actually starts with "service"/"sales" maps to that dept — blank/receptionist/sms → "other" (the old
@@ -51,6 +52,62 @@ export async function GET(request: Request): Promise<Response> {
   const scope = SCOPE.has(scopeRaw) ? scopeRaw : "recent";
   const minutes = Math.max(1, Math.min(10_080, Number(searchParams.get("minutes")) || 15));
   const limit = Math.max(1, Math.min(200, Number(searchParams.get("limit")) || 50));
+
+  // ── scope=stats: rooftop action-item scoreboard (created/closed in-window + open/overdue/due-today
+  //    now + a who-closed-most leaderboard). All from dealer_leads.actionItems, de-duped to the latest
+  //    CDC row per _id (argMax over _version) so triplicate rows don't inflate the counts. created &
+  //    closed are windowed by start/end (store-local dates, exclusive end); open/overdue/due-today are
+  //    current-state. Window defaults to the trailing 30 days. Times compared in ClickHouse server time
+  //    — a minor TZ skew vs the dealer-local report window, acceptable for these operational counts. ──
+  if (scope === "stats") {
+    const svcFilter = service !== "both" ? ` AND lower(ifNull(service_type,'')) LIKE '${service}%'` : "";
+    const startRaw = searchParams.get("start") || "";
+    const endRaw = searchParams.get("end") || "";
+    const startExpr = dateOk(startRaw) ? `toDateTime64('${startRaw} 00:00:00',3)` : "now() - INTERVAL 30 DAY";
+    const endExpr = dateOk(endRaw) ? `toDateTime64('${endRaw} 00:00:00',3)` : "now()";
+    // Latest row per _id, scoped to the team + department; then filter deleted/blank-intent in the outer query.
+    const deduped =
+      "SELECT _id," +
+      " argMax(ifNull(is_completed,0),_version) AS is_completed," +
+      " argMax(ifNull(is_active,1),_version) AS is_active," +
+      " argMax(createdAt,_version) AS createdAt, argMax(updatedAt,_version) AS updatedAt," +
+      " argMax(due_date,_version) AS due_date, argMax(__deleted,_version) AS deleted," +
+      " argMax(ifNull(assigned_to,''),_version) AS assigned_to, argMax(ifNull(intent,''),_version) AS intent" +
+      ` FROM dealer_leads.actionItems WHERE team_id='${chEsc(teamId)}'${svcFilter} GROUP BY _id`;
+    const statsSql =
+      "SELECT" +
+      ` countIf(createdAt >= ${startExpr} AND createdAt < ${endExpr}) AS created,` +
+      ` countIf(is_completed=1 AND updatedAt >= ${startExpr} AND updatedAt < ${endExpr}) AS completed,` +
+      " countIf(is_completed=0 AND is_active=1) AS open," +
+      " countIf(is_completed=0 AND is_active=1 AND due_date > toDateTime('1971-01-01') AND due_date < now()) AS overdue," +
+      " countIf(is_completed=0 AND is_active=1 AND toDate(due_date)=today()) AS dueToday" +
+      ` FROM (${deduped}) WHERE deleted=0 AND intent != ''`;
+    const closersSql =
+      "SELECT assigned_to AS assignedTo, count() AS closed" +
+      ` FROM (${deduped}) WHERE deleted=0 AND intent != '' AND is_completed=1` +
+      ` AND updatedAt >= ${startExpr} AND updatedAt < ${endExpr}` +
+      " GROUP BY assigned_to ORDER BY closed DESC LIMIT 10";
+    const [statRows, closerRows] = await Promise.all([
+      runClickhouse<Record<string, string | number>>(statsSql),
+      runClickhouse<Record<string, string | number>>(closersSql),
+    ]);
+    const s = statRows[0] ?? {};
+    const num = (v: unknown) => Number(v) || 0;
+    return Response.json(
+      {
+        scope: "stats",
+        stats: {
+          created: num(s.created),
+          completed: num(s.completed),
+          open: num(s.open),
+          overdue: num(s.overdue),
+          dueToday: num(s.dueToday),
+        },
+        closers: closerRows.map((r) => ({ assignedTo: String(r.assignedTo || ""), closed: num(r.closed) })),
+      },
+      { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } },
+    );
+  }
 
   const where: string[] = [
     `a.team_id='${chEsc(teamId)}'`,

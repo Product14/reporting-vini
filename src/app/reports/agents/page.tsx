@@ -8,7 +8,6 @@ import {
   AgentData,
   agentById,
   Bucket,
-  FollowUp,
   Meeting,
   MeetingsList,
   BUCKET_LABELS,
@@ -16,9 +15,7 @@ import {
   Card,
   ComingSoon,
   EmptyState,
-  ConfidenceChip,
   DateFilter,
-  DeltaPill,
   fmtInt,
   GhostPreview,
   HOUR_LABELS,
@@ -28,16 +25,15 @@ import {
   RAG_STYLE,
   ReportTopBar,
   SectionLabel,
-  SplitBar,
   StepList,
   Td,
   Th,
   TrendBars,
 } from "@/components/reports/kit";
-import { fmtRate, IntentOutcomeTable, NamedApptsTable, RankedOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
+import { fmtRate, fmtWhenShort, IntentOutcomeTable, RankedOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchMeetings, fetchReportMetrics, agentsForAccount, hasAgentActivity, addDay, peekAgents, tzShortLabel, type FetchResult, type ReportMetrics } from "@/components/reports/liveData";
-import { useDateRange, reportNavQuery } from "@/components/reports/dateRange";
+import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
+import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { track } from "@/lib/analytics";
 
@@ -63,13 +59,13 @@ function AgentReportsView() {
   const paramAgent = searchParams.get("agent"); // the agent the overview "who drove it" link picked
   // Selected window comes from the URL so it persists when arriving from the Overview tab (and back).
   const { bucket, custom, setPreset, setCustom } = useDateRange();
+  const { dept } = useDept(); // top-level scope (shared header, URL-persisted) — scopes the agent pills
   // open on the agent passed in; the picker on the page then drives selection locally.
   // An invalid/absent id is corrected by the validity effect below once agents load.
   const [activeId, setActiveId] = useState<string>(paramAgent || "sales_ib");
   // True once the user has clicked a pill — stops the activity-based default below from overriding an
   // explicit choice (e.g. deliberately opening a quiet agent).
   const userPickedRef = useRef(false);
-  const [showDetail, setShowDetail] = useState<boolean>(true);
   // when set, the rooftop doesn't run this agent → show the upsell pitch instead of a report
   const [upsellId, setUpsellId] = useState<string | null>(null);
   // when set, the appointment-count drill-down modal is open (lists the leads behind the number)
@@ -138,7 +134,7 @@ function AgentReportsView() {
   const hasTeam = teamId !== "";
   // Carries team scope + the selected window into the tab links and the back arrow, so the window
   // survives navigation back to the Overview tab.
-  const navQuery = reportNavQuery(teamId, bucket, custom);
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
   // Gated on lifetime "ever live", NOT the selected window — a live rooftop with an empty window (e.g.
   // "Today" before its first synced call) renders the report with zeros instead of the on-its-way gate.
   // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
@@ -155,7 +151,14 @@ function AgentReportsView() {
   // Use real agents when present; otherwise the skeleton is a crash-safety placeholder only — when a live
   // feed has resolved empty (feedEmpty), the render gates below show the empty state, never the skeleton's
   // mock metrics/pills.
-  const visibleAgents = AGENTS.length ? AGENTS : skeleton;
+  // Scope the agent pills to the top-level dept when one is chosen; fall back to the full set if this
+  // rooftop runs no agent in that dept, so `visibleAgents` is never empty (agentById → agents[0]).
+  const visibleAgents = useMemo(() => {
+    const base = AGENTS.length ? AGENTS : skeleton;
+    if (dept === "all") return base;
+    const scoped = base.filter((ag) => ag.dept.toLowerCase() === dept);
+    return scoped.length ? scoped : base;
+  }, [AGENTS, skeleton, dept]);
   const a = useMemo(() => agentById(activeId, visibleAgents), [activeId, visibleAgents]);
   // keep the selected agent valid when the rooftop (and thus its agent set) changes, and default to an
   // agent that actually has activity in this window so the page never lands on an empty agent while the
@@ -188,11 +191,23 @@ function AgentReportsView() {
   const inbound = a.dir === "Inbound";
   const live = view.hasData; // recently_live + repeat render the real report
 
+  // Highlights & missed are rooftop-level but direction-specific: wins are the AI's best booked calls in
+  // THIS agent's direction (report_highlights carries direction); "missed" (went-to-voicemail / no-answer /
+  // sms-failed) are OUTBOUND dial outcomes with no direction column — nonsensical on an inbound agent, so
+  // they're shown only on outbound agents.
+  const agentDir = inbound ? "inbound" : "outbound";
+  // Match the agent's direction, but KEEP highlights whose direction is null/blank (some rooftops don't
+  // populate it) so real wins never silently vanish from the card.
+  const agentHighlights = metrics ? metrics.highlights.filter((h) => { const d = (h.direction || "").toLowerCase(); return d ? d === agentDir : true; }) : [];
+  const showMissed = !inbound && !!metrics && metrics.missed.length > 0;
+
   // Live data is already a window total for the selected bucket (liveData re-queries per bucket),
   // so it must not be re-scaled — factor=1 when live, 0 in the pre-live ghost states.
   const factor = live ? 1 : 0;
   const scale = (n: number) => Math.round(n * factor);
   const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
+  // Store-local window for the action-items scoreboard (created/closed within it); end is exclusive.
+  const win = useMemo(() => (custom ? { start: custom.start, end: addDay(custom.end) } : rangeFor(bucket)), [bucket, custom]);
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
@@ -206,8 +221,6 @@ function AgentReportsView() {
       sub: `${r.summary.person} · ${a.name} — the leads behind this number`,
     });
   };
-  // only offer the drill-down when there's a non-zero count to drill into
-  const canDrill = live && scale(m.appointments) > 0;
   // No activity to show for this agent in the selected window — covers both a quiet agent on an
   // otherwise-busy window AND a fully-empty window on a live rooftop (e.g. "Today" before any calls
   // sync). Either way show the NoActivity widen-prompt rather than a wall of zeros. (comingSoon is
@@ -360,66 +373,6 @@ function AgentReportsView() {
             />
           )}
 
-          {/* ── headline: Appointments — AI-booked (PRIMARY) + AI-assisted (SECONDARY, never folded in) ── */}
-          <section className="rounded-3xl border border-[#cdeede] bg-gradient-to-r from-[#f0fdf6] to-white shadow-sm px-7 py-6">
-            <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  {/* canonical wording: PRIMARY headline = "Appointments — AI-booked" */}
-                  <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#059669]">
-                    Appointments — AI-booked · {periodLabel}
-                  </p>
-                  {scenario !== "repeat" && <ConfidenceChip level={view.confidence} />}
-                </div>
-                {canDrill ? (
-                  <button
-                    onClick={openApptDrill}
-                    className="group/appt mt-1 block text-left"
-                    title="See the appointments behind this number"
-                  >
-                    <span className="text-[42px] font-extrabold tabular-nums leading-none text-[#059669] underline decoration-dotted decoration-[#059669]/40 underline-offset-[6px] group-hover/appt:decoration-[#059669]">
-                      {fmtInt(scale(m.appointments))}
-                    </span>
-                    <span className="ml-2 align-middle text-[11px] font-semibold text-[#059669]">view leads ↗</span>
-                  </button>
-                ) : (
-                  <p className="mt-1 text-[42px] font-extrabold tabular-nums leading-none text-[#059669]">{fmtInt(scale(m.appointments))}</p>
-                )}
-                {/* canonical: AI-assisted (CRM) = SECONDARY metric, shown smaller/muted, NEVER added
-                    into the AI-booked headline above. Hidden when zero. */}
-                {scale(m.appointmentsAssisted ?? 0) > 0 && (
-                  <p className="mt-1 text-[12px] font-semibold text-[#9ca3af]">
-                    +{fmtInt(scale(m.appointmentsAssisted ?? 0))} AI-assisted (CRM) — booked in your CRM on leads this agent worked
-                  </p>
-                )}
-                <p className="mt-2 max-w-[520px] text-[12px] text-[#6b7280]">
-                  From <b className="text-[#111]">{fmtInt(scale(leadConnected))}</b> real conversations · <b className="text-[#111]">{fmtInt(scale(leadQualified))}</b> qualified leads.
-                </p>
-              </div>
-              <div className="flex gap-3">
-                <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Turn rate</p>
-                  <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{fmtRate(scale(leadQualified), scale(leadConnected))}</p>
-                  <p className="text-[9.5px] text-[#9ca3af]">qualified ÷ conversations</p>
-                </div>
-                <div className="rounded-2xl border border-[#cdeede] bg-white/70 px-5 py-3.5 text-right">
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
-                  <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#059669]">{fmtRate(scale(m.appointments), scale(leadQualified))}</p>
-                  <p className="text-[9.5px] text-[#9ca3af]">AI-booked ÷ qualified</p>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <button
-            onClick={() => { const next = !showDetail; setShowDetail(next); track("agent_detail_toggled", { team_id: teamId, agent: a.id, shown: next }); }}
-            className="mx-auto mt-1 rounded-lg border border-[#e5e7eb] bg-white px-4 py-2 text-[12px] font-semibold text-[#6b7280] hover:bg-[#faf8ff] hover:text-[#813fed] transition-colors"
-          >
-            {showDetail ? "Hide detailed metrics ▴" : "Show detailed metrics ▾"}
-          </button>
-
-          {showDetail && (
-          <>
           <SectionLabel hint={periodLabel}>Performance</SectionLabel>
 
           {/* Performance — outcome funnel (primary) → activity (secondary) → call breakdown (tertiary) */}
@@ -441,7 +394,6 @@ function AgentReportsView() {
                   {/* canonical wording: appts ÷ qualified is the "Close rate" (was "Booking rate").
                       Fraction (never a rounded "0%") when the numerator is real but rounds to zero. */}
                   <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
-                  <DeltaPill delta={r.deltas.abr} />
                 </div>
                 <p className="text-[28px] font-extrabold tabular-nums leading-none text-[#813fed]">{fmtRate(scale(m.appointments), scale(leadQualified))}</p>
               </div>
@@ -456,47 +408,70 @@ function AgentReportsView() {
                   // lead touched on multiple days. Falls back to event counts only if leadFunnel is absent.
                   // canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) · "Real conversations"
                   //                     · "Qualified leads" · "Appointments — AI-booked".
-                  { label: inbound ? "Leads reached" : "Leads dialed", value: scale(r.leadsAttempted), delta: r.deltas.leadsAttempted },
+                  { label: inbound ? "Leads reached" : "Leads dialed", value: scale(r.leadsAttempted) },
                   { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
-                  { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified), delta: r.deltas.leadsQualified },
-                  { label: "Appointments — AI-booked", value: scale(m.appointments), delta: r.deltas.appointments },
+                  { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified) },
+                  { label: "Appointments — AI-booked", value: scale(m.appointments) },
                 ]}
                 appointmentsDrill={live && scale(m.appointments) > 0 ? openApptDrill : undefined}
               />
             </div>
 
-            {/* secondary: activity — outbound adds a Warm leads total (rooftop-wide, from campaigns) */}
-            <div className={`grid ${inbound ? "grid-cols-3" : "grid-cols-2 sm:grid-cols-4"} divide-x divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd]`}>
-              <ActivityStat label={inbound ? "Total calls" : "Calls dispatched"} value={fmtInt(scale(m.calls))} hint={`${fmtInt(scale(m.talkMinutes))} mins talk`} delta={r.deltas.totalCalls} />
-              <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} delta={r.deltas.totalSms} />
-              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint="qualified / conversations" />
-              {!inbound && <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="buying intent across campaigns" />}
+            {/* secondary: activity — key volume + rates. Outbound adds a Warm leads total (rooftop-wide). */}
+            <div className="grid grid-cols-2 divide-x divide-y divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd] sm:grid-cols-4 sm:divide-y-0">
+              <ActivityStat label={inbound ? "Total calls" : "Calls dispatched"} value={fmtInt(scale(m.calls))} hint={`${fmtInt(scale(m.talkMinutes))} mins talk`} />
+              <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} />
+              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint="qualified ÷ conversations" accent="#813fed" />
+              {inbound
+                ? <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint="AI-booked ÷ qualified" accent="#059669" />
+                : <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="buying intent across campaigns" accent="#059669" />}
             </div>
 
-            {/* tertiary: call breakdown — only the buckets we can derive from live volume */}
-            <div className="border-t border-[#f0f0f0] px-6 py-4">
-              <p className="mb-3 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Call breakdown</p>
-              <div className={`grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 ${inbound ? "lg:grid-cols-6" : "lg:grid-cols-4"}`}>
+            {/* tertiary: call breakdown — coverage split + outcome tiles, only what live volume gives us */}
+            <div className="border-t border-[#f0f0f0] px-6 py-5">
+              <p className="mb-4 text-[11px] font-bold uppercase tracking-wider text-[#6b7280]">Call breakdown</p>
+
+              {/* coverage: during vs after hours as a share bar */}
+              {(() => {
+                const during = scale(Math.max(0, m.calls - m.afterHours));
+                const after = scale(m.afterHours);
+                const tot = during + after;
+                const dPct = tot ? Math.round((during / tot) * 100) : 0;
+                return (
+                  <div className="mb-5">
+                    <div className="flex h-2 overflow-hidden rounded-full bg-[#f0f0f0]" role="img" aria-label={`${during} calls during hours, ${after} after hours`}>
+                      <div style={{ width: `${dPct}%`, background: "#813fed" }} />
+                      <div style={{ width: `${100 - dPct}%`, background: "#d8ccf7" }} />
+                    </div>
+                    <div className="mt-2.5 flex flex-wrap gap-x-6 gap-y-1 text-[11.5px] text-[#6b7280]">
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: "#813fed" }} /><b className="tabular-nums text-[#111]">{fmtInt(during)}</b> during hours</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: "#d8ccf7" }} /><b className="tabular-nums text-[#111]">{fmtInt(after)}</b> after hours</span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* outcomes — Conversations/Qualified are UNIQUE LEADS (same basis as the funnel above), so
+                  each label reads one consistent number across the page. Transferred/Callbacks are an
+                  inbound concept — outbound agents don't show them; failed transfers stay SEPARATE. */}
+              <div className={`grid grid-cols-2 gap-2.5 sm:grid-cols-3 ${inbound ? "lg:grid-cols-5" : "lg:grid-cols-2"}`}>
                 {[
-                  { label: "During hours", value: Math.max(0, m.calls - m.afterHours) },
-                  { label: "After hours", value: m.afterHours },
-                  // Conversations/Qualified are UNIQUE LEADS (same basis as the funnel) so each label
-                  // reads one consistent number across the page; the other tiles stay call-activity counts.
-                  { label: "Real conversations", value: leadConnected },
-                  { label: "Qualified leads", value: leadQualified },
-                  // Transferred / Callbacks are an inbound concept — outbound agents (Sales/Service OB) don't show them.
-                  // canonical: failed transfers reported SEPARATELY, never folded into "Transferred".
+                  { label: "Real conversations", value: scale(leadConnected), accent: "#2563eb" },
+                  { label: "Qualified leads", value: scale(leadQualified), accent: "#813fed" },
                   ...(inbound
                     ? [
-                        { label: "Transferred", value: r.callFlow.transferred },
-                        ...((r.callFlow.transfersFailed ?? 0) > 0 ? [{ label: "Transfers failed", value: r.callFlow.transfersFailed ?? 0 }] : []),
-                        { label: "Callbacks", value: r.callFlow.callbacks ?? 0 },
+                        { label: "Transferred", value: scale(r.callFlow.transferred), accent: "#059669" },
+                        ...((r.callFlow.transfersFailed ?? 0) > 0 ? [{ label: "Transfers failed", value: scale(r.callFlow.transfersFailed ?? 0), accent: "#dc2626" }] : []),
+                        { label: "Callbacks", value: scale(r.callFlow.callbacks ?? 0), accent: "#ea760c" },
                       ]
                     : []),
                 ].map((b) => (
-                  <div key={b.label} className="flex flex-col">
-                    <span className="text-[18px] font-bold tabular-nums leading-none text-[#111]">{fmtInt(scale(b.value))}</span>
-                    <span className="mt-1 text-[11px] text-[#6b7280]">{b.label}</span>
+                  <div key={b.label} className="rounded-xl border border-[#f0f0f0] bg-[#fafafa] px-3.5 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 flex-none rounded-full" style={{ background: b.accent }} />
+                      <span className="text-[19px] font-extrabold tabular-nums leading-none text-[#111]">{fmtInt(b.value)}</span>
+                    </div>
+                    <span className="mt-1.5 block text-[11px] leading-tight text-[#6b7280]">{b.label}</span>
                   </div>
                 ))}
               </div>
@@ -514,17 +489,17 @@ function AgentReportsView() {
               <SectionLabel hint="call conversations · totals tie to the funnel">Conversations &amp; outcomes</SectionLabel>
               <Card
                 title="What customers wanted & how it was handled"
-                sub="Per intent: tagged call conversations, how many were resolved by the agent, and the hand-offs"
+                sub="Per intent, across real conversations (distinct leads who engaged — lower than total calls, which counts every dial): resolved by the agent, and the hand-offs"
               >
-                <IntentOutcomeTable rows={r.intentOutcomes!} />
+                <IntentOutcomeTable rows={r.intentOutcomes!} totalConversations={leadConnected} />
               </Card>
             </>
           )}
 
           <SectionLabel>{inbound ? "Inbound operations" : "Outbound campaigns"}</SectionLabel>
 
-          {/* ── Inbound-only: leads by source (+ speed-to-lead for SALES inbound only) ── */}
-          {inbound && r.leadsBySource && (
+          {/* ── Leads by source (inbound + outbound) + speed-to-lead (SALES inbound only) ── */}
+          {r.leadsBySource && (
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
               <div className={a.id === "sales_ib" ? "lg:col-span-2" : "lg:col-span-3"}>
                 <Card title="Leads by source" sub={`${periodLabel} · interacted → total → booked`} pad={false}>
@@ -574,19 +549,42 @@ function AgentReportsView() {
             </div>
           )}
 
-          {/* ── Upcoming appointments + priority follow-ups (rooftop-wide → shown on every agent) ── */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <Card title="Upcoming appointments" sub="Every booking the agent set, with customer and vehicle" pad={false}>
-                <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} service={a.dept === "Service" ? "service" : "sales"} />
-              </Card>
-              <Card title="Priority follow-ups" sub="Callbacks the agent flagged" pad={false}>
-                {r.followUps?.length ? (
-                  <CallbacksList items={r.followUps} />
+          {/* ── Appointments (ONE card: total booked + what's upcoming) — shown ABOVE action items ── */}
+          <Card title="Appointments" sub={`${periodLabel} · total booked and what's upcoming`} pad={false}>
+            <div className="flex flex-wrap items-end gap-x-10 gap-y-3 border-b border-[#f0f0f0] px-6 py-5">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Total AI-booked</p>
+                {live && scale(m.appointments) > 0 ? (
+                  <button onClick={openApptDrill} className="group/appt mt-1 block text-left" title="See the appointments behind this number">
+                    <span className="text-[34px] font-extrabold tabular-nums leading-none text-[#10b981] underline decoration-dotted decoration-[#10b981]/40 underline-offset-4 group-hover/appt:decoration-[#10b981]">{fmtInt(scale(m.appointments))}</span>
+                    <span className="ml-2 align-middle text-[11px] font-semibold text-[#10b981]">view leads ↗</span>
+                  </button>
                 ) : (
-                  <EmptyState icon="📞" title="No callbacks flagged" body="No follow-ups flagged for this rooftop right now — they'll appear here when the agent flags one." />
+                  <p className="mt-1 text-[34px] font-extrabold tabular-nums leading-none text-[#10b981]">{fmtInt(scale(m.appointments))}</p>
                 )}
-              </Card>
+              </div>
+              {scale(m.appointmentsAssisted ?? 0) > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">AI-assisted (CRM)</p>
+                  <p className="mt-1 text-[22px] font-bold tabular-nums leading-none text-[#9ca3af]">+{fmtInt(scale(m.appointmentsAssisted ?? 0))}</p>
+                </div>
+              )}
             </div>
+            <p className="px-6 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Upcoming</p>
+            <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} service={a.dept === "Service" ? "service" : "sales"} />
+          </Card>
+
+          {/* ── Action items — BELOW appointments ── */}
+          <Card title="Action items" sub="Open follow-up tasks the AI logged — work these next" pad={false}>
+            <AgentActionItems
+              teamId={teamId}
+              service={a.dept === "Service" ? "service" : "sales"}
+              spyneToken={spyneToken}
+              start={win.start}
+              end={win.end}
+              viewAllHref={`/reports/action-items${navQuery}`}
+            />
+          </Card>
 
           {/* ── Outbound-only: active campaigns + no-interaction ── */}
           {!inbound && (
@@ -616,50 +614,25 @@ function AgentReportsView() {
             </div>
           )}
 
-          {/* ── named appointments + warm leads for THIS agent ── */}
-          {((r.namedAppointments?.length ?? 0) > 0 || (r.warmLeads?.length ?? 0) > 0) && (
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              {(r.namedAppointments?.length ?? 0) > 0 && (
-                <Card title="Appointments — named" sub={`${periodLabel} · AI-booked and AI-assisted (CRM), by customer`}>
-                  <NamedApptsTable items={r.namedAppointments!} teamId={teamId} />
-                </Card>
-              )}
-              {(r.warmLeads?.length ?? 0) > 0 && (
-                <Card title="Hot & warm leads — work these now" sub="Buying intent on record, no appointment yet">
-                  <WarmLeadChips items={r.warmLeads!} teamId={teamId} maxHot={10} maxWarm={8} />
-                </Card>
-              )}
-            </div>
+          {/* ── Hot & warm leads for THIS agent (named appointments are consolidated into the single
+                 "Appointments" card above — total + upcoming, one card, not two) ── */}
+          {(r.warmLeads?.length ?? 0) > 0 && (
+            <Card title="Hot & warm leads — work these now" sub="Buying intent on record, no appointment yet">
+              <WarmLeadChips items={r.warmLeads!} teamId={teamId} maxHot={10} maxWarm={8} />
+            </Card>
           )}
 
-          {/* multi-day reply effectiveness + channel mix */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            {r.multiDayReply.length > 0 && (
+          {/* multi-day reply effectiveness */}
+          {r.multiDayReply.length > 0 && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <Card title="Multi-day reply effectiveness" sub="When replies land, relative to the first touch">
                 <TrendBars values={r.multiDayReply.map((d) => d.pct)} labels={r.multiDayReply.map((d) => d.day)} height={96} />
                 <p className="mt-3 text-[11px] text-[#6b7280]">
                   {r.multiDayReply[0].pct}% of replies arrive the same day — the rest justify the multi-day cadence.
                 </p>
               </Card>
-            )}
-            <Card title="Channel mix" sub="Share of contacts by channel">
-              <SplitBar
-                segments={[
-                  { label: "Voice", value: a.channelSplit.voice, color: "#6366f1" },
-                  { label: "SMS", value: a.channelSplit.sms, color: "#10b981" },
-                ]}
-              />
-              <p className="mt-4 text-[11.5px] text-[#6b7280]">
-                SMS sent: <b className="text-[#111]">{fmtInt(scale(m.smsSent))}</b> · talk time:{" "}
-                <b className="text-[#111]">{fmtInt((m.talkMinutes * factor) / 60)}h</b>
-                {m.afterHours > 0 && (
-                  <>
-                    {" "}· after-hours captured: <b className="text-[#111]">{fmtInt(scale(m.afterHours))}</b>
-                  </>
-                )}
-              </p>
-            </Card>
-          </div>
+            </div>
+          )}
 
           <SectionLabel>Quality &amp; trend</SectionLabel>
 
@@ -691,14 +664,14 @@ function AgentReportsView() {
 
           {/* highlights & missed — rooftop-level, from ClickHouse via /api/reports/metrics; renders
               only when the snapshot has rows (no placeholder). */}
-          {metrics && (metrics.highlights.length > 0 || metrics.missed.length > 0) && (
+          {(agentHighlights.length > 0 || showMissed) && (
           <Card title="Highlights & missed opportunities" sub="Standout moments worth a closer look" pad={false}>
-              <div className="grid grid-cols-1 sm:grid-cols-2">
-                <div className="px-6 py-5 sm:border-r sm:border-[#f0f0f0]">
-                  <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#059669]">Wins · best booked calls</p>
-                  {metrics.highlights.length ? (
+              <div className={showMissed ? "grid grid-cols-1 sm:grid-cols-2" : "grid grid-cols-1"}>
+                <div className={`px-6 py-5 ${showMissed ? "sm:border-r sm:border-[#f0f0f0]" : ""}`}>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#059669]">Wins · best booked {inbound ? "inbound" : "outbound"} calls</p>
+                  {agentHighlights.length ? (
                     <ul className="mt-3 space-y-2.5">
-                      {metrics.highlights.slice(0, 5).map((h, i) => (
+                      {agentHighlights.slice(0, 5).map((h, i) => (
                         <li key={i} className="flex items-start justify-between gap-3 text-[12.5px] leading-snug">
                           <span className="text-[#374151]">{h.title || "—"}</span>
                           <span className="shrink-0 tabular-nums text-[11px] text-[#9ca3af]">{h.occurred_on ?? ""}</span>
@@ -709,11 +682,11 @@ function AgentReportsView() {
                     <p className="mt-3 text-[12px] text-[#9ca3af]">No standout booked calls in this window.</p>
                   )}
                 </div>
-                <div className="px-6 py-5">
-                  <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#b45309]">Missed · demand that slipped</p>
-                  {metrics.missed.length ? (
+                {showMissed && (
+                  <div className="px-6 py-5">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#b45309]">Missed · outbound demand that slipped</p>
                     <ul className="mt-3 space-y-2.5">
-                      {metrics.missed.map((mm, i) => (
+                      {metrics!.missed.map((mm, i) => (
                         <li key={i} className="flex items-center justify-between text-[12.5px]">
                           <span className="text-[#374151]">
                             {MISSED_LABELS[mm.category] ?? mm.category} <span className="text-[#9ca3af]">· {mm.channel}</span>
@@ -722,48 +695,12 @@ function AgentReportsView() {
                         </li>
                       ))}
                     </ul>
-                  ) : (
-                    <p className="mt-3 text-[12px] text-[#9ca3af]">Nothing slipped in this window.</p>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
           </Card>
           )}
 
-          {/* activity (inbound — calls by reason; outbound campaigns covered above). Renders only when
-              the snapshot has rows — no placeholder. */}
-          {inbound && (() => {
-            const reasons = (metrics?.calls_by_reason ?? [])
-              .filter((rr) => (rr.direction ?? "") === "inbound" && rr.reason && rr.reason !== "Unknown")
-              .sort((x, y) => y.calls - x.calls);
-            if (!reasons.length) return null;
-            return (
-              <Card title={a.activityTitle} sub={periodLabel} pad={false}>
-                <table className="w-full">
-                  <thead className="bg-[#fafafa]">
-                    <tr>
-                      <Th align="left">Reason</Th>
-                      <Th align="right">Calls</Th>
-                      <Th align="right">Booked</Th>
-                      <Th align="right">Book rate</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {reasons.map((rr) => (
-                      <tr key={rr.reason} className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] transition-colors">
-                        <Td align="left"><span className="text-[12.5px] font-semibold text-[#111]">{rr.reason}</span></Td>
-                        <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{fmtInt(rr.calls)}</span></Td>
-                        <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#111]">{fmtInt(rr.booked)}</span></Td>
-                        <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#10b981]">{rr.calls ? Math.round((rr.booked / rr.calls) * 100) : 0}%</span></Td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </Card>
-            );
-          })()}
-          </>
-          )}
           </>
           )}
           </>
@@ -784,9 +721,9 @@ function AgentReportsView() {
 }
 
 /* ── Performance helpers ── */
-/* Lead → qualified → appointment funnel: narrowing proportional bars with per-stage deltas and the
- * step-to-step conversion rate, so the drop-off reads at a glance. */
-function PerfFunnel({ stages, appointmentsDrill }: { stages: { label: string; value: number; delta?: number }[]; appointmentsDrill?: () => void }) {
+/* Lead → qualified → appointment funnel: narrowing proportional bars with the step-to-step conversion
+ * rate, so the drop-off reads at a glance. */
+function PerfFunnel({ stages, appointmentsDrill }: { stages: { label: string; value: number }[]; appointmentsDrill?: () => void }) {
   const max = Math.max(1, stages[0]?.value ?? 1);
   return (
     <div className="flex flex-col gap-2.5">
@@ -837,10 +774,6 @@ function PerfFunnel({ stages, appointmentsDrill }: { stages: { label: string; va
                 }}
               />
             </div>
-            {/* period-over-period delta (omitted for stages without a prior-window basis, e.g. Conversations) */}
-            <div className="w-[92px] flex-none text-right sm:w-[104px]">
-              {s.delta !== undefined && <DeltaPill delta={s.delta} />}
-            </div>
           </div>
         );
       })}
@@ -848,15 +781,12 @@ function PerfFunnel({ stages, appointmentsDrill }: { stages: { label: string; va
   );
 }
 
-function ActivityStat({ label, value, hint, delta }: { label: string; value: string; hint?: string; delta?: number }) {
+function ActivityStat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: string }) {
   return (
-    <div className="px-6 py-4">
+    <div className="px-6 py-5">
       <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">{label}</p>
-      <p className="mt-1 text-[20px] font-bold tabular-nums leading-none text-[#111]">{value}</p>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-        {delta !== undefined && <DeltaPill delta={delta} />}
-        {hint && <span className="text-[10.5px] text-[#6b7280]">{hint}</span>}
-      </div>
+      <p className="mt-1.5 text-[23px] font-extrabold tabular-nums leading-none" style={{ color: accent ?? "#111" }}>{value}</p>
+      {hint && <p className="mt-1.5 text-[10.5px] text-[#6b7280]">{hint}</p>}
     </div>
   );
 }
@@ -1093,24 +1023,97 @@ function UpcomingAppointments({ teamId, enterpriseId, spyneToken, service }: { t
   return <div className="max-h-[360px] overflow-y-auto"><MeetingsList meetings={state.meetings} /></div>;
 }
 
-/* ── Priority follow-ups / callbacks (Supabase ← card 12234) ── */
-function CallbacksList({ items }: { items: FollowUp[] }) {
+/* ── Action items (live ← /api/action-items) — open follow-up tasks the AI logged, scoped to the agent's
+ * department. Replaces the old "priority follow-ups / callbacks" card. Shows live open/overdue/due-today
+ * counts for the window plus the open queue; degrades to an empty state on no-data / error. */
+function AgentActionItems({
+  teamId, service, spyneToken, start, end, viewAllHref,
+}: {
+  teamId: string; service: "sales" | "service"; spyneToken: string; start: string; end: string; viewAllHref: string;
+}) {
+  const [stats, setStats] = useState<ActionItemStats | null>(null);
+  const [items, setItems] = useState<ActionItem[] | null>(null);
+  const [now] = useState(() => Date.now());
+
+  useEffect(() => {
+    let on = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!teamId) { setStats(null); return; }
+    fetchActionItemStats(teamId, { start, end, service, spyneToken }).then((r) => { if (on) setStats(r?.stats ?? null); });
+    return () => { on = false; };
+  }, [teamId, service, spyneToken, start, end]);
+
+  useEffect(() => {
+    let on = true;
+    // reset to the loading state on a rooftop/dept change, then refetch the open queue
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!teamId) { setItems([]); return; }
+    setItems(null);
+    fetchActionItems(teamId, { scope: "open", service, limit: 100, spyneToken }).then((r) => { if (on) setItems(r); });
+    return () => { on = false; };
+  }, [teamId, service, spyneToken]);
+
+  const isOverdue = (a: ActionItem) => !a.completed && !!a.dueAt && new Date(a.dueAt).getTime() < now;
+  const counts: { label: string; value?: number; accent: string }[] = [
+    { label: "Open", value: stats?.open, accent: "#2563eb" },
+    { label: "Overdue", value: stats?.overdue, accent: "#dc2626" },
+    { label: "Due today", value: stats?.dueToday, accent: "#ea760c" },
+  ];
+
   return (
-    <div className="max-h-[320px] divide-y divide-[#f3f4f6] overflow-y-auto">
-      {items.map((f, i) => (
-        <div key={i} className="flex items-center justify-between gap-3 px-6 py-3">
-          <div className="min-w-0">
-            <p className="truncate text-[13px] font-semibold text-[#111]">{f.customer || "—"}</p>
-            <p className="truncate text-[11px] text-[#6b7280]">{f.intent}</p>
-          </div>
-          <div className="flex-none text-right">
-            <PriorityPill priority={f.priority} />
-            <p className="mt-0.5 text-[10.5px] text-[#9ca3af]">{f.due}</p>
-          </div>
+    <div className="flex flex-col">
+      {/* live counts for the selected window */}
+      <div className="flex flex-wrap gap-2 border-b border-[#f0f0f0] px-6 py-3.5">
+        {counts.map((c) => (
+          <span key={c.label} className="inline-flex items-baseline gap-1.5 rounded-lg border border-[#f0f0f0] bg-[#fafafa] px-2.5 py-1">
+            <b className="text-[15px] font-extrabold tabular-nums leading-none" style={{ color: c.accent }}>{stats ? fmtInt(c.value ?? 0) : "—"}</b>
+            <span className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9ca3af]">{c.label}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* open queue */}
+      {items === null ? (
+        <div className="flex items-center justify-center py-12">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#e5e7eb] border-t-[#813fed]" role="status" aria-label="Loading" />
         </div>
-      ))}
+      ) : items.length === 0 ? (
+        <div className="p-6"><EmptyState icon="✅" title="No open action items" body="No follow-up tasks open for this rooftop right now — they'll appear here as the AI logs them." /></div>
+      ) : (
+        <div className="max-h-[320px] divide-y divide-[#f3f4f6] overflow-y-auto">
+          {items.map((a) => {
+            const overdue = isOverdue(a);
+            return (
+              <div key={a.id} className="flex items-center justify-between gap-3 px-6 py-3">
+                <div className="min-w-0">
+                  <p className="truncate text-[13px] font-semibold text-[#111]">{a.customer || "—"}</p>
+                  <p className="truncate text-[11px] text-[#6b7280]">{a.description || prettyIntent(a.intent)}</p>
+                </div>
+                <div className="flex-none text-right">
+                  <PriorityPill priority={a.priority} />
+                  <p className={`mt-0.5 text-[10.5px] tabular-nums ${overdue ? "font-semibold text-[#dc2626]" : "text-[#9ca3af]"}`}>
+                    {a.dueAt ? fmtWhenShort(a.dueAt) : "—"}
+                  </p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* jump to the full action-items tab */}
+      <div className="border-t border-[#f0f0f0] px-6 py-3">
+        <a href={viewAllHref} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">View all action items →</a>
+      </div>
     </div>
   );
+}
+
+// Sentence-case an intent code for the "what to do" line when there's no free-text description.
+function prettyIntent(raw: string): string {
+  if (!raw) return "Follow up";
+  const s = raw.replace(/_/g, " ").trim().toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 function PriorityPill({ priority }: { priority: string }) {
   const v = (priority || "").toUpperCase();

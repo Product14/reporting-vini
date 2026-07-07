@@ -12,7 +12,7 @@ import {
 import { ActiveCampaign, CalibratingBanner, EmptyState, fmtInt, ReportTopBar, Td, Th } from "@/components/reports/kit";
 import { useScenario } from "@/components/reports/scenario";
 import { fetchAgents, agentsForAccount, peekAgents, type FetchResult } from "@/components/reports/liveData";
-import { useDateRange, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { track } from "@/lib/analytics";
 
 /* Per-campaign audience size — the ONLY genuinely-real field we have client-side for a campaign
@@ -41,7 +41,8 @@ function CampaignsReportView() {
   // The window rides in the URL only so tab navigation keeps it — campaign run metrics themselves are a
   // CUMULATIVE (~120d) snapshot from report_campaigns and are NOT windowed by the date filter.
   const { bucket, custom } = useDateRange();
-  const navQuery = reportNavQuery(teamId, bucket, custom);
+  const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
   const [filterSubType, setFilterSubType] = useState<string>("all");
   // Engagement: fires once per opened campaigns report (the rooftop is resolved by mount).
   useEffect(() => { track("report_viewed", { tab: "campaigns", team_id: teamId }); }, [teamId]);
@@ -68,10 +69,10 @@ function CampaignsReportView() {
   const liveCampaigns = useMemo<(ActiveCampaign & { dept: string })[]>(() => {
     const agents = agentsForAccount(feed?.agents ?? [], account);
     return agents
-      .filter((a) => a.dir === "Outbound")
+      .filter((a) => a.dir === "Outbound" && (dept === "all" || a.dept.toLowerCase() === dept))
       .flatMap((a) => (a.report.activeCampaigns ?? []).map((c) => ({ ...c, dept: a.dept })))
       .sort((a, b) => b.appts - a.appts || b.warmLeads - a.warmLeads);
-  }, [feed, account]);
+  }, [feed, account, dept]);
   const totals = useMemo(() => liveCampaigns.reduce(
     (t, c) => ({ enrolled: t.enrolled + c.enrolled, appts: t.appts + c.appts, warm: t.warm + c.warmLeads }),
     { enrolled: 0, appts: 0, warm: 0 },

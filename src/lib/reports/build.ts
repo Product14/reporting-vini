@@ -203,6 +203,7 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
       lastActivity: w.last_activity ?? null,
       serviceType: (w.service_type ?? "").toLowerCase(),
       source: (w.source === "ib" ? "ib" : "ob") as WarmLeadItem["source"],
+      leadId: w.lead_id ?? null,
     }))
     .sort((x, y) => (x.tier === y.tier ? (y.lastActivity ?? "").localeCompare(x.lastActivity ?? "") : x.tier === "hot" ? -1 : 1));
 
@@ -389,13 +390,13 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     // source — exact). Fall back to the per-day breakdown rollup (lead-days; over-counts cross-day leads)
     // only when the RPC is unavailable. Both map onto Total leads / Interacted (two-way) / Booked.
     const srcRows = sourceCounts?.[type];
-    a.report.leadsBySource = !inbound
-      ? undefined
-      : srcRows && srcRows.length
-        ? srcRows.slice(0, 8).map((s) => ({ source: s.source, interacted: s.interacted, engaged: s.interacted, total: s.total, handoffs: 0, appts: s.booked }))
-        : sources.length
-          ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.qualified, engaged: r.qualified, total: r.count, handoffs: 0, appts: r.appts }))
-          : undefined;
+    // Leads by source — shown for BOTH inbound (where leads came from) and outbound (which list/source
+    // the dialed leads came from). Prefer the window-distinct RPC; fall back to the breakdown rollup.
+    a.report.leadsBySource = srcRows && srcRows.length
+      ? srcRows.slice(0, 8).map((s) => ({ source: s.source, interacted: s.interacted, engaged: s.interacted, total: s.total, handoffs: 0, appts: s.booked }))
+      : sources.length
+        ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.qualified, engaged: r.qualified, total: r.count, handoffs: 0, appts: r.appts }))
+        : undefined;
     // Speed-to-lead is a SALES INBOUND concept only — service inbound has no new-CRM-lead funnel,
     // so it never shows the card (base.id gate, not just `inbound`).
     if (base.id === "sales_ib") {
@@ -409,6 +410,7 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
       a.report.speedToLead = (newLeads || stlCnt)
         ? {
             avg: stlCnt ? fmtHandle(stlSec / stlCnt) : "—",
+            avgSec: stlCnt ? Math.round(stlSec / stlCnt) : null, // numeric basis for the fleet "Response time" tile
             pctWithin5: newLeads ? Math.round((100 * within5) / newLeads) : 0,
             crmLeadsNew: newLeads,
             instantlyTouched: within5,

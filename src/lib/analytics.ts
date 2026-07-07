@@ -16,7 +16,7 @@ import { track as vercelTrack } from "@vercel/analytics";
  *   • Vercel only accepts flat string | number | boolean | null props (no nesting).
  * ───────────────────────────────────────────────────────────────────────────── */
 
-export type ReportTab = "overview" | "agents" | "campaigns";
+export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting";
 
 /** The full event catalogue: event name → its property shape. Add new events here. */
 export interface ReportEvents {
@@ -38,6 +38,12 @@ export interface ReportEvents {
   warm_lead_phone_clicked: { team_id: string; tier: string }; // "Work these now" tel: tap
   named_appointment_row_clicked: { team_id: string; assisted: boolean };
   outcome_table_viewed: { team_id: string; agent: string }; // OB ranked-outcomes table rendered
+  // v3 detail pages (Appointments / Recent calls / Action items / Customers)
+  action_items_opened: { tab: ReportTab; team_id: string };
+  action_item_filtered: { team_id: string; dept: string; scope: string };
+  customers_filtered: { team_id: string; bucket: string };
+  call_row_opened: { team_id: string; channel: string };
+  customer_row_opened: { team_id: string; bucket: string };
 
   // ── ROI setup funnel: prompted → set (and edited) — powers the $ value story ──
   cost_per_appt_prompted: { team_id: string };

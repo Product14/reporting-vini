@@ -182,6 +182,7 @@ export interface FleetSplit {
 // from the prior-window basis. Dollar figures are intentionally absent (v3: counts, not $).
 export interface FleetLive {
   calls: number;
+  leads: number; // distinct leads touched/contacted (funnel entry) — the "Leads touched" MAIN tile
   conversations: number;
   qualified: number;
   appointments: number;
@@ -190,6 +191,16 @@ export interface FleetLive {
   transfersFailed: number; // reported separately, never folded in
   callbacks: number;
   handoffs: number; // transfers + callbacks
+  // Query resolution (INBOUND only): a customer asked and the AI answered. Numerator = inbound
+  // query_resolved (callFlow.handledByAI); denominator = queryConversations (inbound real conversations).
+  // Scoped to inbound because outbound reactivation has ~no query_resolved and would dilute the rate.
+  queryResolved: number;
+  queryConversations: number;
+  queryResolutionRate: number | null;
+  // Response time = avg first-response (speed-to-lead) in seconds, from Sales-Inbound STL accumulators.
+  // The honest rooftop "Response time" figure; null when no measurable new-lead touches. SMS reply
+  // latency is shown on the Recent-calls detail page, not folded into this headline.
+  responseTimeSec: number | null;
   // % of real conversations the AI handled end-to-end (no transfer) — the workload-offload headline.
   // null when there are no conversations.
   handledEndToEndPct: number | null;
@@ -205,7 +216,7 @@ export interface FleetLive {
   answerRateInbound: number | null;
   // null === no prior-window basis ("new"); a number is a real % change (incl. 0).
   deltas: {
-    appointments: number | null; calls: number | null; conversations: number | null;
+    appointments: number | null; leads: number | null; calls: number | null; conversations: number | null;
     qualified: number | null; sms: number | null; handoffs: number | null;
     talkMinutes: number | null; afterHours: number | null;
   };
@@ -245,6 +256,21 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const transfersFailed = cf((c) => c.transfersFailed ?? 0);
   const callbacks = cf((c) => c.callbacks ?? 0);
   const handoffs = transfers + callbacks;
+  // Query resolution is an INBOUND concept: a customer asked something and the AI answered it. Outbound
+  // reactivation has ~no query_resolved, so dividing by ALL conversations wrongly dilutes the rate (e.g.
+  // to ~5% on outbound-heavy rooftops). Numerator AND denominator are inbound-only. query_resolved rides
+  // on callFlow.handledByAI; the denominator is inbound real conversations (unique connected leads).
+  // Numerator and denominator MUST be the same grain: query_resolved (callFlow.handledByAI) is a per-day
+  // event sum, so the denominator is inbound connected CONVERSATIONS (metrics.conversations, also per-day
+  // event-summed) — NOT window-distinct leadFunnel.connected, which would mismatch grains and pin the rate
+  // at 100% on multi-day windows. resolved ⊆ connected, so the rate stays ≤ 100 naturally.
+  const queryResolved = agents.filter(isInbound).reduce((s, a) => s + (a.report?.callFlow?.handledByAI ?? 0), 0);
+  const queryConversations = agents.filter(isInbound).reduce((s, a) => s + a.metrics.conversations, 0);
+  const queryResolutionRate = queryConversations > 0 ? Math.min(100, Math.round((100 * queryResolved) / queryConversations)) : null;
+  // Leads touched = distinct leads the AI contacted (funnel entry). Unique-lead basis when available.
+  const leads = hasLeadFunnel ? lf((f) => f.contacted) : sum((a) => a.report?.leadsAttempted ?? 0);
+  // Response time = the Sales-Inbound speed-to-lead avg (only slot with a new-lead first-response funnel).
+  const responseTimeSec = agents.find((a) => a.id === "sales_ib")?.report.speedToLead?.avgSec ?? null;
 
   // Per-direction split for the hero tri-rows.
   const splitFor = (dir: "Inbound" | "Outbound"): FleetSplit => {
@@ -290,6 +316,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
       ];
   return {
     calls,
+    leads,
     conversations,
     qualified,
     appointments,
@@ -298,6 +325,10 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     transfersFailed,
     callbacks,
     handoffs,
+    queryResolved,
+    queryConversations,
+    queryResolutionRate,
+    responseTimeSec,
     handledEndToEndPct: conversations > 0 ? Math.max(0, Math.round(((conversations - transfers) / conversations) * 100)) : null,
     afterHours,
     talkMinutes,
@@ -309,6 +340,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     answerRateInbound: inboundCalls ? Math.round((inboundAnswered / inboundCalls) * 100) : null,
     deltas: {
       appointments: pctDelta(appointments, pSum((b) => b.appointments)),
+      leads: pctDelta(leads, pSum((b) => b.leads)),
       calls: pctDelta(calls, pSum((b) => b.calls)),
       conversations: pctDelta(conversations, pSum((b) => b.conversations)),
       qualified: pctDelta(qualified, pSum((b) => b.qualified)),
@@ -438,6 +470,154 @@ export async function fetchReportMetrics(teamId: string, spyneToken?: string): P
     };
   } catch {
     return null;
+  }
+}
+
+/* ── Action items (dealer_leads.actionItems via /api/action-items) ─────────────────────────────────
+ * Two shapes: the working LIST (scope=open/overdue) and the rooftop STATS scoreboard (scope=stats:
+ * created/closed in-window + open/overdue/due-today now + who-closed-most). Both auth-required — forward
+ * the host Spyne token in prod (omitted locally → server env / dev bypass). Return null / [] on error. */
+export interface ActionItem {
+  id: string;
+  intent: string;
+  leadId: string | null;
+  assignedTo: string | null;
+  description: string;
+  priority: string;
+  completed: boolean;
+  dept: "sales" | "service" | "other";
+  customer: string | null;
+  phone: string | null;
+  dueAt: string;
+  at: string;
+}
+export interface ActionItemStats { created: number; completed: number; open: number; overdue: number; dueToday: number }
+export interface ActionItemCloser { assignedTo: string; closed: number }
+
+export async function fetchActionItemStats(
+  teamId: string,
+  opts: { start?: string; end?: string; service?: "sales" | "service" | "both"; spyneToken?: string } = {},
+): Promise<{ stats: ActionItemStats; closers: ActionItemCloser[] } | null> {
+  if (!teamId) return null;
+  const query: Record<string, string> = { team_id: teamId, scope: "stats", serviceType: opts.service ?? "both" };
+  if (opts.start && opts.end) { query.start = opts.start; query.end = opts.end; }
+  try {
+    const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
+    const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+    if (!r.ok) return null;
+    const j = (await r.json().catch(() => null)) as { stats?: ActionItemStats; closers?: ActionItemCloser[] } | null;
+    if (!j || !j.stats) return null;
+    return { stats: j.stats, closers: Array.isArray(j.closers) ? j.closers : [] };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchActionItems(
+  teamId: string,
+  opts: { scope?: "open" | "overdue" | "recent"; service?: "sales" | "service" | "both"; limit?: number; spyneToken?: string } = {},
+): Promise<ActionItem[]> {
+  if (!teamId) return [];
+  const query: Record<string, string> = {
+    team_id: teamId,
+    scope: opts.scope ?? "open",
+    serviceType: opts.service ?? "both",
+    limit: String(opts.limit ?? 100),
+  };
+  try {
+    const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
+    const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+    const j = (await r.json().catch(() => null)) as { actionItems?: ActionItem[] } | null;
+    if (!r.ok || !j || !Array.isArray(j.actionItems)) return [];
+    return j.actionItems;
+  } catch {
+    return [];
+  }
+}
+
+/* ── Customers / lead book (dealer_leads.leads via /api/customers) ── */
+export interface Customer {
+  leadId: string | null;
+  customer: string;
+  phone: string | null;
+  source: string;
+  status: string;
+  statusBucket: "active" | "sold" | "lost" | "service" | "other";
+  sold: boolean;
+  crmLeadId: string | null;
+  lastActivity: string;
+}
+export async function fetchCustomers(
+  teamId: string,
+  opts: { bucket?: "active" | "sold" | "lost" | "service" | "all"; q?: string; limit?: number; spyneToken?: string } = {},
+): Promise<Customer[]> {
+  if (!teamId) return [];
+  const query: Record<string, string> = { team_id: teamId, bucket: opts.bucket ?? "all", limit: String(opts.limit ?? 100) };
+  if (opts.q) query.q = opts.q;
+  try {
+    const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
+    const r = await fetch(`/api/customers?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+    const j = (await r.json().catch(() => null)) as { customers?: Customer[] } | null;
+    if (!r.ok || !j || !Array.isArray(j.customers)) return [];
+    return j.customers;
+  } catch {
+    return [];
+  }
+}
+
+/* ── Recent conversations (dealer_leads.endcallreports / smsMessages via /api/conversations) ── */
+export interface Conversation {
+  id: string;
+  leadId: string | null;
+  callId?: string | null;
+  phone: string | null;
+  customer: string | null;
+  email?: string | null;
+  channel: "call" | "sms";
+  dept: "sales" | "service" | "other";
+  agent?: string | null; // AI agent name (calls)
+  direction: "inbound" | "outbound";
+  title: string; // the call's intent/title
+  summary: string;
+  vehicle?: string | null; // vehicle of interest (from report_sales.vehicleRequested)
+  durationSec?: number; // call length in seconds
+  recordingUrl?: string | null; // call recording (calls)
+  score?: number; // AI score out of 10 (report_aiScore_totalScore)
+  sentiment?: string; // "Neutral" | "Negative" (derived from frustration)
+  outcome?: string; // "Resolved" | "Not Resolved" (derived from query resolution)
+  appointmentScheduled: boolean;
+  queryResolved: boolean;
+  hasActionItem: boolean;
+  aiScore?: number | null; // AI-quality scorePercentage (0-100), when present
+  grade?: string | null;
+  frustrated?: boolean;
+  msgs?: number;
+  // SMS-thread rows only: the message bubbles (oldest→newest), for the preview drawer.
+  sms?: { authorType: string; body: string; status: string; at: string; direction: string }[];
+  at: string;
+}
+export async function fetchConversations(
+  teamId: string,
+  opts: { channel?: "call" | "sms" | "both"; service?: "sales" | "service" | "both"; since?: string; leadId?: string; limit?: number; spyneToken?: string } = {},
+): Promise<Conversation[]> {
+  if (!teamId) return [];
+  const query: Record<string, string> = {
+    team_id: teamId,
+    channel: opts.channel ?? "call",
+    serviceType: opts.service ?? "both",
+    limit: String(opts.limit ?? 100),
+  };
+  if (opts.since) query.since = opts.since;
+  // Lead-scoped drill-down: fetch this lead's full recent history (server ignores the time window).
+  if (opts.leadId) query.leadId = opts.leadId;
+  try {
+    const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
+    const r = await fetch(`/api/conversations?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+    const j = (await r.json().catch(() => null)) as { conversations?: Conversation[] } | null;
+    if (!r.ok || !j || !Array.isArray(j.conversations)) return [];
+    return j.conversations;
+  } catch {
+    return [];
   }
 }
 

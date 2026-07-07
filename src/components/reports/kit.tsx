@@ -4,24 +4,45 @@ import Link from "next/link";
 import React, { useEffect, useRef, useState } from "react";
 import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
 import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
+import { useDept, type Dept } from "./dateRange";
 import { track } from "@/lib/analytics";
 
 export * from "./data";
 
 /* ── tabs ── */
-export type ReportTab = "overview" | "agents" | "campaigns";
+export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting";
+
+// Tabs the parent product ALSO provides — hidden when this app runs embedded (any non-localhost host),
+// since it's iframed into a console that already has them. Overview + By agent are this app's own views
+// and always show. On localhost (dev) every tab shows so the full app is reachable.
+const PARENT_PROVIDED_TABS = new Set(["appointments", "calls", "actions", "customers", "campaigns", "reporting"]);
 
 export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamId?: string; query?: string }) {
   // keep the rooftop scope AND the selected date window across tab navigation. `query` (built by the
   // page from team_id + the URL date range) is preferred; fall back to team_id only when absent.
   const q = query ?? (teamId ? `?team_id=${teamId}` : "");
-  const tabs = [
+  // Default to EMBEDDED (show only Overview + By agent) so the iframe/prod never flashes the full tab bar
+  // — the parent console already provides the rest. SSR + first client render use this default (they
+  // match), then on localhost only, the effect expands to every tab so the full app stays reachable in dev.
+  const [isLocal, setIsLocal] = useState(false);
+  useEffect(() => {
+    const h = window.location.hostname;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setIsLocal(h === "localhost" || h === "127.0.0.1" || h === "0.0.0.0" || h === "");
+  }, []);
+  const allTabs = [
     { id: "overview", label: "Overview", href: `/reports${q}` },
+    { id: "appointments", label: "Appointments", href: `/reports/appointments${q}` },
+    { id: "calls", label: "Recent calls", href: `/reports/calls${q}` },
+    { id: "actions", label: "Action items", href: `/reports/action-items${q}` },
+    { id: "customers", label: "Customers", href: `/reports/customers${q}` },
     { id: "agents", label: "By agent", href: `/reports/agents${q}` },
     { id: "campaigns", label: "Campaigns", href: `/reports/campaigns${q}` },
+    { id: "reporting", label: "Reporting", href: `/reports/reporting${q}` },
   ] as const;
+  const tabs = isLocal ? allTabs : allTabs.filter((t) => !PARENT_PROVIDED_TABS.has(t.id));
   return (
-    <div className="mx-auto max-w-[1400px] mt-4 flex items-center gap-1">
+    <div className="no-print mx-auto max-w-[1400px] mt-4 flex flex-wrap items-center gap-1">
       {tabs.map((t) =>
         active === t.id ? (
           <span key={t.id} className="flex items-center px-3 py-1.5 rounded-md text-[12.5px] font-semibold bg-[#f3eaff] text-[#813fed]">
@@ -67,6 +88,8 @@ export function ReportTopBar({
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+  // top-level department scope — shared across every tab (persisted in the URL via useDept).
+  const { dept, setDept } = useDept();
 
   return (
     <div
@@ -94,9 +117,32 @@ export function ReportTopBar({
             <p className={`overflow-hidden text-[12.5px] text-[#6b7280] transition-all duration-200 ${scrolled ? "max-h-0 opacity-0" : "mt-1 max-h-10 opacity-100"}`}>{subtitle}</p>
           </div>
         </div>
-        <div className="flex items-center gap-3">{right}</div>
+        <div className="flex items-center gap-3">
+          {teamId && <DeptSwitcher dept={dept} setDept={setDept} />}
+          {right}
+        </div>
       </div>
-      <ReportTabs active={active} teamId={teamId} query={query} />
+      {/* nav tabs collapse away once the page is scrolled (scroll back to the top to reveal them) */}
+      <div className={`overflow-hidden transition-[max-height,opacity] duration-200 ${scrolled ? "max-h-0 opacity-0" : "max-h-40 opacity-100"}`}>
+        <ReportTabs active={active} teamId={teamId} query={query} />
+      </div>
+    </div>
+  );
+}
+
+/* ── department scope — top-level control shown in the header on every tab (Sales / Service / All) ── */
+export function DeptSwitcher({ dept, setDept }: { dept: Dept; setDept: (d: Dept) => void }) {
+  return (
+    <div className="no-print inline-flex rounded-lg border border-[#e5e7eb] bg-white p-0.5">
+      {([["all", "All"], ["sales", "Sales"], ["service", "Service"]] as const).map(([v, l]) => (
+        <button
+          key={v}
+          onClick={() => setDept(v)}
+          className={`rounded-md px-2.5 py-1 text-[12px] font-semibold transition-colors ${dept === v ? "bg-[#f3eaff] text-[#813fed]" : "text-[#6b7280] hover:text-[#111]"}`}
+        >
+          {l}
+        </button>
+      ))}
     </div>
   );
 }

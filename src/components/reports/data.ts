@@ -166,6 +166,7 @@ export interface LeadSource {
 }
 export interface SpeedToLead {
   avg: string;
+  avgSec?: number | null; // numeric avg first-response seconds (capped at 10m) — drives the fleet "Response time" tile; null when no measurable STL leads
   pctWithin5: number;
   crmLeadsNew: number;
   instantlyTouched: number;
@@ -279,6 +280,7 @@ export interface WarmLeadItem {
   lastActivity: string | null;
   serviceType: string; // 'sales' | 'service'
   source: "ib" | "ob";
+  leadId?: string | null; // for the "review conversation" drill-down (fetch this lead's calls/SMS)
 }
 // The 3-pitch inbound story, each shown against the industry/human-team average.
 export interface Benchmark {
