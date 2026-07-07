@@ -35,6 +35,7 @@ import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
+import { goCrossPage } from "@/components/reports/parentNav";
 import { track } from "@/lib/analytics";
 
 // Customizable section ids for the Overview (stable module constant → identity-stable across renders).
@@ -235,7 +236,7 @@ function OverviewReportView() {
             {fleet.responseTimeSec != null && (
               <Hideable id="tile.response" ctrl={ctrl}><MetricTile label="Response time" value={fmtSecs(fleet.responseTimeSec)} accent="#0ea5e9" sub={<>avg first response · speed-to-lead</>} title="Average time from a new lead arriving to the AI's first touch (speed-to-lead, Sales Inbound)." /></Hideable>
             )}
-            <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Action items created" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} closed · {fmtInt(aiStats.stats.open)} open</> : <>syncing…</>} onClick={() => router.push(`/reports/action-items${navQuery}`)} title="Follow-up tasks the AI logged for the team this period. Click for the full list." /></Hideable>
+            <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Action items created" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} closed · {fmtInt(aiStats.stats.open)} open</> : <>syncing…</>} onClick={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)} title="Follow-up tasks the AI logged for the team this period. Click for the full list." /></Hideable>
             <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label="Calls & texts" value={fmtInt(fleet.calls + fleet.smsSent)} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsSent)} texts</>} title="Total AI conversations handled across voice and SMS." /></Hideable>
             <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
             <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
@@ -303,7 +304,7 @@ function OverviewReportView() {
             )}
             {namedAppts.length > 0 && (
               <Hideable id="card.appts" ctrl={ctrl}>
-              <Card title="Appointments" sub="On the books — AI-booked & AI-assisted" right={<button onClick={() => router.push(`/reports/appointments${navQuery}`)} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+              <Card title="Appointments" sub="On the books — AI-booked & AI-assisted" right={<button onClick={() => goCrossPage("appointments", { enterpriseId, teamId }, `/reports/appointments${navQuery}`)} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
                 <div className="flex flex-col gap-2">
                   {namedAppts.slice(0, 6).map((a, i) => (
                     <div key={`${a.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f5f5f5] pb-2 last:border-0 last:pb-0">
@@ -322,12 +323,12 @@ function OverviewReportView() {
           </div>
           {aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0) && (
             <Hideable id="card.actions" ctrl={ctrl}>
-            <Card title="Action items" sub="Created & closed this window · open, overdue and due-today are live counts" right={<button onClick={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); router.push(`/reports/action-items${navQuery}`); }} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+            <Card title="Action items" sub="Created & closed this window · open, overdue and due-today are live counts" right={<button onClick={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
               <ActionItemsScoreboard stats={aiStats.stats} periodLabel={periodLabel} />
               {workItems.length > 0 && (
                 <div className="mt-4 border-t border-[#f3f4f6] pt-3">
                   <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Overdue / due soon — work these next</p>
-                  <ActionItemList items={workItems} max={6} onMore={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); router.push(`/reports/action-items${navQuery}`); }} />
+                  <ActionItemList items={workItems} max={6} onMore={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} />
                 </div>
               )}
             </Card>
@@ -342,7 +343,7 @@ function OverviewReportView() {
       node: (
         <div className="flex flex-col gap-3.5">
           <SectionLabel hint={conversations ? `${conversations.length} recent · calls & texts` : "loading…"}>Recent conversations</SectionLabel>
-          <RecentConversationsCard items={conversations ?? []} loading={conversations === null} agentNames={agentNames} onViewAll={() => { track("report_tab_clicked", { from: "overview", to: "calls", team_id: teamId }); router.push(`/reports/calls${navQuery}`); }} onOpen={(c) => track("call_row_opened", { team_id: teamId, channel: c.channel })} teamId={teamId} />
+          <RecentConversationsCard items={conversations ?? []} loading={conversations === null} agentNames={agentNames} onViewAll={() => { track("report_tab_clicked", { from: "overview", to: "calls", team_id: teamId }); goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`); }} onOpen={(c) => track("call_row_opened", { team_id: teamId, channel: c.channel })} teamId={teamId} />
         </div>
       ),
     },

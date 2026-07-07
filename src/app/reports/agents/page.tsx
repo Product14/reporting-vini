@@ -34,6 +34,7 @@ import { fmtRate, fmtWhenShort, IntentOutcomeTable, RankedOutcomeTable, WarmLead
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { track } from "@/lib/analytics";
 
@@ -582,7 +583,7 @@ function AgentReportsView() {
               spyneToken={spyneToken}
               start={win.start}
               end={win.end}
-              viewAllHref={`/reports/action-items${navQuery}`}
+              onViewAll={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: a.dept === "Service" ? "service" : "sales" }, `/reports/action-items${navQuery}`)}
             />
           </Card>
 
@@ -1027,9 +1028,9 @@ function UpcomingAppointments({ teamId, enterpriseId, spyneToken, service }: { t
  * department. Replaces the old "priority follow-ups / callbacks" card. Shows live open/overdue/due-today
  * counts for the window plus the open queue; degrades to an empty state on no-data / error. */
 function AgentActionItems({
-  teamId, service, spyneToken, start, end, viewAllHref,
+  teamId, service, spyneToken, start, end, onViewAll,
 }: {
-  teamId: string; service: "sales" | "service"; spyneToken: string; start: string; end: string; viewAllHref: string;
+  teamId: string; service: "sales" | "service"; spyneToken: string; start: string; end: string; onViewAll: () => void;
 }) {
   const [stats, setStats] = useState<ActionItemStats | null>(null);
   const [items, setItems] = useState<ActionItem[] | null>(null);
@@ -1103,7 +1104,7 @@ function AgentActionItems({
 
       {/* jump to the full action-items tab */}
       <div className="border-t border-[#f0f0f0] px-6 py-3">
-        <a href={viewAllHref} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">View all action items →</a>
+        <button onClick={onViewAll} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">View all action items →</button>
       </div>
     </div>
   );
