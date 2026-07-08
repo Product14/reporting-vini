@@ -119,6 +119,23 @@ export type AuthResult = { ok: true } | { ok: false; status: 401 | 403; error: s
  * names, and (c) junk/blank-scope bearers that used to fall through to "allow any team". It does NOT by
  * itself stop a caller who forges `{team_id: <victim>}` — the token is not verified against Spyne here.
  * Closing that requires either a signed/host-verified scope token or a live authKey→team check. */
+/* Authorize a BULK / cross-tenant read (GET /api/reports/bulk). A dealer's Spyne session token is
+ * scoped to a single team, so it can NEVER authorize a request that spans teams/enterprises — the only
+ * valid credential here is the shared service secret (CRON_SECRET), presented as `Authorization: Bearer
+ * <secret>` or `?key=<secret>`, exactly like the trusted server-to-server path in requireTeamAuth.
+ *
+ * Unlike requireTeamAuth this has NO local-dev bypass: bulk data is aggregate across every rooftop, so
+ * we require the secret even under `next dev`. Set CRON_SECRET in .env.local to exercise it locally. If
+ * CRON_SECRET is unset (misconfigured deploy) every request is denied rather than silently opened. */
+export function requireServiceAuth(request: Request): AuthResult {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return { ok: false, status: 401, error: "service auth is not configured" };
+  const cred = readBearer(request);
+  const keyParam = new URL(request.url).searchParams.get("key");
+  if (cred === secret || keyParam === secret) return { ok: true };
+  return { ok: false, status: cred || keyParam ? 403 : 401, error: "service credential required" };
+}
+
 export function requireTeamAuth(request: Request, teamId: string): AuthResult {
   const cred = readBearer(request);
 
