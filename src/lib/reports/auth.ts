@@ -136,6 +136,27 @@ export function requireServiceAuth(request: Request): AuthResult {
   return { ok: false, status: cred || keyParam ? 403 : 401, error: "service credential required" };
 }
 
+/* Authorize a BULK READ (GET|POST /api/reports/bulk). Accepts EITHER:
+ *   - BULK_API_KEY — a dedicated, rotatable, READ-ONLY key for this route only. Safe to hand to a
+ *     director/analyst: it authorizes nothing but the bulk metrics read (the route performs no writes),
+ *     and rotating it never touches the cron or the metrics-ingest pipeline. Preferred external credential.
+ *   - CRON_SECRET  — the existing service secret (also grants write on the ingest POST), so trusted
+ *     server-to-server callers that already hold it keep working.
+ * Presented as `Authorization: Bearer <key>` or `?key=<key>`. No local-dev bypass — bulk data spans
+ * every rooftop, so a credential is required even under `next dev`. If NEITHER env var is set the route
+ * is denied (fail-closed) rather than silently opened. */
+export function requireBulkAuth(request: Request): AuthResult {
+  const bulkKey = process.env.BULK_API_KEY;
+  const secret = process.env.CRON_SECRET;
+  if (!bulkKey && !secret) return { ok: false, status: 401, error: "bulk API auth is not configured" };
+  const cred = readBearer(request);
+  const keyParam = new URL(request.url).searchParams.get("key");
+  const presented = [cred, keyParam].filter(Boolean) as string[];
+  const accept = (v: string) => (bulkKey && v === bulkKey) || (secret && v === secret);
+  if (presented.some(accept)) return { ok: true };
+  return { ok: false, status: presented.length ? 403 : 401, error: "bulk API key required" };
+}
+
 export function requireTeamAuth(request: Request, teamId: string): AuthResult {
   const cred = readBearer(request);
 

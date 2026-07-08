@@ -7,7 +7,7 @@
  *
  * AUTH — SERVICE ONLY. A dealer's Spyne session token is scoped to a single team and can never authorize
  * a cross-tenant read, so the only accepted credential is the shared CRON_SECRET (Authorization: Bearer
- * <secret> or ?key=<secret>). See requireServiceAuth.
+ * <secret> or ?key=<key>). Accepts a dedicated read-only BULK_API_KEY or the CRON_SECRET. See requireBulkAuth.
  *
  * DATA SOURCE. Metrics come from the Supabase aggregate (canonical, already materialized):
  *   - agent_lead_days  → WINDOW-DISTINCT lead counts (a lead touched on N days counts ONCE). This is the
@@ -33,7 +33,7 @@
  *                         immediately-preceding equal-length window.)
  */
 import { getSupabase, AGENT_DAILY, AGENT_LEAD_DAYS } from "@/lib/reports/supabase";
-import { requireServiceAuth } from "@/lib/reports/auth";
+import { requireBulkAuth } from "@/lib/reports/auth";
 import { resolveTeams, type TeamMeta } from "@/lib/spyne/enterpriseTeams";
 
 export const runtime = "nodejs";
@@ -329,13 +329,13 @@ async function handle(params: Params): Promise<Response> {
 }
 
 export async function GET(request: Request): Promise<Response> {
-  const auth = requireServiceAuth(request);
+  const auth = requireBulkAuth(request);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
   return handle(fromQuery(new URL(request.url)));
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const auth = requireServiceAuth(request);
+  const auth = requireBulkAuth(request);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
   let body: Record<string, unknown> = {};
   try {
