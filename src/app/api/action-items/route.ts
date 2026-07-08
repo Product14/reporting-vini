@@ -5,11 +5,15 @@
  *   • recent   — created in the last N minutes → "new action item assigned" email (poll pass)
  *   • open     — all not-completed → the stacked "pending" list shown in those emails
  *   • overdue  — not completed AND past due_date → the SLA-breach escalation email
+ *   • created  — created within [start,end) → the daily-digest "Action required" list (grouped by
+ *                intent client-side). This is the faithful successor to the old getActionItems()
+ *                "createdAt BETWEEN start AND end GROUP BY intent" query — a per-window count, unlike
+ *                the current-state `open` snapshot which dealers drain to near-zero.
  *
  * "All actionable intents" (product decision) → no intent allow-list; we only drop blank intents.
  * Degrades to an empty list — never 502s the pipeline.
  *
- *   /api/action-items?team_id=&serviceType=sales|service|both&scope=recent|open|overdue[&minutes=15][&limit=50]
+ *   /api/action-items?team_id=&serviceType=sales|service|both&scope=recent|open|overdue|created[&minutes=15][&start=&end=][&limit=50]
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
 import { requireTeamAuth } from "@/lib/reports/auth";
@@ -18,7 +22,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SERVICE = new Set(["sales", "service", "both"]);
-const SCOPE = new Set(["recent", "open", "overdue", "stats"]);
+const SCOPE = new Set(["recent", "open", "overdue", "stats", "created"]);
 const idOk = (s: string) => /^[A-Za-z0-9_-]{1,64}$/.test(s);
 const dateOk = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -120,6 +124,16 @@ export async function GET(request: Request): Promise<Response> {
   if (scope === "recent") where.push(`a.createdAt >= now() - INTERVAL ${minutes} MINUTE`);
   if (scope === "open") where.push("ifNull(a.is_completed,0)=0");
   if (scope === "overdue") where.push("ifNull(a.is_completed,0)=0 AND a.due_date > toDateTime('1971-01-01') AND a.due_date < now()");
+  if (scope === "created") {
+    // createdAt within [start,end) — dealer-local dates as server-time boundaries, matching the
+    // `stats` scope's window expr (minor TZ skew, acceptable for these operational counts). Defaults
+    // to the trailing 30 days when start/end are absent/malformed.
+    const startRaw = searchParams.get("start") || "";
+    const endRaw = searchParams.get("end") || "";
+    const startExpr = dateOk(startRaw) ? `toDateTime64('${startRaw} 00:00:00',3)` : "now() - INTERVAL 30 DAY";
+    const endExpr = dateOk(endRaw) ? `toDateTime64('${endRaw} 00:00:00',3)` : "now()";
+    where.push(`a.createdAt >= ${startExpr} AND a.createdAt < ${endExpr}`);
+  }
 
   // Identity join (lead→customer) so the action-item / overdue email names the customer — same source
   // as the digest, not a second ClickHouse query in vini-daily-calls.
