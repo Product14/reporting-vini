@@ -126,20 +126,29 @@ def build_sections(ent: str, team: str, days: int) -> dict:
         GROUP BY service_type, booked_via
     """)
 
+    # ★ CANONICAL (locked 2026-07-10, ~/.claude/CLAUDE.md): ok = transferred OR assistant-forwarded-call
+    # (matches the Hand-offs "Transfers" disposition, same as agentBaseFact.sql); failed = the 4-status
+    # warm-transfer-abandon set (verified real and non-trivial in prod — narrowing to bare 'transfer_failed'
+    # silently zeroes the failed bucket for teams where that literal value never fires); FINAL dedupes the
+    # endcallreports CDC triplicate rows (raw count() here previously inflated both buckets ~1.5-2x); split
+    # by service_type so a Sales view is never swamped by Service volume (was: 96% Service data on Sales).
     transfer_quality = ch_rows(f"""
         SELECT
-          countIf(callDetails_endedReason='transferred')              AS transfers_ok,
-          countIf(callDetails_endedReason IN (
+          lower(report_useCase) AS service_type,
+          countIf(lower(callDetails_endedReason) IN ('transferred','assistant-forwarded-call')) AS transfers_ok,
+          countIf(lower(callDetails_endedReason) IN (
              'customer-ended-call-before-warm-transfer',
              'customer-ended-call-after-warm-transfer-attempt',
              'call.in-progress.error-transfer-failed','transfer_failed')) AS transfers_failed,
-          countIf(callDetails_endedReason='assistant-forwarded-call')  AS forwarded,
-          round(countIf(callDetails_endedReason='transferred')
-                /nullIf(countIf(callDetails_endedReason IN (
-                  'transferred','customer-ended-call-before-warm-transfer',
+          countIf(lower(callDetails_endedReason)='assistant-forwarded-call')  AS forwarded,
+          round(countIf(lower(callDetails_endedReason) IN ('transferred','assistant-forwarded-call'))
+                /nullIf(countIf(lower(callDetails_endedReason) IN (
+                  'transferred','assistant-forwarded-call','customer-ended-call-before-warm-transfer',
                   'customer-ended-call-after-warm-transfer-attempt',
                   'call.in-progress.error-transfer-failed','transfer_failed')),0),4) AS success_rate
-        FROM dealer_leads.endcallreports WHERE {ecr_scope}
+        FROM dealer_leads.endcallreports FINAL
+        WHERE {ecr_scope} AND lower(report_useCase) IN ('sales','service')
+        GROUP BY service_type
     """)
 
     calls_by_reason = ch_rows(f"""
@@ -238,7 +247,7 @@ def build_sections(ent: str, team: str, days: int) -> dict:
 
     return {
         "appt_status": appt_status,
-        "transfer_quality": transfer_quality,  # single row (array of one) — the API takes [0]
+        "transfer_quality": transfer_quality,  # up to 2 rows now (one per service_type: sales/service)
         "calls_by_reason": calls_by_reason,
         "campaigns": campaigns,
         "objections": objections,

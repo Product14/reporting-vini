@@ -170,7 +170,7 @@ export async function GET(request: Request): Promise<Response> {
     {
       team_id: teamId,
       appt_status: apptStatus,
-      transfer_quality: transferQuality[0] ?? null, // one row per team
+      transfer_quality: transferQuality, // one row per (team, service_type)
       calls_by_reason: callsByReason,
       campaigns,
       objections,
