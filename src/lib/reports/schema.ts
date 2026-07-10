@@ -249,6 +249,7 @@ export interface ApptStatusRow {
 }
 export interface TransferQualityRow {
   team_id: string;
+  service_type: string | null; // "sales" | "service"
   transfers_ok: number;
   transfers_failed: number;
   forwarded: number;

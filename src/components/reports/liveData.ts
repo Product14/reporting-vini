@@ -445,8 +445,15 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
  * from GET /api/reports/metrics (rooftop-level, separate from the Q12227 aggregate fetchAgents reads).
  * Only the fields the UI renders are typed. Returns null when no rooftop / on any error → the widgets
  * stay on their "coming soon" placeholder, so a missing push never breaks the report. */
+export interface TransferQualityMetric {
+  service_type: string | null; // "sales" | "service"
+  transfers_ok: number;
+  transfers_failed: number;
+  forwarded: number;
+  success_rate: number | null;
+}
 export interface ReportMetrics {
-  transfer_quality: { transfers_ok: number; transfers_failed: number; forwarded: number; success_rate: number | null } | null;
+  transfer_quality: TransferQualityMetric[];
   calls_by_reason: Array<{ direction: string | null; reason: string; calls: number; booked: number }>;
   missed: Array<{ channel: string; category: string; count: number }>;
   highlights: Array<{ direction: string | null; use_case: string | null; score: number | null; title: string | null; occurred_on: string | null }>;
@@ -463,7 +470,7 @@ export async function fetchReportMetrics(teamId: string, spyneToken?: string): P
     const j = (await r.json()) as Partial<ReportMetrics> | null;
     if (!j) return null;
     return {
-      transfer_quality: j.transfer_quality ?? null,
+      transfer_quality: Array.isArray(j.transfer_quality) ? j.transfer_quality : [],
       calls_by_reason: Array.isArray(j.calls_by_reason) ? j.calls_by_reason : [],
       missed: Array.isArray(j.missed) ? j.missed : [],
       highlights: Array.isArray(j.highlights) ? j.highlights : [],

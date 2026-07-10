@@ -643,13 +643,19 @@ function AgentReportsView() {
               <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} />
               <QCell label="Avg handle time" value={a.quality.handleTime} />
               <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
-              {metrics?.transfer_quality?.success_rate != null && a.quality.fourthLabel.toLowerCase().includes("transfer") && (
-                <QCell
-                  label={a.quality.fourthLabel}
-                  value={`${Math.round(metrics.transfer_quality.success_rate * 100)}%`}
-                  status={metrics.transfer_quality.success_rate >= 0.8 ? "green" : metrics.transfer_quality.success_rate >= 0.6 ? "amber" : "red"}
-                />
-              )}
+              {(() => {
+                // Never blend Sales+Service — pick the row matching this agent's own service type.
+                const svc = a.id.startsWith("service") ? "service" : "sales";
+                const tq = metrics?.transfer_quality.find((t) => t.service_type === svc);
+                if (tq?.success_rate == null || !a.quality.fourthLabel.toLowerCase().includes("transfer")) return null;
+                return (
+                  <QCell
+                    label={a.quality.fourthLabel}
+                    value={fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)}
+                    status={tq.success_rate >= 0.8 ? "green" : tq.success_rate >= 0.6 ? "amber" : "red"}
+                  />
+                );
+              })()}
             </div>
           </Card>
 
