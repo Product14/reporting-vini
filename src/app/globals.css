@@ -19,6 +19,14 @@ body {
   font-family: 'Inter', sans-serif;
 }
 
+/* The report pages' sticky header changes its OWN height on scroll (condenses once past a threshold).
+ * Browsers' scroll-anchoring tries to compensate for that layout shift by silently adjusting scrollY,
+ * which fights the header's own scrolled/not-scrolled logic and made it flicker ("dance") while
+ * scrolling. Disabling anchoring page-wide removes that feedback loop. */
+html {
+  overflow-anchor: none;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
 }

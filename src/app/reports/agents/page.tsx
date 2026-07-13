@@ -36,6 +36,8 @@ import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetch
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
+import { ExportMenu } from "@/components/reports/ExportMenu";
+import { downloadCSV, downloadXLSX, exportFilenameStem, type ExportSheet } from "@/components/reports/exportReport";
 import { track } from "@/lib/analytics";
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
@@ -241,6 +243,157 @@ function AgentReportsView() {
   // so it is NOT window-scaled. Shown as a headline activity stat + above the campaigns table.
   const warmLeadsTotal = !inbound ? (r.activeCampaigns ?? []).reduce((s, c) => s + (c.warmLeads || 0), 0) : 0;
 
+  // Shared between the JSX (PerfFunnel / outcome tiles / transfer-quality QCell) and the CSV/XLSX export
+  // below, so the exported numbers always match what's on screen. Every stage is a window-DISTINCT lead
+  // count (from leadFunnel) so the funnel stays monotonic (contacted ≥ connected ≥ qualified ≥
+  // appointments) and never double-counts a lead touched on multiple days. Falls back to event counts
+  // only if leadFunnel is absent. Canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) ·
+  // "Real conversations" · "Qualified leads" · "Appointments — AI-booked".
+  const funnelStages = [
+    { label: inbound ? "Leads reached" : "Leads dialed", value: scale(r.leadsAttempted) },
+    { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
+    { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified) },
+    { label: "Appointments — AI-booked", value: scale(m.appointments) },
+  ];
+  const outcomeTiles = [
+    { label: "Real conversations", value: scale(leadConnected), accent: "#2563eb" },
+    { label: "Qualified leads", value: scale(leadQualified), accent: "#813fed" },
+    ...(inbound
+      ? [
+          { label: "Transferred", value: scale(r.callFlow.transferred), accent: "#059669" },
+          ...((r.callFlow.transfersFailed ?? 0) > 0 ? [{ label: "Transfers failed", value: scale(r.callFlow.transfersFailed ?? 0), accent: "#dc2626" }] : []),
+          { label: "Callbacks", value: scale(r.callFlow.callbacks ?? 0), accent: "#ea760c" },
+        ]
+      : []),
+  ];
+  // Never blend Sales+Service — pick the transfer-quality row matching this agent's own service type.
+  const tqSvc = a.id.startsWith("service") ? "service" : "sales";
+  const tq = metrics?.transfer_quality.find((t) => t.service_type === tqSvc);
+  const showTransferQuality = tq?.success_rate != null && a.quality.fourthLabel.toLowerCase().includes("transfer");
+
+  const buildExportSheets = (): ExportSheet[] => {
+    const tzLabel = feed?.timezone ? tzShortLabel(feed.timezone) : "";
+    const during = scale(Math.max(0, m.calls - m.afterHours));
+    const after = scale(m.afterHours);
+    const summary: ExportSheet = {
+      name: "Summary",
+      rows: [
+        [`${account.name || "Rooftop"} — ${r.summary.person || a.name}`],
+        ["Role", `${a.dept} · ${a.dir}`],
+        ["Period", periodLabel],
+        ...(tzLabel ? [["Timezone", tzLabel]] : []),
+        [],
+        ["Metric", "Value"],
+        ["Close rate (AI-booked ÷ qualified)", fmtRate(scale(m.appointments), scale(leadQualified))],
+        ["Turn rate (qualified ÷ conversations)", fmtRate(scale(leadQualified), scale(leadConnected))],
+        [inbound ? "Total calls" : "Calls dispatched", scale(m.calls)],
+        ["Talk time (minutes)", scale(m.talkMinutes)],
+        ["Total SMS", scale(m.smsSent)],
+        [inbound ? "" : "Warm leads (campaigns)", inbound ? "" : warmLeadsTotal],
+        ["Calls during hours", during],
+        ["Calls after hours", after],
+        [],
+        ...outcomeTiles.map((t) => [t.label, t.value]),
+        [],
+        [a.quality.primaryLabel, `${a.quality.primary}%`],
+        ["Avg handle time", a.quality.handleTime],
+        ["Opt-outs", scale(m.optOuts)],
+        ...(showTransferQuality && tq ? [[a.quality.fourthLabel, fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)]] : []),
+        [],
+        ["Total AI-booked appointments", scale(m.appointments)],
+        ...(scale(m.appointmentsAssisted ?? 0) > 0 ? [["AI-assisted (CRM)", scale(m.appointmentsAssisted ?? 0)]] : []),
+      ],
+    };
+
+    const funnel: ExportSheet = {
+      name: "Funnel",
+      rows: [
+        ["Stage", "Leads (distinct)", "Conversion from prior stage"],
+        ...funnelStages.map((s, i) => {
+          const prev = i > 0 ? funnelStages[i - 1].value : null;
+          const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "";
+          return [s.label, s.value, conv];
+        }),
+      ],
+    };
+
+    const dayOnDay: ExportSheet = {
+      name: "Day-on-day",
+      rows: [
+        ["Day", "Touched", "Qualified", "Appointments"],
+        ...r.dayOnDay.map((d) => [d.day, scale(d.touched), scale(d.qualified), scale(d.appts)]),
+      ],
+    };
+
+    const sheets = [summary, funnel, dayOnDay];
+
+    if (r.leadsBySource?.length) {
+      sheets.push({
+        name: "Leads by source",
+        rows: [
+          ["Source", "Interacted", "Total leads", "Appts booked"],
+          ...r.leadsBySource.map((s) => [s.source, scale(s.engaged), scale(s.total), scale(s.appts)]),
+        ],
+      });
+    }
+
+    if (!inbound && r.activeCampaigns?.length) {
+      sheets.push({
+        name: "Campaigns",
+        rows: [
+          ["Campaign", "Use case", "Enrolled", "Appts", "Appt rate", "Warm leads", "Opt-outs"],
+          ...r.activeCampaigns.map((c) => [c.name, c.useCase, c.enrolled, c.appts, `${c.apptRate}%`, c.warmLeads, c.optOuts]),
+        ],
+      });
+    }
+
+    if (!inbound && r.outcomes?.length) {
+      sheets.push({
+        name: "Outbound outcomes",
+        rows: [["Outcome", "Count"], ...r.outcomes.map((o) => [o.label, o.value])],
+      });
+    }
+
+    if (r.warmLeads?.length) {
+      sheets.push({
+        name: "Warm leads",
+        rows: [
+          ["Customer", "Phone", "Tier", "Interest", "Campaign", "Last activity", "Service type"],
+          ...r.warmLeads.map((w) => [w.customer, w.phone, w.tier, w.interest, w.campaign, w.lastActivity ?? "", w.serviceType]),
+        ],
+      });
+    }
+
+    if (agentHighlights.length > 0 || showMissed) {
+      sheets.push({
+        name: "Highlights & missed",
+        rows: [
+          ["Wins — best booked calls"],
+          ["Title", "Occurred on"],
+          ...agentHighlights.map((h) => [h.title ?? "", h.occurred_on ?? ""]),
+          ...(showMissed
+            ? [
+                [],
+                ["Missed — outbound demand that slipped"],
+                ["Category", "Channel", "Count"],
+                ...metrics!.missed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]),
+              ]
+            : []),
+        ],
+      });
+    }
+
+    return sheets;
+  };
+
+  const handleExport = (format: "csv" | "xlsx") => {
+    track("report_exported", { tab: "agents", team_id: teamId, format });
+    const filename = `${exportFilenameStem(`${account.name} - ${r.summary.person || a.name}`, periodLabel)}.${format}`;
+    const sheets = buildExportSheets();
+    if (format === "csv") downloadCSV(filename, sheets);
+    else downloadXLSX(filename, sheets);
+  };
+
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
       <div className="flex flex-1 flex-col">
@@ -255,18 +408,25 @@ function AgentReportsView() {
           right={
             hasTeam ? (
               <div className="flex items-center gap-3">
-                {feed?.timezone ? (
-                  <span className="hidden text-[11px] text-[#9ca3af] md:inline" title={`Report days & times use this rooftop's timezone (${feed.timezone})`}>
-                    Times in {tzShortLabel(feed.timezone)}
-                  </span>
-                ) : null}
-                <SyncStatus fetchedAt={feed?.fetchedAt ?? null} loading={feed === null} now={now} onRefresh={refresh} />
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
                   onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
                   onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "agents", range: "custom", team_id: teamId }); }}
                 />
+                <button
+                  onClick={refresh}
+                  disabled={feed === null}
+                  aria-label="Refresh data"
+                  title="Refresh"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#e5e7eb] bg-white text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed] disabled:opacity-50"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={feed === null ? "animate-spin" : ""}>
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                    <path d="M21 3v6h-6" />
+                  </svg>
+                </button>
+                <ExportMenu onCSV={() => handleExport("csv")} onXLSX={() => handleExport("xlsx")} />
               </div>
             ) : (
               <span className="rounded-lg bg-[#f3eaff] px-3 py-1.5 text-[12px] font-semibold text-[#813fed]">{view.liveLabel}</span>
@@ -374,7 +534,16 @@ function AgentReportsView() {
             />
           )}
 
-          <SectionLabel hint={periodLabel}>Performance</SectionLabel>
+          <div className="flex items-center justify-between gap-3">
+            <SectionLabel hint={periodLabel}>Performance</SectionLabel>
+            {hasTeam && (
+              <span className="no-print flex-none text-[11px] text-[#9ca3af]" title={feed?.timezone ? `Report days & times use this rooftop's timezone (${feed.timezone})` : undefined}>
+                {feed?.timezone ? `Times in ${tzShortLabel(feed.timezone)}` : ""}
+                {feed?.timezone && (feed === null || feed?.fetchedAt) ? " · " : ""}
+                {feed === null ? "Syncing…" : feed?.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
+              </span>
+            )}
+          </div>
 
           {/* Performance — outcome funnel (primary) → activity (secondary) → call breakdown (tertiary) */}
           <div className="overflow-hidden rounded-2xl border border-[#e5e7eb] bg-white shadow-sm">
@@ -396,24 +565,14 @@ function AgentReportsView() {
                       Fraction (never a rounded "0%") when the numerator is real but rounds to zero. */}
                   <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
                 </div>
-                <p className="text-[28px] font-extrabold tabular-nums leading-none text-[#813fed]">{fmtRate(scale(m.appointments), scale(leadQualified))}</p>
+                <p className="text-[32px] font-extrabold tabular-nums leading-none text-[#813fed]">{fmtRate(scale(m.appointments), scale(leadQualified))}</p>
               </div>
             </div>
 
             {/* primary: the lead → qualified → appointment funnel */}
             <div className="px-6 py-6">
               <PerfFunnel
-                stages={[
-                  // Every stage is a window-DISTINCT lead count (from leadFunnel) so the funnel stays
-                  // monotonic (contacted ≥ connected ≥ qualified ≥ appointments) and never double-counts a
-                  // lead touched on multiple days. Falls back to event counts only if leadFunnel is absent.
-                  // canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) · "Real conversations"
-                  //                     · "Qualified leads" · "Appointments — AI-booked".
-                  { label: inbound ? "Leads reached" : "Leads dialed", value: scale(r.leadsAttempted) },
-                  { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
-                  { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified) },
-                  { label: "Appointments — AI-booked", value: scale(m.appointments) },
-                ]}
+                stages={funnelStages}
                 appointmentsDrill={live && scale(m.appointments) > 0 ? openApptDrill : undefined}
               />
             </div>
@@ -456,21 +615,11 @@ function AgentReportsView() {
                   each label reads one consistent number across the page. Transferred/Callbacks are an
                   inbound concept — outbound agents don't show them; failed transfers stay SEPARATE. */}
               <div className={`grid grid-cols-2 gap-2.5 sm:grid-cols-3 ${inbound ? "lg:grid-cols-5" : "lg:grid-cols-2"}`}>
-                {[
-                  { label: "Real conversations", value: scale(leadConnected), accent: "#2563eb" },
-                  { label: "Qualified leads", value: scale(leadQualified), accent: "#813fed" },
-                  ...(inbound
-                    ? [
-                        { label: "Transferred", value: scale(r.callFlow.transferred), accent: "#059669" },
-                        ...((r.callFlow.transfersFailed ?? 0) > 0 ? [{ label: "Transfers failed", value: scale(r.callFlow.transfersFailed ?? 0), accent: "#dc2626" }] : []),
-                        { label: "Callbacks", value: scale(r.callFlow.callbacks ?? 0), accent: "#ea760c" },
-                      ]
-                    : []),
-                ].map((b) => (
+                {outcomeTiles.map((b) => (
                   <div key={b.label} className="rounded-xl border border-[#f0f0f0] bg-[#fafafa] px-3.5 py-3">
                     <div className="flex items-center gap-1.5">
                       <span className="h-1.5 w-1.5 flex-none rounded-full" style={{ background: b.accent }} />
-                      <span className="text-[19px] font-extrabold tabular-nums leading-none text-[#111]">{fmtInt(b.value)}</span>
+                      <span className="text-[23px] font-extrabold tabular-nums leading-none text-[#111]">{fmtInt(b.value)}</span>
                     </div>
                     <span className="mt-1.5 block text-[11px] leading-tight text-[#6b7280]">{b.label}</span>
                   </div>
@@ -567,7 +716,7 @@ function AgentReportsView() {
               {scale(m.appointmentsAssisted ?? 0) > 0 && (
                 <div>
                   <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">AI-assisted (CRM)</p>
-                  <p className="mt-1 text-[22px] font-bold tabular-nums leading-none text-[#9ca3af]">+{fmtInt(scale(m.appointmentsAssisted ?? 0))}</p>
+                  <p className="mt-1 text-[25px] font-bold tabular-nums leading-none text-[#9ca3af]">+{fmtInt(scale(m.appointmentsAssisted ?? 0))}</p>
                 </div>
               )}
             </div>
@@ -595,7 +744,7 @@ function AgentReportsView() {
                   {r.activeCampaigns?.length ? (
                     <>
                       <div className="flex items-baseline gap-2 border-b border-[#f0f0f0] px-6 py-3">
-                        <span className="text-[20px] font-extrabold tabular-nums text-[#813fed]">{fmtInt(warmLeadsTotal)}</span>
+                        <span className="text-[23px] font-extrabold tabular-nums text-[#813fed]">{fmtInt(warmLeadsTotal)}</span>
                         <span className="text-[11.5px] text-[#6b7280]">warm leads engaged across {r.activeCampaigns.length} campaign{r.activeCampaigns.length === 1 ? "" : "s"}</span>
                       </div>
                       <CampaignsTable items={r.activeCampaigns} />
@@ -643,19 +792,13 @@ function AgentReportsView() {
               <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} />
               <QCell label="Avg handle time" value={a.quality.handleTime} />
               <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
-              {(() => {
-                // Never blend Sales+Service — pick the row matching this agent's own service type.
-                const svc = a.id.startsWith("service") ? "service" : "sales";
-                const tq = metrics?.transfer_quality.find((t) => t.service_type === svc);
-                if (tq?.success_rate == null || !a.quality.fourthLabel.toLowerCase().includes("transfer")) return null;
-                return (
-                  <QCell
-                    label={a.quality.fourthLabel}
-                    value={fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)}
-                    status={tq.success_rate >= 0.8 ? "green" : tq.success_rate >= 0.6 ? "amber" : "red"}
-                  />
-                );
-              })()}
+              {showTransferQuality && tq && (
+                <QCell
+                  label={a.quality.fourthLabel}
+                  value={fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)}
+                  status={tq.success_rate! >= 0.8 ? "green" : tq.success_rate! >= 0.6 ? "amber" : "red"}
+                />
+              )}
             </div>
           </Card>
 
@@ -747,14 +890,14 @@ function PerfFunnel({ stages, appointmentsDrill }: { stages: { label: string; va
             <div className="w-[120px] flex-none sm:w-[150px]">
               {drillable ? (
                 <button onClick={appointmentsDrill} className="group/appt block text-left" title="See the appointments behind this number">
-                  <p className="text-[24px] font-extrabold tabular-nums leading-none text-[#10b981] underline decoration-dotted decoration-[#10b981]/40 underline-offset-4 group-hover/appt:decoration-[#10b981] sm:text-[26px]">
+                  <p className="text-[27px] font-extrabold tabular-nums leading-none text-[#10b981] underline decoration-dotted decoration-[#10b981]/40 underline-offset-4 group-hover/appt:decoration-[#10b981] sm:text-[30px]">
                     {fmtInt(s.value)}
                   </p>
                   <p className="mt-1 text-[11px] font-semibold leading-tight text-[#10b981]">{s.label} · view leads ↗</p>
                 </button>
               ) : (
                 <>
-                  <p className={`text-[24px] font-extrabold tabular-nums leading-none sm:text-[26px] ${isLast ? "text-[#10b981]" : "text-[#111]"}`}>
+                  <p className={`text-[27px] font-extrabold tabular-nums leading-none sm:text-[30px] ${isLast ? "text-[#10b981]" : "text-[#111]"}`}>
                     {fmtInt(s.value)}
                   </p>
                   <p className="mt-1 text-[11px] leading-tight text-[#6b7280]">{s.label}</p>
@@ -792,7 +935,7 @@ function ActivityStat({ label, value, hint, accent }: { label: string; value: st
   return (
     <div className="px-6 py-5">
       <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">{label}</p>
-      <p className="mt-1.5 text-[23px] font-extrabold tabular-nums leading-none" style={{ color: accent ?? "#111" }}>{value}</p>
+      <p className="mt-1.5 text-[27px] font-extrabold tabular-nums leading-none" style={{ color: accent ?? "#111" }}>{value}</p>
       {hint && <p className="mt-1.5 text-[10.5px] text-[#6b7280]">{hint}</p>}
     </div>
   );
@@ -805,29 +948,6 @@ function relTime(then: number, now: number): string {
   const mins = Math.round(s / 60);
   if (mins < 60) return `${mins}m ago`;
   return `${Math.round(mins / 60)}h ago`;
-}
-
-/* ── last-synced label + refresh button ── */
-function SyncStatus({ fetchedAt, loading, now, onRefresh }: { fetchedAt: number | null; loading: boolean; now: number; onRefresh: () => void }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="hidden text-[11px] text-[#9ca3af] md:inline">
-        {loading ? "Syncing…" : fetchedAt ? `Synced ${relTime(fetchedAt, now)}` : ""}
-      </span>
-      <button
-        onClick={onRefresh}
-        disabled={loading}
-        aria-label="Refresh data"
-        title="Refresh"
-        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#e5e7eb] bg-white text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed] disabled:opacity-50"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={loading ? "animate-spin" : ""}>
-          <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-          <path d="M21 3v6h-6" />
-        </svg>
-      </button>
-    </div>
-  );
 }
 
 /* ── shimmer skeleton while a rooftop/window loads ── */
@@ -958,7 +1078,7 @@ function SummaryStat({ label, value, accent }: { label: string; value: string; a
   return (
     <div className="rounded-xl border border-[#f0f0f0] px-3 py-2.5">
       <p className="text-[10px] font-semibold uppercase tracking-wider text-[#9ca3af]">{label}</p>
-      <p className="mt-0.5 text-[16px] font-bold tabular-nums" style={{ color: accent ?? "#111" }}>{value}</p>
+      <p className="mt-0.5 text-[18px] font-bold tabular-nums" style={{ color: accent ?? "#111" }}>{value}</p>
     </div>
   );
 }
@@ -993,7 +1113,7 @@ function QCell({ label, value, status }: { label: string; value: string; status?
         {status && <span className="h-2 w-2 rounded-full" style={{ background: RAG_STYLE[status].dot }} />}
         <p className="text-[11px] font-semibold uppercase tracking-wider text-[#9ca3af]">{label}</p>
       </div>
-      <p className="mt-1 text-[18px] font-bold tabular-nums text-[#111]">{value}</p>
+      <p className="mt-1 text-[21px] font-bold tabular-nums text-[#111]">{value}</p>
     </div>
   );
 }
@@ -1073,7 +1193,7 @@ function AgentActionItems({
       <div className="flex flex-wrap gap-2 border-b border-[#f0f0f0] px-6 py-3.5">
         {counts.map((c) => (
           <span key={c.label} className="inline-flex items-baseline gap-1.5 rounded-lg border border-[#f0f0f0] bg-[#fafafa] px-2.5 py-1">
-            <b className="text-[15px] font-extrabold tabular-nums leading-none" style={{ color: c.accent }}>{stats ? fmtInt(c.value ?? 0) : "—"}</b>
+            <b className="text-[17px] font-extrabold tabular-nums leading-none" style={{ color: c.accent }}>{stats ? fmtInt(c.value ?? 0) : "—"}</b>
             <span className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9ca3af]">{c.label}</span>
           </span>
         ))}

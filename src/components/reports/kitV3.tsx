@@ -99,7 +99,7 @@ export function ValueTile({
     <>
       <p className="text-[10px] font-bold uppercase tracking-wider text-[#6b7280] leading-tight min-h-[26px]">{label}</p>
       <div className="flex items-baseline gap-2">
-        <p className="text-[26px] font-extrabold tabular-nums leading-none" style={{ color }}>{total}</p>
+        <p className="text-[32px] font-extrabold tabular-nums leading-none" style={{ color }}>{total}</p>
         {delta === null && total !== "0" && <span className="text-[9.5px] font-semibold text-[#9ca3af]">New</span>}
         {typeof delta === "number" && (
           delta === 0
@@ -154,7 +154,7 @@ export function MetricTile({
   const body = (
     <>
       <p className="text-[9.5px] font-bold uppercase tracking-wider text-[#6b7280] leading-tight min-h-[22px]">{label}</p>
-      <p className="mt-0.5 text-[21px] font-extrabold tabular-nums leading-none" style={{ color: accent }}>{value}</p>
+      <p className="mt-0.5 text-[26px] font-extrabold tabular-nums leading-none" style={{ color: accent }}>{value}</p>
       {sub && <p className="mt-1.5 text-[10px] leading-snug text-[#9ca3af]">{sub}</p>}
     </>
   );
@@ -201,7 +201,7 @@ export function AgentFunnelCard({
         </div>
         <div className="ml-auto text-right">
           <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
-          <p className="text-[19px] font-extrabold tabular-nums leading-tight text-[#6d28d9]">{closeRateLabel}</p>
+          <p className="text-[24px] font-extrabold tabular-nums leading-tight text-[#6d28d9]">{closeRateLabel}</p>
           <p className="text-[9.5px] text-[#9ca3af]">{closeRateSub}</p>
         </div>
       </div>
@@ -217,7 +217,7 @@ export function AgentFunnelCard({
           ["Hand-offs", fmtInt(ministats.handoffs)],
         ] as const).map(([k, v]) => (
           <div key={k}>
-            <p className="text-[15px] font-extrabold tabular-nums leading-none text-[#111]">{v}</p>
+            <p className="text-[18px] font-extrabold tabular-nums leading-none text-[#111]">{v}</p>
             <p className="mt-1 text-[9px] font-bold uppercase tracking-wide text-[#9ca3af]">{k}</p>
           </div>
         ))}
@@ -250,7 +250,7 @@ export function ActionItemsScoreboard({
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
         {cells.map((c) => (
           <div key={c.label} className="rounded-xl border border-[#f0f0f0] bg-[#fafafa] px-3.5 py-3">
-            <p className="text-[19px] font-extrabold tabular-nums leading-none" style={{ color: c.accent }}>{fmtInt(c.value)}</p>
+            <p className="text-[24px] font-extrabold tabular-nums leading-none" style={{ color: c.accent }}>{fmtInt(c.value)}</p>
             <p className="mt-1 text-[9.5px] font-bold uppercase tracking-wide text-[#6b7280]">{c.label}</p>
             {c.hint && <p className="text-[9px] text-[#b0b0b0]">{c.hint}</p>}
           </div>
