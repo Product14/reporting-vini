@@ -1,5 +1,5 @@
 import { getSupabase } from "@/lib/reports/supabase";
-import { requireTeamAuth } from "@/lib/reports/auth";
+import { requireTeamAuth, requireServiceAuth } from "@/lib/reports/auth";
 import {
   REPORT_APPT_STATUS,
   REPORT_TRANSFER_QUALITY,
@@ -56,14 +56,6 @@ const SECTIONS: ReadonlyArray<{ key: string; table: string; windowed: boolean }>
   { key: "highlights", table: REPORT_HIGHLIGHTS, windowed: false },
 ];
 
-function authorized(request: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false; // never run open
-  const hdr = request.headers.get("authorization") || "";
-  const url = new URL(request.url);
-  return hdr === `Bearer ${secret}` || url.searchParams.get("key") === secret;
-}
-
 async function chunkedInsert(
   sb: NonNullable<ReturnType<typeof getSupabase>>,
   table: string,
@@ -77,7 +69,12 @@ async function chunkedInsert(
 }
 
 export async function POST(request: Request): Promise<Response> {
-  if (!authorized(request)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  // Was a hand-rolled, case-sensitive `hdr === "Bearer <secret>"` compare that had silently diverged
+  // from the shared auth helper every sibling route uses — a caller whose HTTP client normalizes header
+  // casing or adds whitespace would be rejected here while every read route accepted the same header.
+  // requireServiceAuth is the exact service-only (CRON_SECRET / ?key=) check this route always wanted.
+  const auth = requireServiceAuth(request);
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
   const sb = getSupabase();
   if (!sb) return Response.json({ error: "Supabase is not configured." }, { status: 503 });

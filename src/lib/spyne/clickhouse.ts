@@ -7,12 +7,12 @@
  *
  * Server-only. HTTPS + Basic auth + JSONEachRow, same connection vini-daily-calls already uses.
  * Degrades to [] (never throws) when creds are absent or a query fails, so a feed hiccup never 502s
- * the email pipeline. Env: CLICKHOUSE_HOST, CLICKHOUSE_PORT (default 8443), CLICKHOUSE_USER, CLICKHOUSE_PASSWORD.
+ * the email pipeline. Credential resolution lives in lib/clickhouseCreds.ts, shared with the other
+ * ClickHouse client (lib/reports/clickhouseQuery.ts) so the two never drift apart.
  */
+import { hasClickhouseCreds, resolveClickhouseCreds } from "@/lib/clickhouseCreds";
 
-export function hasClickhouseCreds(): boolean {
-  return Boolean(process.env.CLICKHOUSE_HOST && process.env.CLICKHOUSE_PASSWORD);
-}
+export { hasClickhouseCreds };
 
 /** Escape a value for an inline SQL string literal (we only ever inline ids/dates we control + validate). */
 export function chEsc(v: string): string {
@@ -20,12 +20,9 @@ export function chEsc(v: string): string {
 }
 
 export async function runClickhouse<T = Record<string, unknown>>(sql: string): Promise<T[]> {
-  if (!hasClickhouseCreds()) return [];
-  const host = process.env.CLICKHOUSE_HOST;
-  const port = process.env.CLICKHOUSE_PORT || "8443";
-  const user = process.env.CLICKHOUSE_USER || "default";
-  const pass = process.env.CLICKHOUSE_PASSWORD || "";
-  const auth = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
+  const creds = resolveClickhouseCreds();
+  if (!creds) return [];
+  const { host, port, authHeader: auth } = creds;
   try {
     const r = await fetch(`https://${host}:${port}/`, {
       method: "POST",

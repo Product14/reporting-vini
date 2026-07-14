@@ -12,14 +12,14 @@
  *    57.6 GiB ceiling; too many concurrent scans trip Code 241 (MEMORY_LIMIT_EXCEEDED). Excess queries
  *    queue and run as slots free.
  *
- * Server-only — never import into a Client Component. Env: CLICKHOUSE_HOST, CLICKHOUSE_PORT
- * (default 8443), CLICKHOUSE_USER (default "default"), CLICKHOUSE_PASSWORD.
+ * Server-only — never import into a Client Component. Credential resolution lives in
+ * lib/clickhouseCreds.ts, shared with the other ClickHouse client (lib/spyne/clickhouse.ts) so the
+ * two never drift apart.
  */
 import { Agent } from "undici";
+import { hasClickhouseCreds, resolveClickhouseCreds } from "@/lib/clickhouseCreds";
 
-export function hasClickhouseCreds(): boolean {
-  return Boolean(process.env.CLICKHOUSE_HOST && process.env.CLICKHOUSE_PASSWORD);
-}
+export { hasClickhouseCreds };
 
 // No-timeout dispatcher: a cold full spine scan can take minutes before the first byte. Reused across
 // calls so we don't leak a socket pool per query.
@@ -52,14 +52,11 @@ const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
  *  run over many chunks would otherwise abort on a single flaky request; reads are idempotent so retry
  *  is always safe. A non-2xx 4xx (bad SQL / auth) is NOT retried — it won't get better. */
 export async function queryRows<T = Record<string, unknown>>(sql: string): Promise<T[]> {
-  if (!hasClickhouseCreds()) {
+  const creds = resolveClickhouseCreds();
+  if (!creds) {
     throw new Error("ClickHouse is not configured (CLICKHOUSE_HOST / CLICKHOUSE_PASSWORD).");
   }
-  const host = process.env.CLICKHOUSE_HOST;
-  const port = process.env.CLICKHOUSE_PORT || "8443";
-  const user = process.env.CLICKHOUSE_USER || "default";
-  const pass = process.env.CLICKHOUSE_PASSWORD || "";
-  const auth = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
+  const { host, port, authHeader: auth } = creds;
   const maxRetries = Number(process.env.CH_QUERY_RETRIES) || 4;
 
   await acquire();
