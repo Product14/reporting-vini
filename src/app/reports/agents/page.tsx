@@ -394,6 +394,11 @@ function AgentReportsView() {
     else downloadXLSX(filename, sheets);
   };
 
+  const handlePrint = () => {
+    track("report_exported", { tab: "agents", team_id: teamId, format: "print" });
+    window.print();
+  };
+
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
       <div className="flex flex-1 flex-col">
@@ -407,7 +412,7 @@ function AgentReportsView() {
           back={`/reports${navQuery}`}
           right={
             hasTeam ? (
-              <div className="flex items-center gap-3">
+              <div className="no-print flex items-center gap-3">
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
@@ -426,7 +431,7 @@ function AgentReportsView() {
                     <path d="M21 3v6h-6" />
                   </svg>
                 </button>
-                <ExportMenu onCSV={() => handleExport("csv")} onXLSX={() => handleExport("xlsx")} />
+                <ExportMenu onPrint={handlePrint} onCSV={() => handleExport("csv")} onXLSX={() => handleExport("xlsx")} />
               </div>
             ) : (
               <span className="rounded-lg bg-[#f3eaff] px-3 py-1.5 text-[12px] font-semibold text-[#813fed]">{view.liveLabel}</span>
