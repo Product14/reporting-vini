@@ -259,7 +259,7 @@ function deltaSql(effWm: string, cap: string): string {
   let totalDaily = 0;
   const failedChunks: string[] = [];
   const gc = (globalThis as { gc?: () => void }).gc;
-  for (const [a, b] of ranges) {
+  const runChunk = async (a: string, b: string) => {
     try {
       totalDaily += await syncChunk(a, b);
     } catch (e) {
@@ -267,9 +267,35 @@ function deltaSql(effWm: string, cap: string): string {
       console.warn(`  ✗ chunk [${a} .. ${b}) FAILED (isolated, run continues): ${(e as Error).message}`);
     }
     if (gc) gc();
+  };
+  // firstStart/lastEnd span the FULL range set, order-independent (the hot-first sort above means
+  // ranges[0] is no longer the oldest, so min/max — not ranges[0]/ranges[-1] — give the true span the
+  // detail-snapshot floor relies on).
+  const firstStart = ranges.length ? ranges.map((r) => r[0]).reduce((a, b) => (a < b ? a : b)) : today;
+  const lastEnd = ranges.length ? ranges.map((r) => r[1]).reduce((a, b) => (a > b ? a : b)) : shiftDays(today, 1);
+
+  // Process the hot window FIRST, then CHECKPOINT the watermark before the (OOM/timeout-prone) backlog.
+  // A per-chunk try/catch only rescues CATCHABLE errors — it cannot save a hard process kill (OOM at the
+  // 8 GB heap ceiling, or the job timeout), which is what a bulk `updatedAt` touch produces: the process
+  // dies mid-backlog and the end-of-run watermark write never happens, so every subsequent run re-derives
+  // the identical 94-day backlog and dies the same way — the exact 07-14→15 stall. Committing the
+  // watermark right after the light hot window makes forward progress UNCONDITIONAL: even if the backlog
+  // then OOMs, the watermark has advanced, so the NEXT run sees only a tiny delta (no giant backlog) and
+  // completes cleanly — the stall self-heals within one cycle. Recent-day freshness is also guaranteed
+  // (hot window ran + committed first). Genuinely-changed backlog days are reconciled by a later run's
+  // delta or the daily FULL pass; CDC-noise touches (updatedAt bumped, data identical) need no work.
+  const hotBoundary = shiftDays(today, -(hotDays - 1));
+  const hotRanges = ranges.filter(([, b]) => b > hotBoundary);
+  const backlogRanges = ranges.filter(([, b]) => !(b > hotBoundary));
+  for (const [a, b] of hotRanges) await runChunk(a, b);
+  if (!historical && newWatermark) {
+    const { error } = await sb.from("sync_state")
+      .update({ watermark: newWatermark, last_run_at: new Date().toISOString(), last_status: "hot-committed" })
+      .eq("id", 1);
+    if (error) console.warn(`  ! watermark checkpoint failed (will retry at end of run): ${error.message}`);
+    else console.log(`  ✓ hot window committed — watermark checkpointed to ${newWatermark} before ${backlogRanges.length} backlog chunk(s)`);
   }
-  const firstStart = ranges.length ? ranges[0][0] : today;
-  const lastEnd = ranges.length ? ranges[ranges.length - 1][1] : shiftDays(today, 1);
+  for (const [a, b] of backlogRanges) await runChunk(a, b);
 
   // ── rooftop detail (ClickHouse-direct, full replace): campaigns / outcomes / callbacks. Cumulative
   //    snapshots (not per-day), so a single replace covers them. Skipped for historical segments (they'd
