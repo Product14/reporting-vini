@@ -36,10 +36,15 @@ jobs:
       - run: npm ci
       - name: Sync Supabase aggregate
         env:
-          # --expose-gc lets backfill.ts free heap between chunks (a long reconcile never accumulates);
-          # 8 GB headroom for the busiest 7-day window. CHUNK_DAYS=7 keeps each ClickHouse scan small.
+          # --expose-gc lets backfill.ts free heap between chunks (a long reconcile never accumulates).
+          # CHUNK_DAYS=3 (was 7): peak heap scales with rows-scanned-per-chunk, and the busiest windows
+          # hit ~200k spine rows per 7 days — enough to OOM-kill the run mid-backlog (the 2026-07-14
+          # stall). Halving the scan span roughly halves peak memory so no single chunk — hot window or
+          # backlog — approaches the 8 GB ceiling. More chunks = more round-trips, but each is cheap and
+          # the 60-min timeout has ample room. Pairs with the watermark checkpoint (progress is saved
+          # after the hot window regardless), making an OOM-driven stall structurally impossible.
           NODE_OPTIONS: --max-old-space-size=8192 --expose-gc
-          CHUNK_DAYS: "7"
+          CHUNK_DAYS: "3"
           # ClickHouse creds — reuse the CH_* repo secrets the sibling refresh-metrics.yml already carries.
           CLICKHOUSE_HOST: ${{ secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CH_PORT }}
