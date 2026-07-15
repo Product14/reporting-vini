@@ -38,6 +38,7 @@ import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
 import { downloadCSV, downloadXLSX, exportFilenameStem, type ExportSheet } from "@/components/reports/exportReport";
+import { printToPdf } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
@@ -394,9 +395,15 @@ function AgentReportsView() {
     else downloadXLSX(filename, sheets);
   };
 
-  const handlePrint = () => {
+  const mainRef = useRef<HTMLElement>(null);
+  const handlePrint = async () => {
     track("report_exported", { tab: "agents", team_id: teamId, format: "print" });
-    window.print();
+    if (!mainRef.current) return;
+    await printToPdf(mainRef.current, {
+      filename: `${exportFilenameStem(`${account.name} - ${r.summary.person || a.name}`, periodLabel)}.pdf`,
+      title: `${account.name || "Rooftop"} — ${r.summary.person || a.name}`,
+      subtitle: `${periodLabel}${feed?.timezone ? ` · times in ${tzShortLabel(feed.timezone)}` : ""}`,
+    });
   };
 
   return (
@@ -439,7 +446,7 @@ function AgentReportsView() {
           }
         />
 
-        <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 sm:px-6 lg:px-10 pt-6 pb-36 flex flex-col gap-6">
+        <main ref={mainRef} className="mx-auto w-full max-w-[1400px] flex-1 px-4 sm:px-6 lg:px-10 pt-6 pb-36 flex flex-col gap-6">
           {scenario === "first_time" && <FirstTimeAgents agent={a} />}
 
           {scenario !== "first_time" && live && !hasTeam && (

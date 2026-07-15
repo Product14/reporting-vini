@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   BUCKET_LABELS,
   Card,
@@ -35,6 +35,7 @@ import {
   type ActionItemCloser,
 } from "@/components/reports/liveData";
 import { track } from "@/lib/analytics";
+import { printToPdf } from "@/components/reports/printToPdf";
 
 export default function ReportingPage() {
   return (
@@ -79,6 +80,17 @@ function ReportingView() {
   const split = fleet.bySplit;
   const namedAppts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
 
+  const mainRef = useRef<HTMLElement>(null);
+  const handlePrint = async () => {
+    track("report_exported", { tab: "reporting", team_id: teamId, format: "print" });
+    if (!mainRef.current) return;
+    await printToPdf(mainRef.current, {
+      filename: `${account.name || "Rooftop"} - ${periodLabel}.pdf`,
+      title: `${account.name || "Rooftop"} — Vini AI scorecard`,
+      subtitle: `${periodLabel}${feed?.timezone ? ` · times in ${tzShortLabel(feed.timezone)}` : ""}`,
+    });
+  };
+
   return (
     <div className="flex min-h-screen bg-white">
       <div className="flex flex-1 flex-col">
@@ -98,7 +110,7 @@ function ReportingView() {
                   onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "reporting", range: "custom", team_id: teamId }); }}
                 />
                 <button
-                  onClick={() => window.print()}
+                  onClick={handlePrint}
                   className="rounded-lg bg-[#813fed] px-3.5 py-2 text-[12px] font-bold text-white transition-colors hover:bg-[#6d28d9]"
                 >
                   Print / Save as PDF
@@ -108,7 +120,7 @@ function ReportingView() {
           }
         />
 
-        <main className="mx-auto w-full max-w-[1100px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-8">
+        <main ref={mainRef} className="mx-auto w-full max-w-[1100px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-8">
           {/* Print header — only shows in the printed/PDF output */}
           <div className="hidden print:block">
             <p className="text-[20px] font-extrabold text-[#111]">{account.name || "Rooftop"} — Vini AI scorecard</p>
