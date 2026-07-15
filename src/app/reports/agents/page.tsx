@@ -439,7 +439,7 @@ function AgentReportsView() {
           }
         />
 
-        <main className="mx-auto w-full max-w-[1400px] flex-1 px-10 pt-6 pb-36 flex flex-col gap-6">
+        <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 sm:px-6 lg:px-10 pt-6 pb-36 flex flex-col gap-6">
           {scenario === "first_time" && <FirstTimeAgents agent={a} />}
 
           {scenario !== "first_time" && live && !hasTeam && (
