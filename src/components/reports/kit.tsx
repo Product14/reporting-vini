@@ -81,10 +81,18 @@ export function ReportTopBar({
   teamId?: string; // preserved across tab + back navigation
   query?: string; // full ?team_id=…&<date> for tab links (carries the selected window across tabs)
 }) {
-  // sticky header that condenses once the page is scrolled
+  // Sticky header that condenses once the page is scrolled. Uses two different thresholds (enter at 40,
+  // exit below 16) rather than one — the header's own height changes when it condenses (padding, subtitle,
+  // tabs all collapse), which shifts scroll position right around a single threshold and made the header
+  // flip back and forth ("dancing") every time the page settled near that boundary. The gap between the
+  // two thresholds is a dead zone no single scroll position can cross twice in a row, so it can't re-trigger
+  // itself. (Scroll-anchoring is also disabled page-wide in globals.css — browsers otherwise try to
+  // compensate scroll position for the very layout shift this header causes, adding a second source of jitter.)
   const [scrolled, setScrolled] = useState(false);
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 8);
+    const onScroll = () => {
+      setScrolled((prev) => (prev ? window.scrollY > 16 : window.scrollY > 40));
+    };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
@@ -464,9 +472,9 @@ export function FunnelBars({ stages }: { stages: { label: string; value: number 
         const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
         return (
           <div key={s.label} className="flex flex-col gap-1">
-            <div className="flex items-center justify-between text-[12px]">
-              <span className="font-semibold text-[#374151]">{s.label}</span>
-              <span className="tabular-nums font-bold text-[#111]">
+            <div className="flex items-center justify-between">
+              <span className="text-[12px] font-semibold text-[#374151]">{s.label}</span>
+              <span className="text-[15px] tabular-nums font-bold text-[#111]">
                 {Math.round(s.value).toLocaleString()}
                 {conv !== null && <span className="ml-2 text-[10.5px] font-medium text-[#9ca3af]">↓ {conv}%</span>}
               </span>
@@ -766,7 +774,7 @@ export function DayTrend({
           <span key={s.key} className="flex items-baseline gap-1.5 text-[12px]">
             <span className="h-2.5 w-2.5 translate-y-[1px] rounded-full" style={{ background: s.color }} />
             <span className="text-[#6b7280]">{s.label}</span>
-            <b className="text-[15px] tabular-nums text-[#111]">{Math.round(ap?.[s.key] ?? 0).toLocaleString()}</b>
+            <b className="text-[17px] tabular-nums text-[#111]">{Math.round(ap?.[s.key] ?? 0).toLocaleString()}</b>
           </span>
         ))}
         <span className="ml-auto text-[10.5px] text-[#9ca3af]">{hover === null ? `last ${n} day${n === 1 ? "" : "s"}` : ap?.day}</span>
