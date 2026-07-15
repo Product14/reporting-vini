@@ -26,7 +26,6 @@ export interface ReportEvents {
   date_range_changed: { tab: ReportTab; range: string; team_id: string };
   campaigns_filtered: { team_id: string; subtype: string }; // campaigns sub-type filter
   report_refreshed: { tab: ReportTab; team_id: string };
-  report_exported: { tab: ReportTab; team_id: string; format: "csv" | "xlsx" };
 
   // ── depth: signals they trust the numbers and dig in ──
   appointments_drilldown_opened: { tab: ReportTab; team_id: string; agent?: string };

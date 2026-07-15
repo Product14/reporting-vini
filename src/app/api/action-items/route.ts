@@ -13,13 +13,7 @@
  * "All actionable intents" (product decision) → no intent allow-list; we only drop blank intents.
  * Degrades to an empty list — never 502s the pipeline.
  *
- *   /api/action-items?team_id=&serviceType=sales|service|both&scope=recent|open|overdue|created[&minutes=15][&start=&end=][&limit=50][&offset=0]
- *
- * PAGINATION: `limit` is hard-capped at 200 server-side regardless of what's requested, so a caller
- * that assumes "one fetch gets everything" silently truncates any rooftop with a bigger backlog than
- * the limit it asked for (hit vini-daily-calls' eventRunner.cjs, 2026-07 — a rooftop with 80+ overdue
- * action items only ever saw the newest 50). `offset` + the response's `hasMore` flag let a caller
- * page through the full result set instead of guessing a big-enough single limit.
+ *   /api/action-items?team_id=&serviceType=sales|service|both&scope=recent|open|overdue|created[&minutes=15][&start=&end=][&limit=50]
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
 import { requireTeamAuth } from "@/lib/reports/auth";
@@ -62,7 +56,6 @@ export async function GET(request: Request): Promise<Response> {
   const scope = SCOPE.has(scopeRaw) ? scopeRaw : "recent";
   const minutes = Math.max(1, Math.min(10_080, Number(searchParams.get("minutes")) || 15));
   const limit = Math.max(1, Math.min(200, Number(searchParams.get("limit")) || 50));
-  const offset = Math.max(0, Number(searchParams.get("offset")) || 0);
 
   // ── scope=stats: rooftop action-item scoreboard (created/closed in-window + open/overdue/due-today
   //    now + a who-closed-most leaderboard). All from dealer_leads.actionItems, de-duped to the latest
@@ -155,7 +148,7 @@ export async function GET(request: Request): Promise<Response> {
     " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON a.lead_id=l.lead_id" +
     " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
     " WHERE " + where.join(" AND ") +
-    ` ORDER BY a.createdAt DESC LIMIT ${limit} OFFSET ${offset}`;
+    ` ORDER BY a.createdAt DESC LIMIT ${limit}`;
 
   const rows = await runClickhouse<Record<string, string | number>>(sql);
   const actionItems = rows.map((r) => ({
@@ -172,9 +165,7 @@ export async function GET(request: Request): Promise<Response> {
     dueAt: String(r.dueAt || ""),
     at: String(r.at || ""),
   }));
-  // hasMore is a cheap "got a full page" heuristic (no extra COUNT query) — a caller paginating with
-  // offset should keep going while this is true, and stop as soon as a page comes back short.
-  return Response.json({ actionItems, total: actionItems.length, scope, hasMore: actionItems.length === limit }, {
+  return Response.json({ actionItems, total: actionItems.length, scope }, {
     headers: { "Cache-Control": "s-maxage=30, stale-while-revalidate=60" },
   });
 }

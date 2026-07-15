@@ -12,21 +12,24 @@ export * from "./data";
 /* ── tabs ── */
 export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting";
 
+// Tabs the parent product ALSO provides — hidden when this app runs embedded (any non-localhost host),
+// since it's iframed into a console that already has them. Overview + By agent are this app's own views
+// and always show. On localhost (dev) every tab shows so the full app is reachable.
+const PARENT_PROVIDED_TABS = new Set(["appointments", "calls", "actions", "customers", "campaigns", "reporting"]);
+
 export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamId?: string; query?: string }) {
   // keep the rooftop scope AND the selected date window across tab navigation. `query` (built by the
   // page from team_id + the URL date range) is preferred; fall back to team_id only when absent.
   const q = query ?? (teamId ? `?team_id=${teamId}` : "");
-  // The parent console now owns navigation between EVERY section (Overview, By agent, Appointments, …),
-  // each iframing a different reporting-vini route — so embedded (any non-localhost host) shows NO tab
-  // strip at all. SSR + first client render default to embedded (hidden) so the iframe/prod never flashes
-  // the tab bar; on localhost only, the effect reveals every tab so the full app stays reachable in dev.
+  // Default to EMBEDDED (show only Overview + By agent) so the iframe/prod never flashes the full tab bar
+  // — the parent console already provides the rest. SSR + first client render use this default (they
+  // match), then on localhost only, the effect expands to every tab so the full app stays reachable in dev.
   const [isLocal, setIsLocal] = useState(false);
   useEffect(() => {
     const h = window.location.hostname;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsLocal(h === "localhost" || h === "127.0.0.1" || h === "0.0.0.0" || h === "");
   }, []);
-  if (!isLocal) return null;
   const allTabs = [
     { id: "overview", label: "Overview", href: `/reports${q}` },
     { id: "appointments", label: "Appointments", href: `/reports/appointments${q}` },
@@ -37,9 +40,10 @@ export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamI
     { id: "campaigns", label: "Campaigns", href: `/reports/campaigns${q}` },
     { id: "reporting", label: "Reporting", href: `/reports/reporting${q}` },
   ] as const;
+  const tabs = isLocal ? allTabs : allTabs.filter((t) => !PARENT_PROVIDED_TABS.has(t.id));
   return (
     <div className="no-print mx-auto max-w-[1400px] mt-4 flex flex-wrap items-center gap-1">
-      {allTabs.map((t) =>
+      {tabs.map((t) =>
         active === t.id ? (
           <span key={t.id} className="flex items-center px-3 py-1.5 rounded-md text-[12.5px] font-semibold bg-[#f3eaff] text-[#813fed]">
             {t.label}
@@ -77,18 +81,10 @@ export function ReportTopBar({
   teamId?: string; // preserved across tab + back navigation
   query?: string; // full ?team_id=…&<date> for tab links (carries the selected window across tabs)
 }) {
-  // Sticky header that condenses once the page is scrolled. Uses two different thresholds (enter at 40,
-  // exit below 16) rather than one — the header's own height changes when it condenses (padding, subtitle,
-  // tabs all collapse), which shifts scroll position right around a single threshold and made the header
-  // flip back and forth ("dancing") every time the page settled near that boundary. The gap between the
-  // two thresholds is a dead zone no single scroll position can cross twice in a row, so it can't re-trigger
-  // itself. (Scroll-anchoring is also disabled page-wide in globals.css — browsers otherwise try to
-  // compensate scroll position for the very layout shift this header causes, adding a second source of jitter.)
+  // sticky header that condenses once the page is scrolled
   const [scrolled, setScrolled] = useState(false);
   useEffect(() => {
-    const onScroll = () => {
-      setScrolled((prev) => (prev ? window.scrollY > 16 : window.scrollY > 40));
-    };
+    const onScroll = () => setScrolled(window.scrollY > 8);
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
@@ -468,9 +464,9 @@ export function FunnelBars({ stages }: { stages: { label: string; value: number 
         const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
         return (
           <div key={s.label} className="flex flex-col gap-1">
-            <div className="flex items-center justify-between">
-              <span className="text-[12px] font-semibold text-[#374151]">{s.label}</span>
-              <span className="text-[15px] tabular-nums font-bold text-[#111]">
+            <div className="flex items-center justify-between text-[12px]">
+              <span className="font-semibold text-[#374151]">{s.label}</span>
+              <span className="tabular-nums font-bold text-[#111]">
                 {Math.round(s.value).toLocaleString()}
                 {conv !== null && <span className="ml-2 text-[10.5px] font-medium text-[#9ca3af]">↓ {conv}%</span>}
               </span>
@@ -770,7 +766,7 @@ export function DayTrend({
           <span key={s.key} className="flex items-baseline gap-1.5 text-[12px]">
             <span className="h-2.5 w-2.5 translate-y-[1px] rounded-full" style={{ background: s.color }} />
             <span className="text-[#6b7280]">{s.label}</span>
-            <b className="text-[17px] tabular-nums text-[#111]">{Math.round(ap?.[s.key] ?? 0).toLocaleString()}</b>
+            <b className="text-[15px] tabular-nums text-[#111]">{Math.round(ap?.[s.key] ?? 0).toLocaleString()}</b>
           </span>
         ))}
         <span className="ml-auto text-[10.5px] text-[#9ca3af]">{hover === null ? `last ${n} day${n === 1 ? "" : "s"}` : ap?.day}</span>

@@ -130,12 +130,15 @@ export function useCustomize(pageKey: string, scope: CustomizeScope, ids: string
     [order, hidden, persistLocal],
   );
 
-  // Reset goes to the TRUE built-in default (every section visible, natural order) — never the rooftop's
-  // shared account layout. `dirty` is computed against this same true default, so the button's enabled
-  // state and what it resets TO always agree — if the account layout hides something, dirty is true (you
-  // differ from the true default) and reset actually clears that, rather than reapplying the same hidden
-  // account layout as a no-op. Persisted like any other edit, so it sticks across reloads.
-  const reset = useCallback(() => persistLocal({ order: [], hidden: [] }), [persistLocal]);
+  // Reset drops the personal override and falls back to the account layout (or the built-in default).
+  const reset = useCallback(() => {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* ignore */
+    }
+    setLayout(accountLayout ?? { order: [], hidden: [] });
+  }, [storageKey, accountLayout]);
 
   const saveForMe = useCallback(() => persistLocal({ order, hidden: [...hidden] }), [order, hidden, persistLocal]);
 
