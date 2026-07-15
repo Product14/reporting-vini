@@ -105,7 +105,7 @@ function CampaignsReportView() {
           }
         />
 
-        <main className="mx-auto w-full max-w-[1400px] flex-1 px-10 pt-6 pb-36 flex flex-col gap-6">
+        <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 sm:px-6 lg:px-10 pt-6 pb-36 flex flex-col gap-6">
           {!view.agentLive && (
             <CalibratingBanner
               title="No campaigns yet — your agents aren’t live."

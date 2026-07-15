@@ -93,7 +93,7 @@ function ActionItemsView() {
           }
         />
 
-        <main className="mx-auto w-full max-w-[1320px] flex-1 px-10 pt-7 pb-36 flex flex-col gap-7">
+        <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
           {/* Scoreboard */}
           <div className="flex flex-col gap-3.5">
             <SectionLabel hint={periodLabel}>The scoreboard</SectionLabel>

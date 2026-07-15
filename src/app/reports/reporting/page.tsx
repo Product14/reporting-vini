@@ -108,7 +108,7 @@ function ReportingView() {
           }
         />
 
-        <main className="mx-auto w-full max-w-[1100px] flex-1 px-10 pt-7 pb-36 flex flex-col gap-8">
+        <main className="mx-auto w-full max-w-[1100px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-8">
           {/* Print header — only shows in the printed/PDF output */}
           <div className="hidden print:block">
             <p className="text-[20px] font-extrabold text-[#111]">{account.name || "Rooftop"} — Vini AI scorecard</p>

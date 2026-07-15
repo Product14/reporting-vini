@@ -85,7 +85,7 @@ function AppointmentsView() {
           }
         />
 
-        <main className="mx-auto w-full max-w-[1320px] flex-1 px-10 pt-7 pb-36 flex flex-col gap-7">
+        <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <StatTile label="AI-booked" value={fmtInt(fleet.appointments)} sub="the AI created the meeting" accent="#059669" onClick={fleet.appointments > 0 ? () => { setModalOpen(true); track("appointments_drilldown_opened", { tab: "appointments", team_id: teamId }); } : undefined} />
             <StatTile label="AI-assisted (CRM)" value={fmtInt(fleet.appointmentsAssisted)} sub="booked in your CRM on an AI-worked lead" accent="#6d28d9" />

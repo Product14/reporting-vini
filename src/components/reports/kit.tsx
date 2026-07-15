@@ -101,11 +101,11 @@ export function ReportTopBar({
 
   return (
     <div
-      className={`sticky top-0 z-30 border-b border-[#f0f0f0] bg-white px-10 transition-[padding,box-shadow] duration-200 ${
+      className={`sticky top-0 z-30 border-b border-[#f0f0f0] bg-white px-4 sm:px-6 lg:px-10 transition-[padding,box-shadow] duration-200 ${
         scrolled ? "py-2.5 shadow-[0_4px_16px_rgba(16,24,40,0.06)]" : "py-5"
       }`}
     >
-      <div className="mx-auto max-w-[1400px] flex items-end justify-between gap-4">
+      <div className="mx-auto max-w-[1400px] flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
         <div className="flex items-start gap-3">
           {back && (
             <Link
@@ -125,7 +125,7 @@ export function ReportTopBar({
             <p className={`overflow-hidden text-[12.5px] text-[#6b7280] transition-all duration-200 ${scrolled ? "max-h-0 opacity-0" : "mt-1 max-h-10 opacity-100"}`}>{subtitle}</p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           {teamId && <DeptSwitcher dept={dept} setDept={setDept} />}
           {right}
         </div>
@@ -205,7 +205,7 @@ export function DateFilter({
   // makes the end exclusive). Seed from the active range when it already spans a single day.
   const [day, setDay] = useState(() => (custom && custom.start === custom.end ? custom.start : new Date().toISOString().slice(0, 10)));
   return (
-    <div className="relative flex items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
+    <div className="relative flex flex-wrap items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
       {DATE_PRESETS.map((p) => {
         const on = !custom && bucket === p.id;
         return (
