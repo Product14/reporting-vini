@@ -231,7 +231,20 @@ function deltaSql(effWm: string, cap: string): string {
         if (last && d < shiftDays(last[0], CHUNK_DAYS)) last[1] = shiftDays(d, 1);
         else ranges.push([d, shiftDays(d, 1)]);
       }
-      console.log(`INCREMENTAL: watermark=${watermark}, changed_rows=${changed}, ${days.size} day(s) → ${ranges.length} chunk(s) (≤${CHUNK_DAYS}d each).`);
+      // Hot-window chunks FIRST: the watermark only advances after every range in this run finishes
+      // (see below), so an oversized historical backlog (e.g. a bulk updatedAt touch far in the past)
+      // can make a single run exceed the job timeout. If oldest-first order left the hot window last,
+      // a killed run would leave reports stale on the very days digests/dashboards read "today" from —
+      // every subsequent run re-derives the same backlog and dies again before ever reaching it. STL
+      // earliest-per-lead is a running min against persisted state (mergeStlEarliest), so it's correct
+      // regardless of chunk order — only relative order WITHIN the hot vs. backlog groups matters for
+      // the ≤CHUNK_DAYS merge above, which is preserved here (still oldest-first inside each group).
+      ranges.sort((a, b) => {
+        const aHot = a[1] > hotFloor, bHot = b[1] > hotFloor;
+        if (aHot !== bHot) return aHot ? -1 : 1;
+        return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+      });
+      console.log(`INCREMENTAL: watermark=${watermark}, changed_rows=${changed}, ${days.size} day(s) → ${ranges.length} chunk(s) (≤${CHUNK_DAYS}d each, hot window first).`);
     }
   }
 
