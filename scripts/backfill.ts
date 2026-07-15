@@ -248,11 +248,24 @@ function deltaSql(effWm: string, cap: string): string {
     }
   }
 
-  // ── walk the chunks (oldest-first); force GC between them so a long run never accumulates heap ──
+  // ── walk the chunks (hot window first); force GC between them so a long run never accumulates heap ──
+  // Per-chunk try/catch is LOAD-BEARING: without it, one chunk throwing (a transient ClickHouse/Supabase
+  // blip, an oversized scan) aborts the whole IIFE before the watermark write below — so the next run
+  // re-derives the identical backlog and dies again, an infinite stall that freezes the aggregate (this
+  // is exactly what happened 2026-07-14→15: a 94-day / 101k-row updatedAt touch produced a backlog no
+  // single run could finish, and the watermark never moved). Isolating failures lets the run reach the
+  // watermark write, so progress is never lost; failed days are picked up by the next run (their rows
+  // still trip the delta) or the daily FULL reconcile. A partial run is flagged (last_status='partial').
   let totalDaily = 0;
+  const failedChunks: string[] = [];
   const gc = (globalThis as { gc?: () => void }).gc;
   for (const [a, b] of ranges) {
-    totalDaily += await syncChunk(a, b);
+    try {
+      totalDaily += await syncChunk(a, b);
+    } catch (e) {
+      failedChunks.push(`[${a},${b})`);
+      console.warn(`  ✗ chunk [${a} .. ${b}) FAILED (isolated, run continues): ${(e as Error).message}`);
+    }
     if (gc) gc();
   }
   const firstStart = ranges.length ? ranges[0][0] : today;
@@ -300,10 +313,19 @@ function deltaSql(effWm: string, cap: string): string {
 
   // Advance the watermark only for live runs (full/incremental). A historical segment must not move it —
   // the incremental watermark tracks "changes processed up to now", which a backfill of old days doesn't.
+  // We advance EVEN ON A PARTIAL run (some chunks failed): the alternative — holding the watermark until a
+  // fully-clean run — is what caused the 07-14 stall, since a persistently-failing chunk pins the watermark
+  // and every run reprocesses the whole backlog forever. Advancing stops that; failed days are flagged
+  // (last_status='partial') and reconciled by the daily FULL pass. Hot-window-first ordering means a
+  // failure is almost always an old backlog chunk, so recent-day freshness is unaffected.
+  const partial = failedChunks.length > 0;
   const update: Record<string, unknown> = {
-    last_run_at: new Date().toISOString(), last_status: "ok", rows_synced: totalDaily, window_start: firstStart, error: null,
+    last_run_at: new Date().toISOString(),
+    last_status: partial ? "partial" : "ok",
+    rows_synced: totalDaily, window_start: firstStart,
+    error: partial ? `partial: ${failedChunks.length}/${ranges.length} chunk(s) failed: ${failedChunks.join(",")}`.slice(0, 500) : null,
   };
   if (!historical) update.watermark = newWatermark || new Date().toISOString();
   await sb.from("sync_state").update(update).eq("id", 1);
-  console.log(`done. ${totalDaily} daily rows across ${firstStart} .. ${lastEnd} in ${ranges.length} chunk(s).${historical ? " (segment)" : ` watermark=${update.watermark}`}`);
+  console.log(`done. ${totalDaily} daily rows across ${firstStart} .. ${lastEnd} in ${ranges.length} chunk(s)${partial ? ` — PARTIAL (${failedChunks.length} failed: ${failedChunks.join(",")})` : ""}.${historical ? " (segment)" : ` watermark=${update.watermark}`}`);
 })().catch((e) => { console.error("FAILED:", e.message); process.exit(1); });
