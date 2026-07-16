@@ -54,6 +54,14 @@ for (const [k, v] of Object.entries({
 const CHUNK_DAYS = Number(process.env.CHUNK_DAYS) || 14; // each ClickHouse scan covers this many days
 const FULL_DAYS = Number(process.env.FULL_RECONCILE_DAYS) || 120;
 const MAX_LOOKBACK = Number(process.env.MAX_LOOKBACK_DAYS) || 120;
+// How far back an INCREMENTAL run re-aggregates changed days. The source tables churn updatedAt on OLD
+// rows continuously (CDC re-emission — e.g. `conversations` touches ~17 distinct days back to two months
+// ago every hour), so a delta-by-updatedAt that honored the full MAX_LOOKBACK re-aggregated the entire
+// history every 30 min (20 chunks, 12-17 min/run — mostly redundant). Incremental now only reprocesses
+// changed days within this recent window (where genuinely-new activity lands); the daily FULL reconcile
+// (FULL_RECONCILE_DAYS) picks up any older changed day within ≤24h. The watermark still advances past ALL
+// churn each run, so old days are never re-scanned by incremental.
+const INCREMENTAL_LOOKBACK = Number(process.env.INCREMENTAL_LOOKBACK_DAYS) || 7;
 
 const todayUTC = () => new Date().toISOString().slice(0, 10);
 const shiftDays = (iso: string, d: number) => {
@@ -221,10 +229,14 @@ function deltaSql(effWm: string, cap: string): string {
       const effWm = watermark > `${cap}T00:00:00Z` ? watermark : `${cap}T00:00:00Z`;
       const delta = await queryRows<{ days: string[]; new_watermark: string; changed_rows: string }>(deltaSql(effWm, cap));
       const changed = num(delta[0]?.changed_rows);
+      // Advance the watermark past ALL churn in the full MAX_LOOKBACK window (the delta scan is a cheap
+      // column read) — so old changed days are ACKNOWLEDGED and never re-scanned by the next incremental.
       newWatermark = changed > 0 && delta[0]?.new_watermark ? String(delta[0].new_watermark) : watermark;
-      // Re-aggregate the days that actually changed PLUS the hot window, merged into ≤CHUNK_DAYS windows.
-      // A single edit to an old row scans just that day's window — never oldest→today contiguously.
-      const days = new Set<string>(Array.isArray(delta[0]?.days) ? delta[0]!.days.map(String).filter((d) => d >= cap) : []);
+      // …but only RE-AGGREGATE changed days within the recent INCREMENTAL_LOOKBACK window, PLUS the hot
+      // window. Older changed days (constant CDC updatedAt churn) are left to the daily FULL reconcile —
+      // this is what keeps a run at ~2-3 chunks (~3 min) instead of re-doing 2-4 months every 30 min.
+      const incFloor = shiftDays(today, -(INCREMENTAL_LOOKBACK - 1));
+      const days = new Set<string>(Array.isArray(delta[0]?.days) ? delta[0]!.days.map(String).filter((d) => d >= incFloor) : []);
       for (let d = hotFloor; d <= today; d = shiftDays(d, 1)) days.add(d);
       for (const d of [...days].sort()) {
         const last = ranges[ranges.length - 1];
@@ -244,7 +256,7 @@ function deltaSql(effWm: string, cap: string): string {
         if (aHot !== bHot) return aHot ? -1 : 1;
         return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
       });
-      console.log(`INCREMENTAL: watermark=${watermark}, changed_rows=${changed}, ${days.size} day(s) → ${ranges.length} chunk(s) (≤${CHUNK_DAYS}d each, hot window first).`);
+      console.log(`INCREMENTAL: watermark=${watermark}, changed_rows=${changed}, ${days.size} day(s) in last ${INCREMENTAL_LOOKBACK}d → ${ranges.length} chunk(s) (≤${CHUNK_DAYS}d each, hot window first; older changed days deferred to daily FULL reconcile).`);
     }
   }
 
