@@ -9,8 +9,11 @@ name: Sync reporting aggregate
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # incremental
-    - cron: "17 4 * * *"     # daily full reconcile
+    - cron: "0 * * * *"      # incremental — hourly (was */30; a ~1-2 min run whose
+                             # hot window is the last 3 days is plenty fresh for a
+                             # reporting aggregate that feeds daily digests, and it
+                             # halves GitHub Actions minutes)
+    - cron: "17 4 * * *"     # daily full reconcile (120d) — catches older changed days
   workflow_dispatch:
     inputs:
       mode:
@@ -21,7 +24,13 @@ on:
 
 concurrency:
   group: sync-reports
-  cancel-in-progress: false
+  # cancel-in-progress: true is SAFE now that each run checkpoints the watermark right
+  # after the hot window (see backfill.ts): a run cancelled mid-flight has already
+  # committed recent-day freshness, and the delta is idempotent, so killing a straggler
+  # for the newer run never loses progress. Prevents the pile-up that produced the
+  # overlap-cancellations during the 07-14 stall. The daily full reconcile (~25 min)
+  # finishes well before the next hourly incremental, so it is not cut short.
+  cancel-in-progress: true
 
 jobs:
   sync:
