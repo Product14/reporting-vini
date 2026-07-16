@@ -32,7 +32,7 @@ import {
 } from "@/components/reports/kit";
 import { fmtRate, fmtWhenShort, IntentOutcomeTable, RankedOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
+import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
@@ -384,13 +384,86 @@ function AgentReportsView() {
       });
     }
 
+    // The full appointment list behind "Total AI-booked" — same source (report.namedAppointments) as
+    // the headline count above, so the export always ties out to what's on screen. Not the modal's live
+    // Spyne re-fetch (that's for the drill-down's freshness, a different concern from "export what the
+    // report is showing").
+    if (r.namedAppointments?.length) {
+      sheets.push({
+        name: "Appointments",
+        rows: [
+          ["Customer", "Phone", "Channel", "Vehicle", "When", "Booked at", "Status", "How", "AI-assisted (CRM)", "Service type"],
+          ...r.namedAppointments.map((ap) => [
+            ap.customer, ap.phone, ap.channel ?? "", ap.vehicle, ap.when ?? "", ap.bookedAt ?? "", ap.status, ap.how, ap.assisted ? "Yes" : "No", ap.serviceType,
+          ]),
+        ],
+      });
+    }
+
+    if (inbound && r.intentOutcomes?.length) {
+      sheets.push({
+        name: "Conversations & outcomes",
+        rows: [
+          ["What the customer wanted", "Conversations", "Resolved", "Booked", "Transferred", "Callback"],
+          ...r.intentOutcomes.map((row) => [row.label, row.conversations, row.resolved, row.booked, row.transferred, row.callback]),
+        ],
+      });
+    }
+
+    if (a.id === "sales_ib" && r.speedToLead?.medianUnderMin) {
+      const stl = r.speedToLead;
+      sheets.push({
+        name: "Speed to lead",
+        rows: [
+          ["Metric", "Value"],
+          ["Avg first response", stl.avg],
+          ["New CRM leads", stl.crmLeadsNew],
+          ["% contacted within 5 min", `${stl.pctWithin5}%`],
+          ["Touched instantly", stl.instantlyTouched],
+          ["Touched instantly, after-hours", stl.afterHoursInstant],
+          ["Instant-touch appointments", stl.instantAppts],
+          ["Instant-touch → appointment rate", `${stl.instantApptRate}%`],
+          ...(stl.openFunnel
+            ? [
+                [],
+                ["Path", "Leads handled", "Appointments", "Booked rate"],
+                ["Speed-to-lead", stl.openFunnel.stlLeadsHandled, stl.openFunnel.stlAppts, `${stl.openFunnel.stlRate}%`],
+                ["Follow-up", stl.openFunnel.followupLeadsHandled, stl.openFunnel.followupAppts, `${stl.openFunnel.followupRate}%`],
+              ]
+            : []),
+        ],
+      });
+    }
+
     return sheets;
   };
 
-  const handleExport = (format: "csv" | "xlsx") => {
+  // Action items live in their own domain (dealer_leads.actionItems via /api/action-items), fetched
+  // fresh here rather than lifted into shared state — this is the only sheet that needs a network
+  // round-trip at export time; everything else in buildExportSheets is already-loaded report data.
+  const buildActionItemsSheet = async (): Promise<ExportSheet> => {
+    const service = a.dept === "Service" ? "service" : "sales";
+    const [stats, items] = await Promise.all([
+      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken }),
+      fetchAllActionItems(teamId, { scope: "open", service, spyneToken }),
+    ]);
+    return {
+      name: "Action items",
+      rows: [
+        ["Created", "Completed", "Open", "Overdue", "Due today"],
+        stats ? [stats.stats.created, stats.stats.completed, stats.stats.open, stats.stats.overdue, stats.stats.dueToday] : ["—", "—", "—", "—", "—"],
+        [],
+        ["Open queue — customer", "What to do", "Priority", "Due", "Completed"],
+        ...items.map((it) => [it.customer ?? "", it.description || it.intent, it.priority, it.dueAt ?? "", it.completed ? "Yes" : "No"]),
+      ],
+    };
+  };
+
+  const handleExport = async (format: "csv" | "xlsx") => {
     track("report_exported", { tab: "agents", team_id: teamId, format });
     const filename = `${exportFilenameStem(`${account.name} - ${r.summary.person || a.name}`, periodLabel)}.${format}`;
     const sheets = buildExportSheets();
+    sheets.push(await buildActionItemsSheet());
     if (format === "csv") downloadCSV(filename, sheets);
     else downloadXLSX(filename, sheets);
   };

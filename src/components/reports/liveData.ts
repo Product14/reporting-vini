@@ -542,6 +542,40 @@ export async function fetchActionItems(
   }
 }
 
+/* Paginated variant for exports (CSV/XLSX) — the on-screen queue only ever wants a bounded preview
+ * (fetchActionItems above), but "download everything the report is showing" means the export can't
+ * silently stop at one page. Pages via `offset` + the API's `hasMore` flag (server hard-caps `limit`
+ * at 200 regardless of what's requested) until a page comes back short, capped at 25 pages (5,000
+ * items) as a backstop against a pathological backlog looping forever. */
+export async function fetchAllActionItems(
+  teamId: string,
+  opts: { scope?: "open" | "overdue" | "recent"; service?: "sales" | "service" | "both"; spyneToken?: string } = {},
+): Promise<ActionItem[]> {
+  if (!teamId) return [];
+  const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
+  const pageSize = 200;
+  const all: ActionItem[] = [];
+  for (let page = 0; page < 25; page++) {
+    const query: Record<string, string> = {
+      team_id: teamId,
+      scope: opts.scope ?? "open",
+      serviceType: opts.service ?? "both",
+      limit: String(pageSize),
+      offset: String(page * pageSize),
+    };
+    try {
+      const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+      const j = (await r.json().catch(() => null)) as { actionItems?: ActionItem[]; hasMore?: boolean } | null;
+      if (!r.ok || !j || !Array.isArray(j.actionItems)) break;
+      all.push(...j.actionItems);
+      if (!j.hasMore) break;
+    } catch {
+      break;
+    }
+  }
+  return all;
+}
+
 /* ── Customers / lead book (dealer_leads.leads via /api/customers) ── */
 export interface Customer {
   leadId: string | null;
