@@ -52,11 +52,19 @@ const sqlList = (xs: string[]): string => xs.map((s) => `'${esc(s)}'`).join(",")
 export interface CampaignsOpts {
   teamId?: string;
   startFloor?: string; // ClickHouse date expr, e.g. "addDays(today(), -120)". Default floors meeting/callback scans.
+  activityFloor?: string; // ClickHouse date expr — a campaign counts as ACTIVE if it dialed on/after this. Default 90d (lifecycle lookback, lull-tolerant).
 }
 
-export function campaignsSql({ teamId, startFloor = "addDays(today(), -120)" }: CampaignsOpts = {}): string {
+export function campaignsSql({ teamId, startFloor = "addDays(today(), -120)", activityFloor = "addDays(today(), -90)" }: CampaignsOpts = {}): string {
   return `
 WITH campaign_meta AS (
+    -- "Active campaigns" = campaigns that are ALIVE: real ACTIVITY within the lifecycle window (dialed
+    -- on/after {activityFloor}, default 90d — see campaign_recent_activity below) AND not churned. "Active"
+    -- means ACTIVITY, not a status flag — a dialing lull (a day, a weekend, even a slow stretch) must NOT
+    -- remove a campaign, hence the long ~90d lookback rather than "recent". Churn is the ONLY hard removal:
+    -- campaignStatus IN ('completed','stopped'). We deliberately do NOT gate on completedDate/endDate —
+    -- those are stale in BOTH directions (a live campaign was seen with a stale completedDate + past endDate
+    -- while still dialing), so campaignStatus is the sole churn signal.
     SELECT c.campaignId AS campaignId,
            any(c.name) AS campaign_name, any(c.campaignUseCase) AS use_case,
            any(lower(c.campaignType)) AS campaign_type,
@@ -64,8 +72,19 @@ WITH campaign_meta AS (
     FROM dealer_leads.campaigns AS c FINAL
     WHERE c.__deleted = 0
       AND lower(c.campaignType) IN ('sales','service')
+      AND lower(ifNull(c.campaignStatus, '')) NOT IN ('completed','stopped')   -- churn = the only hard removal
       ${teamPred("c.teamId", teamId)}
     GROUP BY c.campaignId
+),
+-- Activity gate (lifecycle): the campaign actually DIALED on/after {activityFloor} (default 90d). A long
+-- lookback so a lull never drops a live campaign; only genuine months-long silence (or churn above) removes it.
+campaign_recent_activity AS (
+    SELECT DISTINCT ot.campaignId AS campaignId
+    FROM dealer_leads.outboundTasks AS ot FINAL
+    WHERE ot.__deleted = 0
+      AND ot.campaignId IS NOT NULL AND ot.campaignId != ''
+      AND toDate(ot.createdAt) >= ${activityFloor}
+      ${teamPred("ot.teamId", teamId)}
 ),
 -- Outbound-task attribution: campaign -> outbound call -> meeting.
 campaign_calls AS (
@@ -128,6 +147,7 @@ SELECT
     round(100.0 * ifNull(ca.appts,0) / nullIf(co.enrolled,0), 1) AS appt_rate_pct
 FROM campaign_meta cm
 JOIN campaign_outcomes co ON co.campaignId = cm.campaignId
+JOIN campaign_recent_activity cra ON cra.campaignId = cm.campaignId
 LEFT JOIN campaign_appts ca ON ca.campaignId = cm.campaignId
 WHERE co.enrolled >= 20
 ORDER BY team_id, appointments DESC, warm_leads DESC
