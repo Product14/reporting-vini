@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import {
   BUCKET_LABELS,
   Card,
@@ -18,7 +18,6 @@ import { useDateRange, useDept, reportNavQuery } from "@/components/reports/date
 import {
   fetchActionItems,
   fetchActionItemStats,
-  rangeFor,
   addDay,
   type ActionItem,
   type ActionItemStats,
@@ -42,9 +41,8 @@ function ActionItemsView() {
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
   const navQuery = reportNavQuery(teamId, bucket, custom, dept);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
-  const win = useMemo(() => (custom ? { start: custom.start, end: addDay(custom.end) } : rangeFor(bucket)), [bucket, custom]);
   // shared dept "all" → the action-items API's serviceType "both".
-  const service = dept === "all" ? "both" : dept;
+  const service: "sales" | "service" | "both" = dept === "all" ? "both" : dept;
 
   const [scope, setScope] = useState<Scope>("open");
   const [stats, setStats] = useState<{ stats: ActionItemStats; closers: ActionItemCloser[] } | null>(null);
@@ -52,13 +50,18 @@ function ActionItemsView() {
 
   useEffect(() => { track("report_viewed", { tab: "actions", team_id: teamId }); }, [teamId]);
 
-  // Scoreboard (created/closed for the window + open/overdue/due-today now + who closed most).
+  // Scoreboard (created/closed for the window + open/overdue/due-today now + who closed most). Presets
+  // pass `bucket` so the SERVER resolves a store-local window (matching the Overview card, RETCONVAI-4144);
+  // custom ranges pass explicit dates. The old client-side rangeFor(bucket) computed a UTC window.
   useEffect(() => {
     if (!teamId) { setStats(null); return; }
     let on = true;
-    fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken }).then((r) => { if (on) setStats(r); });
+    const opts = custom
+      ? { start: custom.start, end: addDay(custom.end), service, spyneToken }
+      : { bucket, service, spyneToken };
+    fetchActionItemStats(teamId, opts).then((r) => { if (on) setStats(r); });
     return () => { on = false; };
-  }, [teamId, win.start, win.end, service, spyneToken]);
+  }, [teamId, bucket, custom, service, spyneToken]);
 
   // The working list — open queue or the overdue escalation list.
   useEffect(() => {

@@ -287,6 +287,7 @@ export interface ObjectionRow {
 }
 export interface MissedOpportunityRow {
   team_id: string;
+  service_type: string | null; // "sales" | "service" — the lead's dept (RETCONVAI-4150); null on legacy rows
   channel: string; // "call" | "sms"
   category: string; // voicemail / no_answer / abandoned / sms_failed
   count: number;
@@ -311,7 +312,8 @@ export interface FollowUpRow {
 export interface HighlightRow {
   team_id: string;
   direction: string | null;
-  use_case: string | null;
+  service_type: string | null; // "sales" | "service" — the lead's dept (RETCONVAI-4150); null on legacy rows
+  use_case: string | null; // report_useCase — display only, NOT the Sales/Service split key
   score: number | null;
   title: string | null;
   occurred_on: string | null;

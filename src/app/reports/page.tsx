@@ -148,9 +148,11 @@ function OverviewReportView() {
     if (!teamId) { setConversations([]); return; }
     let on = true;
     setConversations(null);
-    fetchConversations(teamId, { channel: "both", service: svc, since: feed?.start, limit: 12, spyneToken }).then((r) => { if (on) setConversations(r); });
+    // Bound BOTH ends of the window (server-resolved store-local feed.start/end) so "Yesterday" shows
+    // yesterday's conversations, not everything since yesterday-through-now (RETCONVAI-4152).
+    fetchConversations(teamId, { channel: "both", service: svc, since: feed?.start, end: feed?.end, limit: 12, spyneToken }).then((r) => { if (on) setConversations(r); });
     return () => { on = false; };
-  }, [teamId, svc, feed?.start, spyneToken]);
+  }, [teamId, svc, feed?.start, feed?.end, spyneToken]);
 
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
@@ -237,7 +239,7 @@ function OverviewReportView() {
               <Hideable id="tile.response" ctrl={ctrl}><MetricTile label="Response time" value={fmtSecs(fleet.responseTimeSec)} accent="#0ea5e9" sub={<>avg first response · speed-to-lead</>} title="Average time from a new lead arriving to the AI's first touch (speed-to-lead, Sales Inbound)." /></Hideable>
             )}
             <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Action items created" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} closed · {fmtInt(aiStats.stats.open)} open</> : <>syncing…</>} onClick={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)} title="Follow-up tasks the AI logged for the team this period. Click for the full list." /></Hideable>
-            <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label="Calls & texts" value={fmtInt(fleet.calls + fleet.smsSent)} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsSent)} texts</>} title="Total AI conversations handled across voice and SMS." /></Hideable>
+            <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label="Calls & texts" value={fmtInt(fleet.calls + fleet.smsThreads)} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts</>} title="AI conversations handled across voice and SMS — voice calls + SMS threads (conversations, not individual messages)." /></Hideable>
             <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
             <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
           </div>

@@ -200,10 +200,21 @@ function AgentReportsView() {
   // sms-failed) are OUTBOUND dial outcomes with no direction column — nonsensical on an inbound agent, so
   // they're shown only on outbound agents.
   const agentDir = inbound ? "inbound" : "outbound";
-  // Match the agent's direction, but KEEP highlights whose direction is null/blank (some rooftops don't
-  // populate it) so real wins never silently vanish from the card.
-  const agentHighlights = metrics ? metrics.highlights.filter((h) => { const d = (h.direction || "").toLowerCase(); return d ? d === agentDir : true; }) : [];
-  const showMissed = !inbound && !!metrics && metrics.missed.length > 0;
+  const agentSvc = a.id.startsWith("service") ? "service" : "sales";
+  // Match the agent's direction AND service — a Sales agent must not show Service wins/misses and vice-versa
+  // (RETCONVAI-4150). KEEP rows whose direction/service_type is null/blank (legacy rows before 0020, or
+  // rooftops that don't populate it) so real wins never silently vanish from the card.
+  const agentHighlights = metrics
+    ? metrics.highlights.filter((h) => {
+        const d = (h.direction || "").toLowerCase();
+        const s = (h.service_type || "").toLowerCase();
+        return (d ? d === agentDir : true) && (s ? s === agentSvc : true);
+      })
+    : [];
+  const agentMissed = metrics
+    ? metrics.missed.filter((mm) => { const s = (mm.service_type || "").toLowerCase(); return s ? s === agentSvc : true; })
+    : [];
+  const showMissed = !inbound && agentMissed.length > 0;
 
   // Live data is already a window total for the selected bucket (liveData re-queries per bucket),
   // so it must not be re-scaled — factor=1 when live, 0 in the pre-live ghost states.
@@ -211,7 +222,15 @@ function AgentReportsView() {
   const scale = (n: number) => Math.round(n * factor);
   const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
   // Store-local window for the action-items scoreboard (created/closed within it); end is exclusive.
-  const win = useMemo(() => (custom ? { start: custom.start, end: addDay(custom.end) } : rangeFor(bucket)), [bucket, custom]);
+  // Prefer the SERVER-resolved store-local dates (feed.start/end) for presets — the client-side
+  // rangeFor(bucket) computes a UTC window, which drifted this page's action-item counts off the
+  // dealer's calendar day (RETCONVAI-4152). rangeFor is only the cold-load fallback before feed lands.
+  const win = useMemo(
+    () => custom
+      ? { start: custom.start, end: addDay(custom.end) }
+      : (feed?.start && feed?.end ? { start: feed.start, end: feed.end } : rangeFor(bucket)),
+    [bucket, custom, feed?.start, feed?.end],
+  );
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
@@ -377,7 +396,7 @@ function AgentReportsView() {
                 [],
                 ["Missed — outbound demand that slipped"],
                 ["Category", "Channel", "Count"],
-                ...metrics!.missed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]),
+                ...agentMissed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]),
               ]
             : []),
         ],
@@ -601,7 +620,7 @@ function AgentReportsView() {
         heading: "Highlights & missed opportunities",
         blocks: [
           ...(agentHighlights.length ? [{ kind: "rows" as const, title: "Wins — best booked calls", columns: ["Title", "Occurred on"], rows: agentHighlights.slice(0, 15).map((h) => [h.title ?? "", h.occurred_on ?? ""]) }] : []),
-          ...(showMissed ? [{ kind: "rows" as const, title: "Missed — outbound demand that slipped", columns: ["Category", "Channel", "Count"], rows: metrics!.missed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]) }] : []),
+          ...(showMissed ? [{ kind: "rows" as const, title: "Missed — outbound demand that slipped", columns: ["Category", "Channel", "Count"], rows: agentMissed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]) }] : []),
         ],
       });
     }
@@ -1087,7 +1106,7 @@ function AgentReportsView() {
                   <div className="px-6 py-5">
                     <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#b45309]">Missed · outbound demand that slipped</p>
                     <ul className="mt-3 space-y-2.5">
-                      {metrics!.missed.map((mm, i) => (
+                      {agentMissed.map((mm, i) => (
                         <li key={i} className="flex items-center justify-between text-[12.5px]">
                           <span className="text-[#374151]">
                             {MISSED_LABELS[mm.category] ?? mm.category} <span className="text-[#9ca3af]">· {mm.channel}</span>

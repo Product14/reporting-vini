@@ -303,6 +303,36 @@ booked_leads AS (
       AND toDate(m.created_at) >= ${startFloor}
       ${teamPred("m.team_id", teamId)}
 ),
+engaged_leads AS (
+    -- Canonical "real conversation" gate: the customer ACTUALLY engaged — a non-voicemail/machine call
+    -- where they SPOKE (a 'user' message in callDetails_messages), OR a human inbound SMS reply. Mirrors
+    -- agentBaseFact.sql is_connected (l.267-281) + the human-inbound SMS rule (l.340,346-349). Warm leads
+    -- MUST pass this on top of their buying-signal, so a lead whose only touch is a voicemail
+    -- (RETCONVAI-4147), an agent-initiated chat with no customer reply (RETCONVAI-4145), or a call the
+    -- customer never really engaged on (RETCONVAI-4146) is never shown as "hot". report.connected is NOT
+    -- used — the outbound dialer sets it on voicemail-reached calls too.
+    SELECT DISTINCT lead_id FROM (
+        SELECT ecr.leadId AS lead_id
+        FROM dealer_leads.endcallreports AS ecr FINAL
+        WHERE ecr.__deleted = 0 AND ecr.isActive = 1 AND ecr.isTestCall = 0
+          AND lower(ifNull(ecr.callDetails_endedReason,'')) NOT LIKE '%voicemail%'
+          AND lower(ifNull(ecr.callDetails_endedReason,'')) NOT LIKE '%machine%'
+          AND arrayExists(x -> JSONExtractString(x,'role') = 'user',
+                          JSONExtractArrayRaw(ifNull(ecr.callDetails_messages,'[]')))
+          AND toDate(ecr.createdAt) >= ${startFloor}
+          ${teamPred("ecr.teamId", teamId)}
+        UNION ALL
+        SELECT c.leadId AS lead_id
+        FROM dealer_leads.smsMessages AS sm FINAL
+        JOIN dealer_leads.conversations AS c FINAL
+          ON c.conversationId = sm.conversationId
+         AND c.__deleted = 0 AND ifNull(c.isTest,0) = 0 AND c.status != 'failed' AND lower(c.type) = 'sms'
+        WHERE sm.__deleted = 0
+          AND lower(ifNull(sm.authorType,'')) = 'human' AND lower(ifNull(sm.direction,'')) = 'in'
+          AND toDate(sm.createdAt) >= ${startFloor}
+          ${teamPred("c.teamId", teamId)}
+    )
+),
 ob_warm AS (
     SELECT el.team_id AS team_id, 'ob' AS source, el.service_type AS service_type,
            clm.leadId AS lead_id,
@@ -315,6 +345,7 @@ ob_warm AS (
     WHERE clm.__deleted = 0
       AND lower(trimBoth(clm.outcome)) IN (${sqlList(WARM_LEAD_OUTCOMES)})
       AND clm.leadId NOT IN (SELECT lead_id FROM booked_leads)
+      AND clm.leadId IN (SELECT lead_id FROM engaged_leads)   -- real customer engagement required (4145/46/47)
     GROUP BY el.team_id, el.service_type, clm.leadId
 ),
 ib_warm AS (
@@ -329,6 +360,7 @@ ib_warm AS (
       AND toDate(ai.createdAt) >= ${startFloor}
       AND ai.lead_id NOT IN (SELECT lead_id FROM booked_leads)
       AND ai.lead_id NOT IN (SELECT lead_id FROM ob_warm)
+      AND ai.lead_id IN (SELECT lead_id FROM engaged_leads)   -- real customer engagement required (4145/46/47)
     GROUP BY el.team_id, el.service_type, ai.lead_id
 )
 SELECT

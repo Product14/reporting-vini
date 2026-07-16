@@ -22,7 +22,10 @@
  * page through the full result set instead of guessing a big-enough single limit.
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
-import { requireTeamAuth } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
+import { getStoreTimeZone } from "@/lib/spyne/teamContext";
+import { rangeFor } from "@/components/reports/liveData";
+import type { Bucket } from "@/components/reports/data";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,6 +66,30 @@ export async function GET(request: Request): Promise<Response> {
   const minutes = Math.max(1, Math.min(10_080, Number(searchParams.get("minutes")) || 15));
   const limit = Math.max(1, Math.min(200, Number(searchParams.get("limit")) || 50));
   const offset = Math.max(0, Number(searchParams.get("offset")) || 0);
+  const spyneToken = spyneTokenFrom(request);
+  const bucketRaw = searchParams.get("bucket") || "";
+  const BUCKETS = new Set(["today", "yesterday", "last7", "last14", "last30", "mtd", "lifetime"]);
+
+  // Store-local window for the windowed scopes (stats/created). Resolved server-side from `bucket` via the
+  // rooftop timezone — the SAME resolution /api/reports uses — so the Action Items tab's Today/Yesterday
+  // land on the dealer's calendar day and match the Overview card instead of drifting to UTC (the tab used
+  // to compute the window client-side with no tz → UTC, RETCONVAI-4144). Explicit start/end (custom
+  // picker) win; neither given → trailing 30 days. tz resolution costs one Spyne call, so it only runs for
+  // the windowed scopes (never for recent/open/overdue).
+  async function windowExprs(): Promise<{ startExpr: string; endExpr: string }> {
+    let s = dateOk(searchParams.get("start") || "") ? (searchParams.get("start") as string) : "";
+    let e = dateOk(searchParams.get("end") || "") ? (searchParams.get("end") as string) : "";
+    if ((!s || !e) && BUCKETS.has(bucketRaw)) {
+      const tz = await getStoreTimeZone(teamId, spyneToken);
+      const w = rangeFor(bucketRaw as Bucket, tz ?? undefined);
+      if (!s) s = w.start;
+      if (!e) e = w.end;
+    }
+    return {
+      startExpr: s ? `toDateTime64('${s} 00:00:00',3)` : "now() - INTERVAL 30 DAY",
+      endExpr: e ? `toDateTime64('${e} 00:00:00',3)` : "now()",
+    };
+  }
 
   // ── scope=stats: rooftop action-item scoreboard (created/closed in-window + open/overdue/due-today
   //    now + a who-closed-most leaderboard). All from dealer_leads.actionItems, de-duped to the latest
@@ -72,30 +99,40 @@ export async function GET(request: Request): Promise<Response> {
   //    — a minor TZ skew vs the dealer-local report window, acceptable for these operational counts. ──
   if (scope === "stats") {
     const svcFilter = service !== "both" ? ` AND lower(ifNull(service_type,'')) LIKE '${service}%'` : "";
-    const startRaw = searchParams.get("start") || "";
-    const endRaw = searchParams.get("end") || "";
-    const startExpr = dateOk(startRaw) ? `toDateTime64('${startRaw} 00:00:00',3)` : "now() - INTERVAL 30 DAY";
-    const endExpr = dateOk(endRaw) ? `toDateTime64('${endRaw} 00:00:00',3)` : "now()";
-    // Latest row per _id, scoped to the team + department; then filter deleted/blank-intent in the outer query.
-    const deduped =
+    const { startExpr, endExpr } = await windowExprs();
+    // Two-level roll-up. Level 1 (byId): latest CDC row per _id (argMax over _version). Level 2 (perLead):
+    // collapse to ONE row per LEAD. The AI re-creates the same action item on every touch — one Bridgeton
+    // lead carried 115 'AskStaffMember/Manager' + 95 'RequestCallback' rows — so counting per _id inflated
+    // "open"/"overdue" (4,141 vs ~1,730 real leads) and showed the same customer many times
+    // (RETCONVAI-4143/4149). A lead counts as open/overdue/due-today when it has AT LEAST ONE item matching
+    // (max() flag), so a lead with genuine open work is never missed even if its most-recent item is closed.
+    // deleted/blank-intent are dropped BEFORE the roll-up.
+    const byId =
       "SELECT _id," +
-      " argMax(ifNull(is_completed,0),_version) AS is_completed," +
-      " argMax(ifNull(is_active,1),_version) AS is_active," +
-      " argMax(createdAt,_version) AS createdAt, argMax(updatedAt,_version) AS updatedAt," +
+      " argMax(lead_id,_version) AS lead_id, argMax(ifNull(intent,''),_version) AS intent," +
+      " argMax(ifNull(is_completed,0),_version) AS is_completed, argMax(ifNull(is_active,1),_version) AS is_active," +
+      " argMax(createdAt,_version) AS created_ts, argMax(updatedAt,_version) AS updatedAt," +
       " argMax(due_date,_version) AS due_date, argMax(__deleted,_version) AS deleted," +
-      " argMax(ifNull(assigned_to,''),_version) AS assigned_to, argMax(ifNull(intent,''),_version) AS intent" +
+      " argMax(ifNull(assigned_to,''),_version) AS assigned_to" +
       ` FROM dealer_leads.actionItems WHERE team_id='${chEsc(teamId)}'${svcFilter} GROUP BY _id`;
+    // Per-lead flags: 1 when the lead has ANY item satisfying the predicate. created/closed are windowed;
+    // open/overdue/due-today are current-state. max(<bool>) → 1 if any row qualifies.
+    const perLead =
+      "SELECT lead_id," +
+      ` max(created_ts >= ${startExpr} AND created_ts < ${endExpr}) AS created_in_win,` +
+      ` max(is_completed=1 AND updatedAt >= ${startExpr} AND updatedAt < ${endExpr}) AS completed_in_win,` +
+      " max(is_completed=0 AND is_active=1) AS open_any," +
+      " max(is_completed=0 AND is_active=1 AND due_date > toDateTime('1971-01-01') AND due_date < now()) AS overdue_any," +
+      " max(is_completed=0 AND is_active=1 AND toDate(due_date)=today()) AS dueToday_any" +
+      ` FROM (${byId}) WHERE deleted=0 AND intent != '' GROUP BY lead_id`;
     const statsSql =
-      "SELECT" +
-      ` countIf(createdAt >= ${startExpr} AND createdAt < ${endExpr}) AS created,` +
-      ` countIf(is_completed=1 AND updatedAt >= ${startExpr} AND updatedAt < ${endExpr}) AS completed,` +
-      " countIf(is_completed=0 AND is_active=1) AS open," +
-      " countIf(is_completed=0 AND is_active=1 AND due_date > toDateTime('1971-01-01') AND due_date < now()) AS overdue," +
-      " countIf(is_completed=0 AND is_active=1 AND toDate(due_date)=today()) AS dueToday" +
-      ` FROM (${deduped}) WHERE deleted=0 AND intent != ''`;
+      "SELECT sum(created_in_win) AS created, sum(completed_in_win) AS completed," +
+      " sum(open_any) AS open, sum(overdue_any) AS overdue, sum(dueToday_any) AS dueToday" +
+      ` FROM (${perLead})`;
+    // Who-closed-most: distinct LEADS with an item completed in-window, grouped by that item's assignee.
     const closersSql =
-      "SELECT assigned_to AS assignedTo, count() AS closed" +
-      ` FROM (${deduped}) WHERE deleted=0 AND intent != '' AND is_completed=1` +
+      "SELECT assigned_to AS assignedTo, uniqExact(lead_id) AS closed" +
+      ` FROM (${byId}) WHERE deleted=0 AND intent != '' AND is_completed=1` +
       ` AND updatedAt >= ${startExpr} AND updatedAt < ${endExpr}` +
       " GROUP BY assigned_to ORDER BY closed DESC LIMIT 10";
     const [statRows, closerRows] = await Promise.all([
@@ -120,41 +157,62 @@ export async function GET(request: Request): Promise<Response> {
     );
   }
 
-  const where: string[] = [
-    `a.team_id='${chEsc(teamId)}'`,
-    "ifNull(a.is_active,1)=1", "a.__deleted=0",
-    "ifNull(a.intent,'') != ''",
-  ];
-  // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. (an exact '=' dropped those
-  // valid rows). `service`/`both` are validated against the SERVICE allow-list above, so the literal is safe.
-  if (service !== "both") where.push(`lower(ifNull(a.service_type,'')) LIKE '${service}%'`);
-  if (scope === "recent") where.push(`a.createdAt >= now() - INTERVAL ${minutes} MINUTE`);
-  if (scope === "open") where.push("ifNull(a.is_completed,0)=0");
-  if (scope === "overdue") where.push("ifNull(a.is_completed,0)=0 AND a.due_date > toDateTime('1971-01-01') AND a.due_date < now()");
+  // Two-level roll-up — SAME grain as the `stats` scope (one row per LEAD), so the list and the scoreboard
+  // agree. Level 1 (byIdList): latest CDC row per _id. Level 2 (dedupedList): one row per lead = the latest
+  // item that matches the scope. The old list read the CDC table raw, so one lead's 115 duplicate
+  // 'RequestCallback' rows all surfaced as separate list entries and consumed the paged LIMIT, pushing
+  // genuine leads off the page (RETCONVAI-4143). Scope/hygiene predicates are applied at the ITEM level
+  // (itemWhere) BEFORE the per-lead collapse, so a lead is listed iff it has ANY matching item — the same
+  // "any open" rule the scoreboard uses.
+  const byIdList =
+    "SELECT _id," +
+    " argMax(lead_id,_version) AS lead_id, argMax(ifNull(intent,''),_version) AS intent," +
+    " argMax(ifNull(assigned_to,''),_version) AS assigned_to, argMax(ifNull(description,''),_version) AS description," +
+    " argMax(ifNull(priority,''),_version) AS priority, argMax(ifNull(is_completed,0),_version) AS is_completed," +
+    " argMax(lower(ifNull(service_type,'')),_version) AS service_type, argMax(due_date,_version) AS due_date," +
+    " argMax(createdAt,_version) AS created_ts, argMax(ifNull(is_active,1),_version) AS is_active," +
+    " argMax(__deleted,_version) AS __deleted" +
+    ` FROM dealer_leads.actionItems WHERE team_id='${chEsc(teamId)}' GROUP BY _id`;
+
+  // Item-level predicates (scope + hygiene) applied to the deduped-per-_id rows BEFORE the per-lead
+  // collapse — a lead is listed iff it has ≥1 item passing these (matches the scoreboard's "any" rule).
+  const itemWhere: string[] = ["is_active=1", "__deleted=0", "intent != ''"];
+  // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. `service`/`both` validated above.
+  if (service !== "both") itemWhere.push(`service_type LIKE '${service}%'`);
+  if (scope === "recent") itemWhere.push(`created_ts >= now() - INTERVAL ${minutes} MINUTE`);
+  if (scope === "open") itemWhere.push("is_completed=0");
+  if (scope === "overdue") itemWhere.push("is_completed=0 AND due_date > toDateTime('1971-01-01') AND due_date < now()");
   if (scope === "created") {
-    // createdAt within [start,end) — dealer-local dates as server-time boundaries, matching the
-    // `stats` scope's window expr (minor TZ skew, acceptable for these operational counts). Defaults
-    // to the trailing 30 days when start/end are absent/malformed.
-    const startRaw = searchParams.get("start") || "";
-    const endRaw = searchParams.get("end") || "";
-    const startExpr = dateOk(startRaw) ? `toDateTime64('${startRaw} 00:00:00',3)` : "now() - INTERVAL 30 DAY";
-    const endExpr = dateOk(endRaw) ? `toDateTime64('${endRaw} 00:00:00',3)` : "now()";
-    where.push(`a.createdAt >= ${startExpr} AND a.createdAt < ${endExpr}`);
+    // created within [start,end) — store-local window resolved the same way as `stats` (RETCONVAI-4144).
+    const { startExpr, endExpr } = await windowExprs();
+    itemWhere.push(`created_ts >= ${startExpr} AND created_ts < ${endExpr}`);
   }
+  // Collapse matching items to one row per lead — the latest matching item (argMax over created_ts).
+  // itemWhere is applied in an INNER non-aggregating subquery (SELECT * … WHERE …) so its predicates
+  // resolve to the source columns; putting them in this level's WHERE would collide with the argMax
+  // aliases of the same name (is_completed/service_type/due_date/intent) → ILLEGAL_AGGREGATION. created_ts
+  // is the ordering key; `max(created_ts) AS createdAt` is the output (renamed to avoid the same collision).
+  const dedupedList =
+    "SELECT lead_id, argMax(_id,created_ts) AS _id, argMax(intent,created_ts) AS intent," +
+    " argMax(assigned_to,created_ts) AS assigned_to, argMax(description,created_ts) AS description," +
+    " argMax(priority,created_ts) AS priority, argMax(is_completed,created_ts) AS is_completed," +
+    " argMax(service_type,created_ts) AS service_type, argMax(due_date,created_ts) AS due_date," +
+    " max(created_ts) AS createdAt" +
+    ` FROM (SELECT * FROM (${byIdList}) WHERE ${itemWhere.join(" AND ")}) GROUP BY lead_id`;
 
   // Identity join (lead→customer) so the action-item / overdue email names the customer — same source
-  // as the digest, not a second ClickHouse query in vini-daily-calls.
+  // as the digest, not a second ClickHouse query in vini-daily-calls. All filtering happened above, so
+  // the outer query only joins + orders + pages.
   const sql =
-    "SELECT a._id AS id, ifNull(a.intent,'') AS intent, a.lead_id AS leadId, ifNull(a.assigned_to,'') AS assignedTo," +
-    " ifNull(a.description,'') AS description, ifNull(a.priority,'') AS priority," +
-    " ifNull(a.is_completed,0) AS completed, lower(ifNull(a.service_type,'')) AS serviceType," +
+    "SELECT a._id AS id, a.intent AS intent, a.lead_id AS leadId, a.assigned_to AS assignedTo," +
+    " a.description AS description, a.priority AS priority," +
+    " a.is_completed AS completed, a.service_type AS serviceType," +
     " ifNull(c.name,'') AS customer, coalesce(nullIf(c.mobile_number,'')) AS phone," +
     " formatDateTime(a.due_date,'%Y-%m-%dT%H:%i:%SZ') AS dueAt," +
     " formatDateTime(a.createdAt,'%Y-%m-%dT%H:%i:%SZ') AS at" +
-    " FROM dealer_leads.actionItems a" +
+    ` FROM (${dedupedList}) a` +
     " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON a.lead_id=l.lead_id" +
     " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
-    " WHERE " + where.join(" AND ") +
     ` ORDER BY a.createdAt DESC LIMIT ${limit} OFFSET ${offset}`;
 
   const rows = await runClickhouse<Record<string, string | number>>(sql);

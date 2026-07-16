@@ -196,21 +196,36 @@ def build_sections(ent: str, team: str, days: int) -> dict:
         GROUP BY label, channel ORDER BY count DESC
     """)
 
+    # Split by the LEAD's service_type (canonical, same as transfer_quality/highlights) so the by-agent
+    # Missed widget shows a Sales agent only Sales-lead misses, not the whole rooftop (RETCONVAI-4150).
+    # INNER JOIN + service_type IN ('sales','service') mirrors transfer_quality: misses on leads with no
+    # sales/service classification drop out (the same population the rest of the split covers).
     missed = ch_rows(f"""
-        SELECT 'call' AS channel,
-          multiIf(callDetails_endedReason='voicemail','voicemail',
-                  callDetails_endedReason IN ('customer-did-not-answer','no_answer','customer-busy','busy'),'no_answer',
-                  callDetails_endedReason='silence-timed-out','abandoned','other') AS category,
+        SELECT 'call' AS channel, ls.service_type AS service_type,
+          multiIf(ecr.callDetails_endedReason='voicemail','voicemail',
+                  ecr.callDetails_endedReason IN ('customer-did-not-answer','no_answer','customer-busy','busy'),'no_answer',
+                  ecr.callDetails_endedReason='silence-timed-out','abandoned','other') AS category,
           count() AS count
-        FROM dealer_leads.endcallreports FINAL
-        WHERE {ecr_scope} AND lower(report_inOutType)='inbound'
-          AND callDetails_endedReason IN ('voicemail','customer-did-not-answer','no_answer','customer-busy','busy','silence-timed-out')
-        GROUP BY category
+        FROM dealer_leads.endcallreports ecr FINAL
+        INNER JOIN (
+          SELECT lead_id, argMax(service_type, created_at) AS service_type
+          FROM dealer_leads.leads GROUP BY lead_id
+        ) ls ON ls.lead_id = ecr.leadId
+        WHERE {ecr_scope} AND lower(ecr.report_inOutType)='inbound'
+          AND ecr.callDetails_endedReason IN ('voicemail','customer-did-not-answer','no_answer','customer-busy','busy','silence-timed-out')
+          AND ls.service_type IN ('sales','service')
+        GROUP BY service_type, category
     """) + ch_rows(f"""
-        SELECT 'sms' AS channel, 'sms_failed' AS category, count() AS count
+        SELECT 'sms' AS channel, ls.service_type AS service_type, 'sms_failed' AS category, count() AS count
         FROM dealer_leads.smsMessages s
         INNER JOIN dealer_leads.conversations cv ON cv.conversationId=s.conversationId
+        INNER JOIN (
+          SELECT lead_id, argMax(service_type, created_at) AS service_type
+          FROM dealer_leads.leads GROUP BY lead_id
+        ) ls ON ls.lead_id = cv.leadId
         WHERE cv.enterpriseId={E} AND cv.teamId={T} AND s.direction='out' AND s.status='failed' AND s.createdAt>=today()-{D}
+          AND ls.service_type IN ('sales','service')
+        GROUP BY service_type
     """)
 
     # Filter on the raw DateTime column in the inner query, format in the outer — aliasing the formatted
@@ -244,13 +259,22 @@ def build_sections(ent: str, team: str, days: int) -> dict:
         ORDER BY nextVisibleAt DESC LIMIT {TOP}
     """)
 
+    # service_type = the LEAD's service_type (canonical Sales/Service split, same as transfer_quality above),
+    # NOT report_useCase — so the by-agent Highlights widget can show a Sales agent only its Sales wins
+    # (RETCONVAI-4150). use_case (report_useCase) is kept for display but is NOT the split key.
     highlights = ch_rows(f"""
-        SELECT lower(report_inOutType) AS direction, report_useCase AS use_case,
-               report_aiScore_totalScore AS score, substring(report_title,1,140) AS title,
-               toDate(createdAt) AS occurred_on
-        FROM dealer_leads.endcallreports FINAL
-        WHERE {ecr_scope} AND report_overview_appointmentScheduled='Yes' AND report_aiScore_totalScore IS NOT NULL
-        ORDER BY report_aiScore_totalScore DESC LIMIT {TOP}
+        SELECT lower(ecr.report_inOutType) AS direction, ls.service_type AS service_type,
+               ecr.report_useCase AS use_case,
+               ecr.report_aiScore_totalScore AS score, substring(ecr.report_title,1,140) AS title,
+               toDate(ecr.createdAt) AS occurred_on
+        FROM dealer_leads.endcallreports ecr FINAL
+        INNER JOIN (
+          SELECT lead_id, argMax(service_type, created_at) AS service_type
+          FROM dealer_leads.leads GROUP BY lead_id
+        ) ls ON ls.lead_id = ecr.leadId
+        WHERE {ecr_scope} AND ecr.report_overview_appointmentScheduled='Yes'
+          AND ecr.report_aiScore_totalScore IS NOT NULL AND ls.service_type IN ('sales','service')
+        ORDER BY ecr.report_aiScore_totalScore DESC LIMIT {TOP}
     """)
 
     return {

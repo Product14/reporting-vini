@@ -15,7 +15,8 @@ import {
 import { fmtWhenShort } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
-import { fetchConversations, rangeFor, addDay, type Conversation } from "@/components/reports/liveData";
+import { fetchConversations, addDay, type Conversation } from "@/components/reports/liveData";
+import type { Bucket } from "@/components/reports/data";
 import { track } from "@/lib/analytics";
 
 type Channel = "call" | "sms";
@@ -35,7 +36,12 @@ function RecentCallsView() {
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
   const navQuery = reportNavQuery(teamId, bucket, custom, dept);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
-  const win = useMemo(() => (custom ? { start: custom.start, end: addDay(custom.end) } : rangeFor(bucket)), [bucket, custom]);
+  // custom → explicit store-local [start,end); preset → pass the bucket so the SERVER resolves a
+  // store-local window (RETCONVAI-4152). The old rangeFor(bucket) computed a UTC window with no upper
+  // bound, so "Yesterday" bled today's latest calls in.
+  const winOpts: { since?: string; end?: string; bucket?: Bucket } = custom
+    ? { since: custom.start, end: addDay(custom.end) }
+    : { bucket };
 
   const [channel, setChannel] = useState<Channel>("call");
   const [dir, setDir] = useState<Dir>("both");
@@ -46,9 +52,10 @@ function RecentCallsView() {
     if (!teamId) { setRows([]); return; }
     let on = true;
     setRows(null);
-    fetchConversations(teamId, { channel, since: win.start, limit: 150, spyneToken }).then((r) => { if (on) setRows(r); });
+    fetchConversations(teamId, { channel, ...winOpts, limit: 150, spyneToken }).then((r) => { if (on) setRows(r); });
     return () => { on = false; };
-  }, [teamId, channel, win.start, spyneToken]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, channel, bucket, custom, spyneToken]);
 
   const filtered = useMemo(
     () => (rows ?? []).filter((r) => (dir === "both" ? true : r.direction === dir) && (dept === "all" || r.dept === dept)),

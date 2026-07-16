@@ -463,11 +463,16 @@ export function HeadlineStat({
 
 /* ── funnel bars ── */
 export function FunnelBars({ stages }: { stages: { label: string; value: number }[] }) {
-  const max = stages[0]?.value ?? 1;
+  const max = stages[0]?.value ?? 0;
   return (
     <div className="flex flex-col gap-3">
       {stages.map((s, i) => {
-        const width = max > 0 ? Math.max(6, (s.value / max) * 100) : 100;
+        // Guard BOTH the denominator (max) and the numerator (s.value): `0 ?? 1` is 0, so a first stage
+        // of 0 (e.g. an outbound agent with no calls today) leaves max=0 — the old `: 100` fallback then
+        // painted every bar full-width, so "Qualified leads: 0" showed a filled bar (RETCONVAI-4141) and
+        // the outbound blue line rendered full instead of empty (RETCONVAI-4142). A true-zero stage now
+        // renders empty (0) rather than the 6% sliver; the 6% floor only applies to real positive values.
+        const width = max > 0 && s.value > 0 ? Math.max(6, (s.value / max) * 100) : 0;
         const prev = i > 0 ? stages[i - 1].value : null;
         const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
         return (
@@ -497,11 +502,12 @@ export function StepFunnel({
   stages: { label: string; value: number }[];
   height?: number;
 }) {
-  const max = stages[0]?.value ?? 1;
+  const max = stages[0]?.value ?? 0;
   return (
     <div className="flex items-stretch gap-1.5" style={{ minHeight: height + 56 }}>
       {stages.map((s, i) => {
-        const h = max > 0 ? Math.max(10, (s.value / max) * 100) : 100;
+        // Same zero-denominator guard as FunnelBars (RETCONVAI-4141/4142): max=0 or a true-zero stage → 0 height.
+        const h = max > 0 && s.value > 0 ? Math.max(10, (s.value / max) * 100) : 0;
         const prev = i > 0 ? stages[i - 1].value : null;
         const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
         const isLast = i === stages.length - 1;

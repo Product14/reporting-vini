@@ -11,12 +11,16 @@
  * Degrades to an empty list — never 502s the pipeline.
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
-import { requireTeamAuth } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
+import { getStoreTimeZone } from "@/lib/spyne/teamContext";
+import { rangeFor } from "@/components/reports/liveData";
+import type { Bucket } from "@/components/reports/data";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SERVICE = new Set(["sales", "service", "both"]);
+const BUCKETS = new Set(["today", "yesterday", "last7", "last14", "last30", "mtd", "lifetime"]);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?Z?)?$/;
 const idOk = (s: string) => /^[A-Za-z0-9_-]{1,64}$/.test(s);
 
@@ -61,8 +65,29 @@ export async function GET(request: Request): Promise<Response> {
   // the time window — used by the "review conversation" drill-down on named leads. Validated like team_id.
   const leadId = (searchParams.get("leadId") || "").trim();
   const leadScoped = idOk(leadId);
+
+  // Window resolution. The report UI passes a preset `bucket` → resolve a STORE-LOCAL [start,end) window
+  // server-side (rooftop tz, same as /api/reports) so the Calls tab / recent-conversations "Yesterday" is
+  // the DEALER's yesterday and does NOT bleed today's calls in. Previously the tab passed only `since`
+  // with NO upper bound, so every window ran to now() — a UTC "yesterday" that included today's latest
+  // call (RETCONVAI-4152). Explicit since/until (and the email cron's since-only poll) still win; a
+  // lead-scoped drill-down ignores the window entirely.
+  const bucketRaw = searchParams.get("bucket") || "";
+  const untilRaw = searchParams.get("until") || searchParams.get("end") || "";
+  let winStart = since && ISO_RE.test(since) ? since : "";
+  let winEnd = untilRaw && ISO_RE.test(untilRaw) ? untilRaw : "";
+  if (!leadScoped && (!winStart || !winEnd) && BUCKETS.has(bucketRaw)) {
+    const tz = await getStoreTimeZone(teamId, spyneTokenFrom(request));
+    const w = rangeFor(bucketRaw as Bucket, tz ?? undefined);
+    if (!winStart) winStart = w.start;
+    if (!winEnd) winEnd = w.end;
+  }
+  // Lower bound = resolved window start (or the trailing `minutes` when neither since nor bucket is given,
+  // preserving the transactional-email poll's behaviour). Upper bound applied ONLY when we have a window
+  // end (bucket/until) — a since-only caller keeps its "since → now" semantics.
   const sinceClause = (col: string) =>
-    since && ISO_RE.test(since) ? `${col} >= parseDateTimeBestEffort('${chEsc(since)}')` : `${col} >= now() - INTERVAL ${minutes} MINUTE`;
+    (winStart ? `${col} >= parseDateTimeBestEffort('${chEsc(winStart)}')` : `${col} >= now() - INTERVAL ${minutes} MINUTE`) +
+    (winEnd ? ` AND ${col} < parseDateTimeBestEffort('${chEsc(winEnd)}')` : "");
 
   type Conv = Record<string, unknown> & { at: string };
   const out: Conv[] = [];

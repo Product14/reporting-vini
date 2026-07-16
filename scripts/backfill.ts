@@ -160,19 +160,25 @@ function deltaSql(effWm: string, cap: string): string {
   async function syncChunk(a: string, b: string): Promise<number> {
     const raw = await queryRows<RawRow>(loadSpineSql(`toDate('${shiftDays(a, -1)}')`, `toDate('${shiftDays(b, 1)}')`));
     if (!raw.length) { console.log(`  [${a} .. ${b})  0 spine rows — skip`); return 0; }
-    // Lazily acquire store-local tz for any rooftop not yet in the persisted map (usually none).
+    // Lazily acquire store-local tz for any rooftop not yet in the persisted map (usually none). The
+    // get-working-days endpoint needs NO token (see tzMap.ts), so this must NOT be gated on
+    // SPYNE_API_TOKEN — the token-less sync is the NORMAL case, and gating it here left every brand-new
+    // rooftop stuck on UTC bucketing: its store-local window then disagreed with UTC-bucketed activity_day,
+    // so "Yesterday" bled today's data and windowed leads mis-counted (RETCONVAI-4152/4151). We forward the
+    // token when present (harmless) but never require it.
     const token = process.env.SPYNE_API_TOKEN;
-    if (token) {
-      const missing = teamsInRows(raw).filter((t) => !tzMap.has(t));
-      if (missing.length) {
-        try {
-          const live = await fetchTeamTzs(missing, token);
-          if (live.size) { await saveTzMap(sb, live, new Date().toISOString()); for (const [k, v] of live) tzMap.set(k, v); }
-        } catch { /* keep persisted */ }
-      }
+    const missing = teamsInRows(raw).filter((t) => !tzMap.has(t));
+    if (missing.length) {
+      try {
+        const live = await fetchTeamTzs(missing, token);
+        if (live.size) { await saveTzMap(sb, live, new Date().toISOString()); for (const [k, v] of live) tzMap.set(k, v); }
+      } catch { /* keep persisted */ }
     }
     const { earliest } = await mergeStlEarliest(sb, raw, { full: false, dayOf });
-    const agg = aggregate(raw, { tzOf: reBucket ? tzOf : undefined, stlEarliest: earliest });
+    // Re-bucket whenever we have ANY tz (check the map LIVE, not the once-computed `reBucket`, so teams
+    // just resolved lazily above are bucketed store-local this same chunk). tzOf → undefined for an
+    // unknown team, and storeLocalDay falls back to the UTC rawDay, so this is always safe.
+    const agg = aggregate(raw, { tzOf: tzMap.size ? tzOf : undefined, stlEarliest: earliest });
     const inRange = (d: { activity_day: string }) => d.activity_day >= a && d.activity_day < b;
     const daily = agg.daily.filter(inRange);
     const breakdown = agg.breakdown.filter(inRange);

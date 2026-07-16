@@ -206,7 +206,8 @@ export interface FleetLive {
   handledEndToEndPct: number | null;
   afterHours: number;
   talkMinutes: number;
-  smsSent: number;
+  smsSent: number; // OUTBOUND SMS messages sent (activity volume)
+  smsThreads: number; // SMS CONVERSATIONS (threads) — the conversation-grained count for "Calls & texts"
   optOuts: number;
   csat: number;
   sentiment: number;
@@ -234,6 +235,10 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const inboundCalls = agents.filter(isInbound).reduce((s, a) => s + a.metrics.calls, 0);
   const inboundAnswered = agents.filter(isInbound).reduce((s, a) => s + a.metrics.conversations, 0);
   const smsSent = sum((a) => a.metrics.smsSent);
+  // SMS CONVERSATIONS (threads), not outbound messages — carried per-agent on channelSplit.sms (= sms_threads
+  // from build.ts). This is the conversation-grained "texts" count for the "Calls & texts" tile, so a text
+  // count that claims to be "conversations handled" matches a DB SMS-conversation count (RETCONVAI-4151/4166).
+  const smsThreads = sum((a) => a.channelSplit?.sms ?? 0);
   const afterHours = sum((a) => a.metrics.afterHours);
   const talkMinutes = sum((a) => a.metrics.talkMinutes);
   const optOuts = sum((a) => a.metrics.optOuts);
@@ -333,6 +338,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     afterHours,
     talkMinutes,
     smsSent,
+    smsThreads,
     optOuts,
     csat: +wAvg((a) => a.quality.csat).toFixed(1),
     sentiment: Math.round(wAvg((a) => a.quality.sentiment)),
@@ -455,8 +461,8 @@ export interface TransferQualityMetric {
 export interface ReportMetrics {
   transfer_quality: TransferQualityMetric[];
   calls_by_reason: Array<{ direction: string | null; reason: string; calls: number; booked: number }>;
-  missed: Array<{ channel: string; category: string; count: number }>;
-  highlights: Array<{ direction: string | null; use_case: string | null; score: number | null; title: string | null; occurred_on: string | null }>;
+  missed: Array<{ service_type: string | null; channel: string; category: string; count: number }>;
+  highlights: Array<{ direction: string | null; service_type: string | null; use_case: string | null; score: number | null; title: string | null; occurred_on: string | null }>;
 }
 
 export async function fetchReportMetrics(teamId: string, spyneToken?: string): Promise<ReportMetrics | null> {
@@ -503,11 +509,15 @@ export interface ActionItemCloser { assignedTo: string; closed: number }
 
 export async function fetchActionItemStats(
   teamId: string,
-  opts: { start?: string; end?: string; service?: "sales" | "service" | "both"; spyneToken?: string } = {},
+  opts: { start?: string; end?: string; bucket?: Bucket; service?: "sales" | "service" | "both"; spyneToken?: string } = {},
 ): Promise<{ stats: ActionItemStats; closers: ActionItemCloser[] } | null> {
   if (!teamId) return null;
   const query: Record<string, string> = { team_id: teamId, scope: "stats", serviceType: opts.service ?? "both" };
+  // Explicit start/end (custom picker, or the Overview's server-resolved window) win. Otherwise pass the
+  // preset `bucket` and let the server resolve it store-local (RETCONVAI-4144) — never compute a UTC window
+  // client-side here, which is what drifted the Action Items tab off the Overview card.
   if (opts.start && opts.end) { query.start = opts.start; query.end = opts.end; }
+  else if (opts.bucket) { query.bucket = opts.bucket; }
   try {
     const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
     const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
@@ -639,7 +649,7 @@ export interface Conversation {
 }
 export async function fetchConversations(
   teamId: string,
-  opts: { channel?: "call" | "sms" | "both"; service?: "sales" | "service" | "both"; since?: string; leadId?: string; limit?: number; spyneToken?: string } = {},
+  opts: { channel?: "call" | "sms" | "both"; service?: "sales" | "service" | "both"; since?: string; end?: string; bucket?: Bucket; leadId?: string; limit?: number; spyneToken?: string } = {},
 ): Promise<Conversation[]> {
   if (!teamId) return [];
   const query: Record<string, string> = {
@@ -648,7 +658,12 @@ export async function fetchConversations(
     serviceType: opts.service ?? "both",
     limit: String(opts.limit ?? 100),
   };
+  // Prefer an explicit [since,end) window (already store-local from the server-resolved feed); else pass
+  // the preset `bucket` and let the server resolve a store-local window (RETCONVAI-4152). `since` alone
+  // (no end) keeps the old "since → now" behaviour used by the transactional-email poll.
   if (opts.since) query.since = opts.since;
+  if (opts.end) query.end = opts.end;
+  else if (opts.bucket && !opts.since) query.bucket = opts.bucket;
   // Lead-scoped drill-down: fetch this lead's full recent history (server ignores the time window).
   if (opts.leadId) query.leadId = opts.leadId;
   try {
