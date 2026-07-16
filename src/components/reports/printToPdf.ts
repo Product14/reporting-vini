@@ -1,110 +1,143 @@
-/* Client-side "Print / Save as PDF" that doesn't depend on window.print() / the browser's native print
- * dialog. The parent console iframes this app with a sandbox attribute that's missing 'allow-modals' —
- * window.print() is silently ignored there (no exception, nothing we can even detect), and per spec a
- * popup opened from a sandboxed frame inherits the same restriction unless the opener grants
- * 'allow-popups-to-escape-sandbox', which we don't control. So instead: screenshot the report with
- * html2canvas, lay the image into a real multi-page PDF with jsPDF, and trigger a normal file download
- * (Blob + <a download>) — the same mechanism the CSV/XLSX export already uses, which isn't gated by
- * 'allow-modals' (only by 'allow-downloads', a far more commonly granted sandbox flag). */
+/* A real, native PDF report — not a screenshot. Earlier this rendered the live page with html2canvas
+ * and stitched the image across several landscape pages; dealers download this file, and that read as
+ * "a screenshot," not a report — rasterized text, an arbitrary page break wherever the image ran out of
+ * room, and a 70MB+ file at high enough resolution to stay legible. This instead draws the SAME data the
+ * CSV/XLSX export uses directly with jsPDF (+ autotable for the tables) — real selectable text, a small
+ * file, and laid out as ONE continuously-tall page sized exactly to the content (no mid-table page
+ * breaks), the way a purpose-built report reads rather than a printed webpage.
+ *
+ * Two-pass sizing: PDF page dimensions are fixed at creation time, so the exact height needed isn't
+ * known until everything is drawn. Pass 1 draws onto a generously tall placeholder page purely to
+ * measure how far the content actually reaches; pass 2 creates the real page at that height and draws
+ * the identical content again. (PDF pages are capped at 14,400pt/200in by the format itself — comfortably
+ * more than this ever needs, since long lists are capped to a readable preview; see each page's export
+ * builder for the "see the CSV/XLSX for the complete list" notes.) */
 
-export interface PrintToPdfOpts {
+import type { jsPDF } from "jspdf";
+import type { UserOptions, HookData } from "jspdf-autotable";
+import type { PdfBlock, PdfSection } from "./exportReport";
+
+export interface PdfReportOpts {
   filename: string;
-  title?: string;
+  title: string;
   subtitle?: string;
 }
 
-export async function printToPdf(element: HTMLElement, opts: PrintToPdfOpts): Promise<void> {
-  // html2canvas-pro, not the original html2canvas: Tailwind v4's generated stylesheet uses modern CSS
-  // color functions (oklch/lab) for its default palette, which the original html2canvas's color parser
-  // throws on ("Attempting to parse an unsupported color function"), aborting the whole capture. The
-  // -pro fork adds support for those.
-  const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import("html2canvas-pro"), import("jspdf")]);
+const PAGE_WIDTH = 720; // pt (10in) — a single wide column, generous enough for a 6-7 column table
+const MARGIN_X = 40;
+const MARGIN_TOP = 44;
+const MARGIN_BOTTOM = 40;
+const PLACEHOLDER_HEIGHT = 14000; // pt — under the 14,400pt PDF format ceiling; only used for measuring
 
-  // .no-print elements (interactive chrome, live "synced Xm ago" labels that would be misleading on a
-  // saved document) are hidden for window.print() via @media print, which html2canvas never sees — it
-  // screenshots the DOM as currently rendered, not through the print pipeline. Hide them for real,
-  // capture, then restore, so a failure in between never leaves the live page stuck hidden.
-  const hidden = Array.from(element.querySelectorAll<HTMLElement>(".no-print"));
-  const prevDisplay = hidden.map((el) => el.style.display);
-  hidden.forEach((el) => { el.style.display = "none"; });
+const INK = [17, 17, 17] as const;
+const MUTED = [107, 114, 128] as const;
+const BRAND = [129, 63, 237] as const;
+const BRAND_TINT = [246, 241, 255] as const;
 
-  let canvas: HTMLCanvasElement;
-  try {
-    // scale: 1.5 is plenty for a report full of flat color + text (no photos) — scale: 2 produced
-    // 70MB+ PDFs (way past what anyone can email) for barely any visible sharpness gain.
-    canvas = await html2canvas(element, { scale: 1.5, backgroundColor: "#ffffff", useCORS: true });
-  } finally {
-    hidden.forEach((el, i) => { el.style.display = prevDisplay[i]; });
-  }
+export async function buildPdfReport(sections: PdfSection[], opts: PdfReportOpts): Promise<void> {
+  const [{ jsPDF }, { autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);
+  const contentWidth = PAGE_WIDTH - MARGIN_X * 2;
 
-  // The captured element's own bottom padding (breathing room for on-screen scrolling) shows up as a
-  // large blank strip at the end of the canvas — enough, once paginated, to spill into a wasted fully
-  // blank trailing page. Trim trailing all-white rows before paginating instead of assuming any fixed
-  // padding amount, so this holds regardless of which page/section is being captured.
-  const contentHeight = trimTrailingWhitespace(canvas);
+  // Draws the full document top-to-bottom and returns the final Y — the same function runs once to
+  // measure (pass 1) and once for real (pass 2), so there's exactly one place that knows how to lay
+  // this out.
+  const render = (doc: jsPDF): number => {
+    let y = MARGIN_TOP;
 
-  const pdf = new jsPDF({ orientation: "landscape", unit: "in", format: "letter" });
-  const pageWidthIn = pdf.internal.pageSize.getWidth();
-  const pageHeightIn = pdf.internal.pageSize.getHeight();
-  const marginIn = 0.35;
-  const usableWidthIn = pageWidthIn - marginIn * 2;
+    doc.setFont("helvetica", "bold").setFontSize(19).setTextColor(...INK);
+    doc.text(opts.title, MARGIN_X, y);
+    y += 20;
+    if (opts.subtitle) {
+      doc.setFont("helvetica", "normal").setFontSize(10.5).setTextColor(...MUTED);
+      doc.text(opts.subtitle, MARGIN_X, y);
+      y += 14;
+    }
+    y += 10;
+    doc.setDrawColor(...BRAND).setLineWidth(1.4);
+    doc.line(MARGIN_X, y, PAGE_WIDTH - MARGIN_X, y);
+    y += 22;
 
-  // Title/subtitle are drawn directly (not captured) — the on-screen "print header" is CSS-hidden
-  // (shown only under real @media print), so a DOM screenshot taken outside that pipeline never sees it.
-  let topOffsetIn = marginIn;
-  if (opts.title) {
-    pdf.setFont("helvetica", "bold").setFontSize(16).setTextColor(17, 17, 17);
-    pdf.text(opts.title, marginIn, topOffsetIn + 0.15);
-    topOffsetIn += 0.3;
-  }
-  if (opts.subtitle) {
-    pdf.setFont("helvetica", "normal").setFontSize(10).setTextColor(107, 114, 128);
-    pdf.text(opts.subtitle, marginIn, topOffsetIn + 0.1);
-    topOffsetIn += 0.25;
-  }
+    for (const section of sections) {
+      doc.setFont("helvetica", "bold").setFontSize(12.5).setTextColor(...BRAND);
+      doc.text(section.heading.toUpperCase(), MARGIN_X, y);
+      y += 16;
 
-  // canvas px → PDF inches, scaled to fill the usable page width; sliced into page-height chunks so a
-  // tall report becomes several pages instead of one unreadable, endlessly-shrunk page.
-  const pxPerIn = canvas.width / usableWidthIn;
-  const usableHeightFirstPageIn = pageHeightIn - topOffsetIn - marginIn;
-  const usableHeightOtherPagesIn = pageHeightIn - marginIn * 2;
+      for (const block of section.blocks) {
+        y = renderBlock(doc, autoTable, block, y, contentWidth);
+      }
+      y += 12; // space between sections
+    }
 
-  let renderedPx = 0;
-  let pageIndex = 0;
-  while (renderedPx < contentHeight) {
-    const usableHeightIn = pageIndex === 0 ? usableHeightFirstPageIn : usableHeightOtherPagesIn;
-    const sliceHeightPx = Math.min(Math.round(usableHeightIn * pxPerIn), contentHeight - renderedPx);
-    const slice = document.createElement("canvas");
-    slice.width = canvas.width;
-    slice.height = sliceHeightPx;
-    slice.getContext("2d")!.drawImage(canvas, 0, renderedPx, canvas.width, sliceHeightPx, 0, 0, canvas.width, sliceHeightPx);
+    return y;
+  };
 
-    if (pageIndex > 0) pdf.addPage();
-    const yIn = pageIndex === 0 ? topOffsetIn : marginIn;
-    // JPEG, not PNG — PNG's lossless compression handled this screenshot-like content badly (a 5-page
-    // report ran 70MB+); JPEG at high quality is visually indistinguishable here and a fraction of the size.
-    pdf.addImage(slice.toDataURL("image/jpeg", 0.92), "JPEG", marginIn, yIn, usableWidthIn, sliceHeightPx / pxPerIn);
+  // jsPDF's default orientation ("portrait") silently SWAPS width/height whenever width > height, to
+  // enforce its own height-must-be-≥-width convention — a real, verified issue: a short (sparse-content)
+  // report came out 533×720 instead of the intended 720-wide page, squeezing every table into a much
+  // narrower column than they were laid out for. Picking orientation based on our own actual dimensions
+  // (landscape when height < width) satisfies that same convention on its own terms, so the swap never
+  // triggers and [width, height] always comes out exactly as given.
+  const measure = new jsPDF({ unit: "pt", format: [PAGE_WIDTH, PLACEHOLDER_HEIGHT], orientation: "portrait" });
+  const measuredHeight = render(measure);
 
-    renderedPx += sliceHeightPx;
-    pageIndex += 1;
-  }
+  const finalHeight = Math.min(PLACEHOLDER_HEIGHT, Math.ceil(measuredHeight) + MARGIN_BOTTOM);
+  const orientation = finalHeight >= PAGE_WIDTH ? "portrait" : "landscape";
+  const doc = new jsPDF({ unit: "pt", format: [PAGE_WIDTH, finalHeight], orientation });
+  render(doc);
 
-  pdf.save(opts.filename);
+  doc.save(opts.filename);
 }
 
-// Scans up from the bottom in coarse steps (this only needs to find "roughly where content ends," not
-// a pixel-perfect edge) for the first row that isn't pure white, and returns the height just past it.
-function trimTrailingWhitespace(canvas: HTMLCanvasElement): number {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return canvas.height;
-  const step = 8;
-  for (let y = canvas.height - 1; y >= 0; y -= step) {
-    const row = ctx.getImageData(0, y, canvas.width, 1).data;
-    for (let x = 0; x < row.length; x += 4) {
-      if (row[x] !== 255 || row[x + 1] !== 255 || row[x + 2] !== 255) {
-        return Math.min(canvas.height, y + step);
-      }
-    }
+function renderBlock(
+  doc: jsPDF,
+  autoTable: (d: jsPDF, opts: UserOptions) => void,
+  block: PdfBlock,
+  startY: number,
+  contentWidth: number,
+): number {
+  let y = startY;
+
+  if (block.kind === "note") {
+    doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(...MUTED);
+    const lines: string[] = doc.splitTextToSize(block.text, contentWidth);
+    doc.text(lines, MARGIN_X, y);
+    return y + lines.length * 10.5 + 4;
   }
-  return canvas.height;
+
+  if (!block.rows.length) return y;
+
+  if (block.title) {
+    doc.setFont("helvetica", "bold").setFontSize(9.5).setTextColor(55, 65, 81);
+    doc.text(block.title, MARGIN_X, y);
+    y += 12;
+  }
+
+  let cursor = y;
+  if (block.columns) {
+    autoTable(doc, {
+      startY: y,
+      margin: { left: MARGIN_X, right: MARGIN_X },
+      head: [block.columns],
+      body: block.rows.map((r) => r.map((c) => String(c))),
+      theme: "striped",
+      styles: { fontSize: 8.5, textColor: [30, 30, 30], cellPadding: 4 },
+      headStyles: { fillColor: BRAND as unknown as [number, number, number], textColor: 255, fontStyle: "bold", fontSize: 9 },
+      alternateRowStyles: { fillColor: BRAND_TINT as unknown as [number, number, number] },
+      didDrawPage: (data: HookData) => { cursor = data.cursor?.y ?? cursor; },
+    });
+  } else {
+    autoTable(doc, {
+      startY: y,
+      margin: { left: MARGIN_X, right: MARGIN_X },
+      body: block.rows.map((r) => r.map((c) => String(c))),
+      theme: "plain",
+      styles: { fontSize: 9.5, cellPadding: { top: 2.5, bottom: 2.5, left: 0, right: 10 } },
+      columnStyles: {
+        0: { textColor: MUTED as unknown as [number, number, number] },
+        1: { fontStyle: "bold", textColor: INK as unknown as [number, number, number] },
+      },
+      didDrawPage: (data: HookData) => { cursor = data.cursor?.y ?? cursor; },
+    });
+  }
+  return cursor + 10;
 }

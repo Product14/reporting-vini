@@ -37,8 +37,8 @@ import { useDateRange, useDept, reportNavQuery } from "@/components/reports/date
 import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
-import { downloadCSV, downloadXLSX, exportFilenameStem, type ExportSheet } from "@/components/reports/exportReport";
-import { printToPdf } from "@/components/reports/printToPdf";
+import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
+import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
@@ -285,8 +285,8 @@ function AgentReportsView() {
         ...(tzLabel ? [["Timezone", tzLabel]] : []),
         [],
         ["Metric", "Value"],
-        ["Close rate (AI-booked ÷ qualified)", fmtRate(scale(m.appointments), scale(leadQualified))],
-        ["Turn rate (qualified ÷ conversations)", fmtRate(scale(leadQualified), scale(leadConnected))],
+        ["Close rate", fmtRate(scale(m.appointments), scale(leadQualified))],
+        ["Turn rate", fmtRate(scale(leadQualified), scale(leadConnected))],
         [inbound ? "Total calls" : "Calls dispatched", scale(m.calls)],
         ["Talk time (minutes)", scale(m.talkMinutes)],
         ["Total SMS", scale(m.smsSent)],
@@ -435,6 +435,7 @@ function AgentReportsView() {
       });
     }
 
+    sheets.push({ name: "Definitions", rows: [[CANONICAL_DEFINITIONS]] });
     return sheets;
   };
 
@@ -468,14 +469,179 @@ function AgentReportsView() {
     else downloadXLSX(filename, sheets);
   };
 
-  const mainRef = useRef<HTMLElement>(null);
+  const buildPdfSections = (): PdfSection[] => {
+    const during = scale(Math.max(0, m.calls - m.afterHours));
+    const after = scale(m.afterHours);
+    const sections: PdfSection[] = [
+      {
+        heading: "Performance",
+        blocks: [
+          {
+            kind: "rows",
+            rows: [
+              ["Close rate", fmtRate(scale(m.appointments), scale(leadQualified))],
+              ["Turn rate", fmtRate(scale(leadQualified), scale(leadConnected))],
+              [inbound ? "Total calls" : "Calls dispatched", `${scale(m.calls)} (${scale(m.talkMinutes)} min talk)`],
+              ["Total SMS", scale(m.smsSent)],
+              ...(!inbound ? [["Warm leads (campaigns)", warmLeadsTotal]] : []),
+              ["Calls during hours", during],
+              ["Calls after hours", after],
+            ],
+          },
+        ],
+      },
+      {
+        heading: "Lead-to-appointment funnel",
+        blocks: [{ kind: "rows", columns: ["Stage", "Leads (distinct)", "Conversion from prior stage"], rows: funnelStages.map((s, i) => {
+          const prev = i > 0 ? funnelStages[i - 1].value : null;
+          const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "—";
+          return [s.label, fmtInt(s.value), conv];
+        }) }, { kind: "rows", title: "Call breakdown", rows: outcomeTiles.map((t) => [t.label, fmtInt(t.value)]) }],
+      },
+      {
+        heading: "Quality",
+        blocks: [{
+          kind: "rows",
+          rows: [
+            [a.quality.primaryLabel, `${a.quality.primary}%`],
+            ["Avg handle time", a.quality.handleTime],
+            ["Opt-outs", scale(m.optOuts)],
+            ...(showTransferQuality && tq ? [[a.quality.fourthLabel, fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)]] : []),
+          ],
+        }],
+      },
+      {
+        heading: "Day-on-day",
+        blocks: [{ kind: "rows", columns: ["Day", "Touched", "Qualified", "Appointments"], rows: r.dayOnDay.map((d) => [d.day, scale(d.touched), scale(d.qualified), scale(d.appts)]) }],
+      },
+    ];
+
+    if (inbound && r.intentOutcomes?.length) {
+      sections.push({
+        heading: "What customers wanted",
+        blocks: [{ kind: "rows", columns: ["Topic", "Conversations", "Resolved", "Booked", "Transferred", "Callback"], rows: r.intentOutcomes.map((row) => [row.label, row.conversations, row.resolved, row.booked, row.transferred, row.callback]) }],
+      });
+    }
+
+    if (r.leadsBySource?.length) {
+      sections.push({
+        heading: "Leads by source",
+        blocks: [{ kind: "rows", columns: ["Source", "Interacted", "Total leads", "Appts booked"], rows: r.leadsBySource.map((s) => [s.source, scale(s.engaged), scale(s.total), scale(s.appts)]) }],
+      });
+    }
+
+    if (a.id === "sales_ib" && r.speedToLead?.medianUnderMin) {
+      const stl = r.speedToLead;
+      sections.push({
+        heading: "Speed to lead",
+        blocks: [
+          {
+            kind: "rows",
+            rows: [
+              ["Avg first response", stl.avg],
+              ["New CRM leads", stl.crmLeadsNew],
+              ["% contacted within 5 min", `${stl.pctWithin5}%`],
+              ["Touched instantly", stl.instantlyTouched],
+              ["Instant-touch appointments", stl.instantAppts],
+              ["Instant-touch-to-appointment rate", `${stl.instantApptRate}%`],
+            ],
+          },
+          ...(stl.openFunnel
+            ? [{ kind: "rows" as const, title: "By path", columns: ["Path", "Leads handled", "Appointments", "Booked rate"], rows: [
+                ["Speed-to-lead", stl.openFunnel.stlLeadsHandled, stl.openFunnel.stlAppts, `${stl.openFunnel.stlRate}%`],
+                ["Follow-up", stl.openFunnel.followupLeadsHandled, stl.openFunnel.followupAppts, `${stl.openFunnel.followupRate}%`],
+              ] }]
+            : []),
+        ],
+      });
+    }
+
+    if (!inbound && r.activeCampaigns?.length) {
+      sections.push({
+        heading: "Active campaigns",
+        blocks: [{ kind: "rows", columns: ["Campaign", "Use case", "Enrolled", "Appts", "Appt rate", "Warm leads", "Opt-outs"], rows: r.activeCampaigns.map((c) => [c.name, c.useCase, c.enrolled, c.appts, `${c.apptRate}%`, c.warmLeads, c.optOuts]) }],
+      });
+    }
+
+    if (!inbound && r.outcomes?.length) {
+      sections.push({
+        heading: "Outbound outcomes",
+        blocks: [{ kind: "rows", columns: ["Outcome", "Count"], rows: r.outcomes.map((o) => [o.label, o.value]) }],
+      });
+    }
+
+    if (r.namedAppointments?.length) {
+      const preview = r.namedAppointments.slice(0, 30);
+      sections.push({
+        heading: "Appointments",
+        blocks: [
+          { kind: "rows", columns: ["Customer", "Vehicle", "When", "How booked", "Status"], rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when) : "—", ap.how, ap.status || "—"]) },
+          ...(r.namedAppointments.length > preview.length
+            ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${r.namedAppointments.length} appointments — download the CSV or XLSX for the complete list.` }]
+            : []),
+        ],
+      });
+    }
+
+    if (r.warmLeads?.length) {
+      const preview = r.warmLeads.slice(0, 20);
+      sections.push({
+        heading: "Hot & warm leads",
+        blocks: [
+          { kind: "rows", columns: ["Customer", "Phone", "Tier", "Interest", "Last activity"], rows: preview.map((w) => [w.customer, w.phone, w.tier, w.interest, w.lastActivity ?? "—"]) },
+          ...(r.warmLeads.length > preview.length
+            ? [{ kind: "note" as const, text: `Showing the ${preview.length} most urgent of ${r.warmLeads.length} warm leads — download the CSV or XLSX for the rest.` }]
+            : []),
+        ],
+      });
+    }
+
+    if (agentHighlights.length > 0 || showMissed) {
+      sections.push({
+        heading: "Highlights & missed opportunities",
+        blocks: [
+          ...(agentHighlights.length ? [{ kind: "rows" as const, title: "Wins — best booked calls", columns: ["Title", "Occurred on"], rows: agentHighlights.slice(0, 15).map((h) => [h.title ?? "", h.occurred_on ?? ""]) }] : []),
+          ...(showMissed ? [{ kind: "rows" as const, title: "Missed — outbound demand that slipped", columns: ["Category", "Channel", "Count"], rows: metrics!.missed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]) }] : []),
+        ],
+      });
+    }
+
+    return sections;
+  };
+
+  const buildActionItemsPdfSection = async (): Promise<PdfSection> => {
+    const service = a.dept === "Service" ? "service" : "sales";
+    const [stats, items] = await Promise.all([
+      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken }),
+      fetchAllActionItems(teamId, { scope: "open", service, spyneToken }),
+    ]);
+    const preview = items.slice(0, 30);
+    return {
+      heading: "Action items",
+      blocks: [
+        {
+          kind: "rows",
+          rows: stats
+            ? [["Created", fmtInt(stats.stats.created)], ["Completed", fmtInt(stats.stats.completed)], ["Open now", fmtInt(stats.stats.open)], ["Overdue", fmtInt(stats.stats.overdue)], ["Due today", fmtInt(stats.stats.dueToday)]]
+            : [["Created", "—"], ["Completed", "—"], ["Open now", "—"], ["Overdue", "—"], ["Due today", "—"]],
+        },
+        { kind: "rows", title: "Open queue", columns: ["Customer", "What to do", "Priority", "Due"], rows: preview.map((it) => [it.customer ?? "—", it.description || it.intent, it.priority, it.dueAt ?? "—"]) },
+        ...(items.length > preview.length
+          ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${items.length} open items — download the CSV or XLSX for the complete list.` }]
+          : []),
+      ],
+    };
+  };
+
   const handlePrint = async () => {
     track("report_exported", { tab: "agents", team_id: teamId, format: "print" });
-    if (!mainRef.current) return;
-    await printToPdf(mainRef.current, {
+    const sections = buildPdfSections();
+    sections.push(await buildActionItemsPdfSection());
+    sections.push({ heading: "Definitions", blocks: [{ kind: "note", text: CANONICAL_DEFINITIONS }] });
+    await buildPdfReport(sections, {
       filename: `${exportFilenameStem(`${account.name} - ${r.summary.person || a.name}`, periodLabel)}.pdf`,
       title: `${account.name || "Rooftop"} — ${r.summary.person || a.name}`,
-      subtitle: `${periodLabel}${feed?.timezone ? ` · times in ${tzShortLabel(feed.timezone)}` : ""}`,
+      subtitle: `${r.summary.person || a.name} · ${a.dept} · ${a.dir} · ${periodLabel}${feed?.timezone ? ` · times in ${tzShortLabel(feed.timezone)}` : ""}`,
     });
   };
 
@@ -519,7 +685,7 @@ function AgentReportsView() {
           }
         />
 
-        <main ref={mainRef} className="mx-auto w-full max-w-[1400px] flex-1 px-4 sm:px-6 lg:px-10 pt-6 pb-36 flex flex-col gap-6">
+        <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 sm:px-6 lg:px-10 pt-6 pb-36 flex flex-col gap-6">
           {scenario === "first_time" && <FirstTimeAgents agent={a} />}
 
           {scenario !== "first_time" && live && !hasTeam && (

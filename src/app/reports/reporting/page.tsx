@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
   BUCKET_LABELS,
   Card,
@@ -16,6 +16,7 @@ import {
   fmtDuration,
   fmtRate,
   fmtSecs,
+  fmtWhenShort,
   MetricTile,
   NamedApptsTable,
   ValueTile,
@@ -35,7 +36,8 @@ import {
   type ActionItemCloser,
 } from "@/components/reports/liveData";
 import { track } from "@/lib/analytics";
-import { printToPdf } from "@/components/reports/printToPdf";
+import { buildPdfReport } from "@/components/reports/printToPdf";
+import { CANONICAL_DEFINITIONS, exportFilenameStem, type PdfSection } from "@/components/reports/exportReport";
 
 export default function ReportingPage() {
   return (
@@ -80,14 +82,81 @@ function ReportingView() {
   const split = fleet.bySplit;
   const namedAppts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
 
-  const mainRef = useRef<HTMLElement>(null);
   const handlePrint = async () => {
     track("report_exported", { tab: "reporting", team_id: teamId, format: "print" });
-    if (!mainRef.current) return;
-    await printToPdf(mainRef.current, {
-      filename: `${account.name || "Rooftop"} - ${periodLabel}.pdf`,
-      title: `${account.name || "Rooftop"} — Vini AI scorecard`,
-      subtitle: `${periodLabel}${feed?.timezone ? ` · times in ${tzShortLabel(feed.timezone)}` : ""}`,
+    const tzLabel = feed?.timezone ? tzShortLabel(feed.timezone) : "";
+    const sections: PdfSection[] = [
+      {
+        heading: "The value delivered",
+        blocks: [
+          {
+            kind: "rows",
+            rows: [
+              ["Appointments — AI-booked", `${fmtInt(fleet.appointments)} (Inbound ${fmtInt(split.inbound.appointments)} · Outbound ${fmtInt(split.outbound.appointments)})`],
+              ...(fleet.appointmentsAssisted > 0 ? [["  AI-assisted (CRM)", fmtInt(fleet.appointmentsAssisted)]] : []),
+              ["Real conversations", `${fmtInt(fleet.conversations)} (Inbound ${fmtInt(split.inbound.conversations)} · Outbound ${fmtInt(split.outbound.conversations)})`],
+              ["Qualified leads", `${fmtInt(fleet.qualified)} (Inbound ${fmtInt(split.inbound.qualified)} · Outbound ${fmtInt(split.outbound.qualified)})`],
+              ["Hand-offs to team", `${fmtInt(fleet.handoffs)} (${fmtInt(fleet.transfers)} transfers · ${fmtInt(fleet.callbacks)} callbacks)`],
+              ["Query resolution rate", fmtRate(fleet.queryResolved, fleet.queryConversations)],
+              ...(fleet.responseTimeSec != null ? [["Response time (avg first response)", fmtSecs(fleet.responseTimeSec)]] : []),
+              ["SMS sent", `${fmtInt(fleet.smsSent)} (Inbound ${fmtInt(split.inbound.smsSent)} · Outbound ${fmtInt(split.outbound.smsSent)})`],
+              ["Talk time", fmtDuration(fleet.talkMinutes)],
+            ],
+          },
+        ],
+      },
+      {
+        heading: "The pipeline",
+        blocks: [{ kind: "rows", columns: ["Stage", "Leads (distinct)", "Conversion from prior stage"], rows: fleet.funnel.map((s, i) => {
+          const prev = i > 0 ? fleet.funnel[i - 1].value : null;
+          const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "—";
+          return [s.label, fmtInt(s.value), conv];
+        }) }],
+      },
+    ];
+
+    if (aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0)) {
+      sections.push({
+        heading: "Action items",
+        blocks: [
+          {
+            kind: "rows",
+            rows: [
+              ["Created", fmtInt(aiStats.stats.created)],
+              ["Completed", fmtInt(aiStats.stats.completed)],
+              ["Open now", fmtInt(aiStats.stats.open)],
+              ["Overdue", fmtInt(aiStats.stats.overdue)],
+              ["Due today", fmtInt(aiStats.stats.dueToday)],
+            ],
+          },
+          ...(aiStats.closers.length ? [{ kind: "rows" as const, title: "Closed by", columns: ["Team member", "Closed"], rows: aiStats.closers.map((c) => [c.assignedTo, fmtInt(c.closed)]) }] : []),
+        ],
+      });
+    }
+
+    if (namedAppts.length > 0) {
+      const preview = namedAppts.slice(0, 30);
+      sections.push({
+        heading: "Appointments — named",
+        blocks: [
+          {
+            kind: "rows",
+            columns: ["Customer", "Vehicle", "When", "How booked", "Status"],
+            rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when) : "—", ap.how, ap.status || "—"]),
+          },
+          ...(namedAppts.length > preview.length
+            ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${namedAppts.length} appointments — download the CSV or XLSX for the complete list.` }]
+            : []),
+        ],
+      });
+    }
+
+    sections.push({ heading: "Definitions", blocks: [{ kind: "note", text: CANONICAL_DEFINITIONS }] });
+
+    await buildPdfReport(sections, {
+      filename: `${exportFilenameStem(account.name, periodLabel)}.pdf`,
+      title: `${account.name || "Rooftop"} — Vini AI Scorecard`,
+      subtitle: `${periodLabel}${tzLabel ? ` · times in ${tzLabel}` : ""}`,
     });
   };
 
@@ -120,7 +189,7 @@ function ReportingView() {
           }
         />
 
-        <main ref={mainRef} className="mx-auto w-full max-w-[1100px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-8">
+        <main className="mx-auto w-full max-w-[1100px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-8">
           {/* Print header — only shows in the printed/PDF output */}
           <div className="hidden print:block">
             <p className="text-[20px] font-extrabold text-[#111]">{account.name || "Rooftop"} — Vini AI scorecard</p>
