@@ -130,24 +130,32 @@ def build_sections(ent: str, team: str, days: int) -> dict:
     # (matches the Hand-offs "Transfers" disposition, same as agentBaseFact.sql); failed = the 4-status
     # warm-transfer-abandon set (verified real and non-trivial in prod — narrowing to bare 'transfer_failed'
     # silently zeroes the failed bucket for teams where that literal value never fires); FINAL dedupes the
-    # endcallreports CDC triplicate rows (raw count() here previously inflated both buckets ~1.5-2x); split
-    # by service_type so a Sales view is never swamped by Service volume (was: 96% Service data on Sales).
+    # endcallreports CDC triplicate rows (raw count() here previously inflated both buckets ~1.5-2x). SPLIT
+    # by the LEAD's service_type (join to dealer_leads.leads), NOT report_useCase — so the Sales/Service
+    # buckets cover the SAME population as the Hand-offs "Transfers" COUNT (agentBaseFact.sql groups by the
+    # lead's service_type). Keying off report_useCase diverged badly (fleet 30d: Sales 1,711 vs 5,101): it
+    # dropped ~1,300 parts/finance/blank-useCase transfers that ARE sales/service leads and mis-bucketed
+    # ~2,559 sales leads as service, so the count and the rate on one agent card could never reconcile.
     transfer_quality = ch_rows(f"""
         SELECT
-          lower(report_useCase) AS service_type,
-          countIf(lower(callDetails_endedReason) IN ('transferred','assistant-forwarded-call')) AS transfers_ok,
-          countIf(lower(callDetails_endedReason) IN (
+          ls.service_type AS service_type,
+          countIf(lower(ecr.callDetails_endedReason) IN ('transferred','assistant-forwarded-call')) AS transfers_ok,
+          countIf(lower(ecr.callDetails_endedReason) IN (
              'customer-ended-call-before-warm-transfer',
              'customer-ended-call-after-warm-transfer-attempt',
              'call.in-progress.error-transfer-failed','transfer_failed')) AS transfers_failed,
-          countIf(lower(callDetails_endedReason)='assistant-forwarded-call')  AS forwarded,
-          round(countIf(lower(callDetails_endedReason) IN ('transferred','assistant-forwarded-call'))
-                /nullIf(countIf(lower(callDetails_endedReason) IN (
+          countIf(lower(ecr.callDetails_endedReason)='assistant-forwarded-call')  AS forwarded,
+          round(countIf(lower(ecr.callDetails_endedReason) IN ('transferred','assistant-forwarded-call'))
+                /nullIf(countIf(lower(ecr.callDetails_endedReason) IN (
                   'transferred','assistant-forwarded-call','customer-ended-call-before-warm-transfer',
                   'customer-ended-call-after-warm-transfer-attempt',
                   'call.in-progress.error-transfer-failed','transfer_failed')),0),4) AS success_rate
-        FROM dealer_leads.endcallreports FINAL
-        WHERE {ecr_scope} AND lower(report_useCase) IN ('sales','service')
+        FROM dealer_leads.endcallreports ecr FINAL
+        INNER JOIN (
+          SELECT lead_id, argMax(service_type, created_at) AS service_type
+          FROM dealer_leads.leads GROUP BY lead_id
+        ) ls ON ls.lead_id = ecr.leadId
+        WHERE {ecr_scope} AND ls.service_type IN ('sales','service')
         GROUP BY service_type
     """)
 
@@ -156,7 +164,7 @@ def build_sections(ent: str, team: str, days: int) -> dict:
                coalesce(nullIf(report_useCase,''),'Unknown') AS reason,
                count() AS calls,
                countIf(report_overview_appointmentScheduled='Yes') AS booked
-        FROM dealer_leads.endcallreports WHERE {ecr_scope}
+        FROM dealer_leads.endcallreports FINAL WHERE {ecr_scope}
         GROUP BY direction, reason ORDER BY calls DESC LIMIT 25
     """)
 
@@ -194,7 +202,7 @@ def build_sections(ent: str, team: str, days: int) -> dict:
                   callDetails_endedReason IN ('customer-did-not-answer','no_answer','customer-busy','busy'),'no_answer',
                   callDetails_endedReason='silence-timed-out','abandoned','other') AS category,
           count() AS count
-        FROM dealer_leads.endcallreports
+        FROM dealer_leads.endcallreports FINAL
         WHERE {ecr_scope} AND lower(report_inOutType)='inbound'
           AND callDetails_endedReason IN ('voicemail','customer-did-not-answer','no_answer','customer-busy','busy','silence-timed-out')
         GROUP BY category
@@ -224,7 +232,7 @@ def build_sections(ent: str, team: str, days: int) -> dict:
         SELECT 'call_action_item' AS source, 'call' AS channel, leadId AS lead_id,
                substring(report_actionItems,1,300) AS detail,
                formatDateTime(createdAt,'%Y-%m-%dT%H:%i:%SZ') AS due_at
-        FROM dealer_leads.endcallreports
+        FROM dealer_leads.endcallreports FINAL
         WHERE isActive AND NOT __deleted AND NOT isTestCall AND enterpriseId={E} AND teamId={T}
           AND createdAt>=today()-7 AND report_actionItems NOT IN ('','[]','[""]')
         ORDER BY createdAt DESC LIMIT {TOP}
@@ -240,7 +248,7 @@ def build_sections(ent: str, team: str, days: int) -> dict:
         SELECT lower(report_inOutType) AS direction, report_useCase AS use_case,
                report_aiScore_totalScore AS score, substring(report_title,1,140) AS title,
                toDate(createdAt) AS occurred_on
-        FROM dealer_leads.endcallreports
+        FROM dealer_leads.endcallreports FINAL
         WHERE {ecr_scope} AND report_overview_appointmentScheduled='Yes' AND report_aiScore_totalScore IS NOT NULL
         ORDER BY report_aiScore_totalScore DESC LIMIT {TOP}
     """)

@@ -121,6 +121,9 @@ appointment_intent_set AS (
 -- with no such signal = "Engaged", not Qualified (this is what drives outbound 32 vs the inflated 297).
 -- These are the concrete buying-intent action-item intents (vehicle / availability / price / financing /
 -- trade-in / test-drive / booking). Callback/voicemail/manager-ask/etc. are deliberately excluded.
+-- ⚠️ LOCKSTEP: this list is DUPLICATED in src/lib/reports/detailQueries.ts `BUYING_INTENT_ACTIONS`
+-- (warm-leads / "work now"). This SQL copy is the source of truth — edit BOTH together, or the spine's
+-- SMS-qualified and the detail queries silently diverge.
 sms_buying_intent_actions AS (
     SELECT arrayJoin([
         'ScheduleAppointment','RescheduleAppointment','SALES_SCHEDULE_SHOWROOM_VISIT',
@@ -277,11 +280,13 @@ ecr_events AS (
             1, 0
         ) AS is_connected,
         trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), '')) AS primary_intent,
-        -- canonical: talk_seconds is CONNECTED-only — voicemails have a positive duration but are not a
-        -- real conversation, so gate on non-voicemail. Prevents voicemail duration leaking into talk time
+        -- canonical: talk_seconds is CONNECTED-only — voicemails AND answering-machine calls have a
+        -- positive duration but are not a real conversation, so gate on BOTH (matching is_connected's
+        -- voicemail+machine exclusion above). Prevents that duration leaking into talk time / AHT
         -- (and, historically, into any talk_seconds>0 connected proxy).
         if(
-            lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%',
+            lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%'
+            AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%machine%',
             greatest(0, dateDiff('second',
                 parseDateTimeBestEffortOrNull(ecr.callDetails_startedAt),
                 parseDateTimeBestEffortOrNull(ecr.callDetails_endedAt))),
