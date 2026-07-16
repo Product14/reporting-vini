@@ -37,3 +37,8 @@ next-env.d.ts
 # reporting-vini metrics scripts — runtime artifacts
 scripts/.metrics_refresh.log
 scripts/.objection_ai_ledger.json
+
+# Sensitive/legal working files — MUST NEVER be committed to this (public) repo
+legal-evidence/
+*EVIDENCE*
+*evidence-pack*
