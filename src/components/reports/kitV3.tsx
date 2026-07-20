@@ -432,11 +432,12 @@ export function WarmLeadChips({ items, teamId, maxHot = 14, maxWarm = 10 }: { it
 // Canonical display order for the outcome buckets (best outcome first). Raw sort-prefixed bucket ids
 // from detailQueries.ts outcomesSql; unknown buckets sort after, by volume.
 export const OUTCOME_ORDER = [
-  "5 Booked", "3 Warm", "6 Callback", "7 Transferred", "4 Engaged",
+  "5 Booked", "11 Already booked (not AI)", "3 Warm", "6 Callback", "7 Transferred", "4 Engaged",
   "9 Unclear / info", "0 Not yet worked", "1 No reach", "8 Lost / declined", "2 Opt out", "10 Other",
 ];
 const OUTCOME_DETAIL: Record<string, string> = {
   "5 Booked": "appointment on the books",
+  "11 Already booked (not AI)": "customer self-booked or already scheduled — not AI-booked",
   "3 Warm": "buying intent, not yet booked — work these now",
   "6 Callback": "asked for a return call",
   "7 Transferred": "handed to your team",

@@ -187,10 +187,16 @@ bucketed AS (
             -- warm segment matches the warm-leads KPI instead of being inflated by it.
             lower(trimBoth(clm.outcome)) IN (${sqlList(WARM_LEAD_OUTCOMES)}), '3 Warm',
             lower(trimBoth(clm.outcome)) = 'general engagement', '4 Engaged',
+            -- '5 Booked' = the AI/campaign actually drove a booking on this lead. Kept SEPARATE from the
+            -- '11 Already booked (not AI)' bucket below so the headline "Booked" segment isn't inflated by
+            -- customers who booked themselves or had a meeting on the calendar before the AI worked them.
             lower(trimBoth(clm.outcome)) IN
-                ('appointment','service appointment booked','meeting already scheduled',
-                 'customer already self booked','walk in committed','appointment rescheduled',
-                 'deposit placed'), '5 Booked',
+                ('appointment','service appointment booked','walk in committed',
+                 'appointment rescheduled','deposit placed'), '5 Booked',
+            -- Already booked, NOT by the AI: the cadence discovered the customer had self-booked or a
+            -- meeting was already scheduled. Real current-state, but never credited as an AI booking.
+            lower(trimBoth(clm.outcome)) IN
+                ('customer already self booked','meeting already scheduled'), '11 Already booked (not AI)',
             lower(trimBoth(clm.outcome)) = 'callback requested', '6 Callback',
             lower(trimBoth(clm.outcome)) IN
                 ('human transferred','transferred to service team','human requested'), '7 Transferred',
@@ -441,16 +447,33 @@ worked AS (
       AND toDate(c.createdAt) >= ${startFloor}
       AND c.leadId IN (SELECT lead_id FROM meet WHERE assisted = 1)
 ),
+-- Callback-from-outbound signal (mirrors callbackAttribution.ts / the spine). A customer calling back
+-- the outbound line and booking is OUTBOUND-driven effort, so its appointment must be credited to the
+-- Outbound agent — same rule the AI-booked headline (agent_lead_days) applies. Bounded to these
+-- meetings' calls so the endcallreports scan stays cheap.
+callback_from_outbound AS (
+    SELECT ecr.callId AS call_id
+    FROM dealer_leads.endcallreports AS ecr FINAL
+    WHERE ecr.callId IN (SELECT call_id FROM meet WHERE assisted = 0 AND call_id != '')
+      AND ( ecr.isCallbackFromOutbound = 1
+            OR ifNull(ecr.callbackCampaignId, '') != ''
+            OR ifNull(ecr.callbackOutboundTaskId, '') != '' )
+      ${teamPred("ecr.teamId", teamId)}
+    GROUP BY ecr.callId
+),
 -- channel of the AI booking conversation (AI-booked rows only; CRM meetings carry no direction).
+-- Applies the callback→outbound flip so a callback-booked appointment lands on Outbound, keeping this
+-- list's direction consistent with the AI-booked headline (which flips it via the spine).
 conv_dir AS (
     SELECT c.conversationId AS conv_id, c.callId AS call_id,
            any(lower(c.type)) AS conv_type,
-           any(lower(at.agentCallType)) AS direction
+           if(max(cbo.call_id != '') = 1, 'outbound', any(lower(at.agentCallType))) AS direction
     FROM dealer_leads.conversations AS c FINAL
     LEFT JOIN dealer_leads.teamAgentMappings AS tam FINAL
         ON c.teamAgentMappingId = tam.teamAgentMappingId AND tam.__deleted = 0
     LEFT JOIN dealer_leads.agentTypes AS at FINAL
         ON tam.agentTypeId = at.agentTypeId AND at.__deleted = 0
+    LEFT JOIN callback_from_outbound AS cbo ON cbo.call_id = c.callId
     WHERE c.__deleted = 0
       AND (c.conversationId IN (SELECT conversation_id FROM meet WHERE assisted = 0)
            OR c.callId      IN (SELECT call_id        FROM meet WHERE assisted = 0))

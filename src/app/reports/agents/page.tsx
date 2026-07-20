@@ -403,10 +403,12 @@ function AgentReportsView() {
       });
     }
 
-    // The full appointment list behind "Total AI-booked" — same source (report.namedAppointments) as
-    // the headline count above, so the export always ties out to what's on screen. Not the modal's live
-    // Spyne re-fetch (that's for the drill-down's freshness, a different concern from "export what the
-    // report is showing").
+    // The full appointment list behind "Total AI-booked" (report.namedAppointments → report_appointments).
+    // NOTE: this is a DIFFERENT source from the headline count above (m.appointments → report_lead_counts /
+    // agent_lead_days); both must apply the SAME rules (source='spyne', lead-grain dedup, callback→outbound
+    // re-attribution) to tie out. appointmentsSql now mirrors the spine's callback flip; a small residual is
+    // expected because the headline windows on the booking CONVERSATION's day while this list windows on the
+    // meeting's booked_at. Not the modal's live Spyne re-fetch (that's for the drill-down's freshness).
     if (r.namedAppointments?.length) {
       sheets.push({
         name: "Appointments",
