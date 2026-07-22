@@ -27,14 +27,13 @@ const base = {
 
 const TEST_TO = "devansh.hasija@spyne.ai";
 
-const sales = buildSendPayload({
-  lead: { ...base, product: "sales", note: "We miss a lot of inbound in the evenings — keen to see how fast this goes live." },
-  to: TEST_TO,
-});
 const service = buildSendPayload({
   lead: { ...base, product: "service", note: "Want to recover declined work and cut no-shows heading into Q4." },
   to: TEST_TO,
 });
+// Per request: the "sales" payload mirrors the Service email exactly (same subject + body),
+// so both curls send the identical Service-designed email.
+const sales = service;
 
 writeFileSync(join(outDir, "sales.payload.json"), JSON.stringify(sales, null, 2));
 writeFileSync(join(outDir, "service.payload.json"), JSON.stringify(service, null, 2));
