@@ -54,15 +54,20 @@ export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: 
  * so a ?serviceType=sales|service on the iframe URL LOCKS the whole report to that department: `dept`
  * resolves straight from it, `setDept` becomes a no-op, and callers (the header's DeptSwitcher) use
  * `locked` to hide the switcher entirely. Absent serviceType (localhost dev, or an older embed) falls
- * back to the in-app switcher via ?dept=, exactly as before. */
+ * back to the in-app switcher via ?dept=, exactly as before.
+ *
+ * Accepts snake_case ?service_type= too: the console forwards its other scope params snake_case
+ * (enterprise_id / team_id — see scenario.tsx), so it may send this one snake_case as well. Reading
+ * only camelCase silently dropped the lock → the report showed the blended "All" view (both sales AND
+ * service) instead of the scoped department. Case-insensitive for the same reason. */
 export function useDept(): { dept: Dept; setDept: (d: Dept) => void; locked: boolean } {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const svcParam = params.get("serviceType");
-  const locked = svcParam === "sales" || svcParam === "service";
+  const svcRaw = (params.get("serviceType") ?? params.get("service_type") ?? "").trim().toLowerCase();
+  const locked = svcRaw === "sales" || svcRaw === "service";
   const p = params.get("dept");
-  const dept: Dept = locked ? (svcParam as Dept) : p === "sales" || p === "service" ? p : "all";
+  const dept: Dept = locked ? (svcRaw as Dept) : p === "sales" || p === "service" ? p : "all";
   const setDept = useCallback(
     (d: Dept) => {
       if (locked) return; // host-scoped — no in-app override
