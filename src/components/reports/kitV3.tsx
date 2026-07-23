@@ -662,12 +662,26 @@ export function RecentConversationsCard({
   );
 }
 
-/* Canonical display name for a conversation's agent: prefer the report's per-slot name (dept|direction →
- * name), falling back to the raw call agentName, then a generic "Vini AI". The raw agentName is the same
- * for both directions on many rooftops, so the slot name (onboarded/persona) is the trustworthy source. */
+/* Canonical display name for a conversation's agent — the rooftop's OWN configured AI name (e.g.
+ * "Sophia"), never a hardcoded product brand. Resolution order:
+ *   1. exact per-slot name (dept|direction → name) — calls carry a real dept (sales/service).
+ *   2. the raw call agentName, when present.
+ *   3. a configured name from a slot with the same DIRECTION, then ANY configured name — this is what
+ *      rescues SMS conversations, which carry dept "other" (line ~197) so the exact slot never matches;
+ *      without it the drawer fell through to the generic default even though the rooftop's name was known.
+ *   4. a neutral "AI assistant" — NOT "Vini AI": asserting the product brand as the dealer's assistant
+ *      name is wrong for every rooftop that named its AI something else (Feldmann feedback, 2026-07). */
 export function agentDisplayName(c: Conversation, names?: Record<string, string>): string {
-  const key = `${c.dept}|${c.direction}`;
-  return names?.[key] || c.agent || "Vini AI";
+  const exact = names?.[`${c.dept}|${c.direction}`];
+  if (exact) return exact;
+  if (c.agent) return c.agent;
+  if (names) {
+    const sameDir = Object.entries(names).find(([k]) => k.endsWith(`|${c.direction}`))?.[1];
+    if (sameDir) return sameDir;
+    const any = Object.values(names).find(Boolean);
+    if (any) return any;
+  }
+  return "AI assistant";
 }
 
 function ChannelBadge({ channel, direction }: { channel: "call" | "sms"; direction: string }) {
@@ -838,11 +852,13 @@ export function WarmLeadsModal({
   onClose,
   items,
   loadConversation,
+  agentNames,
 }: {
   open: boolean;
   onClose: () => void;
   items: WarmLeadItem[];
   loadConversation: (leadId: string) => Promise<Conversation[]>;
+  agentNames?: Record<string, string>; // slot (dept|direction → name) → the rooftop's own AI name for the drawer
 }) {
   const [conv, setConv] = React.useState<Conversation | null>(null);
   const [loadingId, setLoadingId] = React.useState<string | null>(null);
@@ -906,7 +922,7 @@ export function WarmLeadsModal({
           </div>
         )}
       </Modal>
-      <ConversationDrawer conv={conv} onClose={() => setConv(null)} />
+      <ConversationDrawer conv={conv} agentNames={agentNames} onClose={() => setConv(null)} />
     </>
   );
 }
