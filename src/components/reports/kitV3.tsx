@@ -813,8 +813,26 @@ export function ConversationDrawer({ conv, onClose, agentNames }: { conv: Conver
   );
 }
 
+/* Pick which of a lead's conversations to open in the drawer. NOT simply the newest — a warm lead's
+ * newest touch is often a one-sided outbound reach-out with no reply ("Hi, still shopping?"), which is
+ * the LEAST informative and hides the conversation that actually flagged the lead (the customer's
+ * buying-intent call/reply). Score by buying-intent evidence — an action item, a booked appointment, a
+ * named vehicle, an inbound (customer-initiated) call, or an SMS thread with more than the single
+ * outbound blast — and fall back to newest only when nothing carries a signal. */
+function pickWarmLeadConversation(list: Conversation[]): Conversation {
+  const score = (c: Conversation) =>
+    (c.hasActionItem ? 8 : 0) +
+    (c.appointmentScheduled ? 6 : 0) +
+    (c.vehicle ? 4 : 0) +
+    (c.direction === "inbound" ? 3 : 0) +
+    ((c.msgs ?? 0) > 1 ? 3 : 0) +
+    (c.queryResolved ? 1 : 0);
+  return [...list].sort((a, b) => score(b) - score(a) || (b.at || "").localeCompare(a.at || ""))[0];
+}
+
 /* "View all" warm/hot leads with a click-through to review that lead's conversation. `loadConversation`
- * fetches the lead's calls/SMS (the host owns the API call + auth); the newest is shown in the drawer. */
+ * fetches the lead's calls/SMS (the host owns the API call + auth); the most buying-intent-relevant one
+ * (see pickWarmLeadConversation) is shown in the drawer. */
 export function WarmLeadsModal({
   open,
   onClose,
@@ -842,7 +860,7 @@ export function WarmLeadsModal({
     setLoadingId(w.leadId);
     try {
       const list = await loadConversation(w.leadId);
-      if (list.length) setConv(list[0]);
+      if (list.length) setConv(pickWarmLeadConversation(list));
       else setEmptyId(w.leadId);
     } finally {
       setLoadingId(null);
