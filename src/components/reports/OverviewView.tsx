@@ -464,7 +464,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
         open={warmModalOpen}
         onClose={() => setWarmModalOpen(false)}
         items={warmLeads}
-        loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken })}
+        loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", service: svc, limit: 10, spyneToken, spyneEnv })}
       />
       {/* Customize layout — hide/reorder sections + hide individual cards/tiles (opened from the header). */}
       <CustomizeModal ctrl={ctrl} groups={customizeGroups} accountLabel={account.name} />
