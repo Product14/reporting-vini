@@ -31,7 +31,7 @@ export default function RecentCallsPage() {
 }
 
 function RecentCallsView() {
-  const { teamId, account, spyneToken } = useScenario();
+  const { teamId, account, spyneToken, spyneEnv } = useScenario();
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
   const navQuery = reportNavQuery(teamId, bucket, custom, dept);
@@ -52,10 +52,10 @@ function RecentCallsView() {
     if (!teamId) { setRows([]); return; }
     let on = true;
     setRows(null);
-    fetchConversations(teamId, { channel, ...winOpts, limit: 150, spyneToken }).then((r) => { if (on) setRows(r); });
+    fetchConversations(teamId, { channel, ...winOpts, limit: 150, spyneToken, spyneEnv }).then((r) => { if (on) setRows(r); });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId, channel, bucket, custom, spyneToken]);
+  }, [teamId, channel, bucket, custom, spyneToken, spyneEnv]);
 
   const filtered = useMemo(
     () => (rows ?? []).filter((r) => (dir === "both" ? true : r.direction === dir) && (dept === "all" || r.dept === dept)),

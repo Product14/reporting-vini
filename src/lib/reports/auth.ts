@@ -78,6 +78,16 @@ export function spyneTokenFrom(request: Request): string | null {
   return null;
 }
 
+/* Which Spyne backend to call for THIS request's downstream Spyne API calls (store timezone, onboarded
+ * agents, live meetings) — the console now embeds a rooftop with ?env=uat|stag|prod, and a UAT dealer's
+ * token is only valid against the UAT API, not prod. Unrecognised/absent (older embed, background job
+ * with no request) → null, and apiBaseForEnv() falls back to SPYNE_API_BASE/prod exactly as before this
+ * was per-request aware. */
+export function spyneEnvFrom(request: Request): string | null {
+  const env = new URL(request.url).searchParams.get("env");
+  return env === "uat" || env === "stag" || env === "prod" ? env : null;
+}
+
 /* The team scope a presented credential carries. A real Spyne session token is base64(JSON{authKey,
  * deviceId, enterprise_id, team_id}) (see meetings.ts) — it ALWAYS carries a team_id. So we distinguish
  * three cases, and only the first is a usable dealer credential:

@@ -12,7 +12,22 @@
  * When neither is present every call returns null and callers degrade to the previous behavior (UTC
  * windows, all agents shown). The dashboard's token is a short-lived session JWT. See ONE_PAGER. */
 
-const BASE = process.env.SPYNE_API_BASE || "https://api.spyne.ai";
+export type SpyneEnv = "uat" | "stag" | "prod";
+
+/* Which Spyne API to hit for a given iframe `env` (mirrors action-items-console's apiBaseForEnv, so a
+ * dealer embedded with ?env=uat gets the UAT backend instead of always hitting prod). Absent/unrecognised
+ * env (no host-forwarded env — e.g. an older embed, or a token-less background job) falls back to the
+ * SPYNE_API_BASE override or prod, exactly as before this was per-request aware. */
+export function apiBaseForEnv(env?: string | null): string {
+  switch (env) {
+    case "uat":
+      return "https://uat-api.spyne.xyz";
+    case "stag":
+      return "https://beta-api.spyne.xyz";
+    default:
+      return process.env.SPYNE_API_BASE || "https://api.spyne.ai";
+  }
+}
 
 // Per-request token wins (prod, host-forwarded); env token is the local-dev fallback.
 export function resolveToken(override?: string | null): string | null {
@@ -27,11 +42,12 @@ export function spyneConfigured(token?: string | null): boolean {
 
 /* GET a JSON path from the Spyne API. Returns null on any failure (no token, network error, non-2xx,
  * bad JSON) so the report never breaks because an enrichment call hiccuped. Best-effort by design. */
-export async function spyneGet<T>(path: string, token?: string | null): Promise<T | null> {
+export async function spyneGet<T>(path: string, token?: string | null, env?: string | null): Promise<T | null> {
   const auth = resolveToken(token);
   if (!auth) return null;
+  const base = apiBaseForEnv(env);
   try {
-    const r = await fetch(`${BASE}${path}`, {
+    const r = await fetch(`${base}${path}`, {
       headers: { accept: "application/json, text/plain, */*", authorization: `Bearer ${auth}` },
       cache: "no-store",
     });

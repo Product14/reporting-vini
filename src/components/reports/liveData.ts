@@ -115,6 +115,7 @@ export interface LiveOpts {
   end?: string;
   force?: boolean; // bypass the cache (used by the Refresh button)
   spyneToken?: string; // host-forwarded Spyne API token (prod); omit locally (server uses env)
+  spyneEnv?: string; // host-forwarded ?env=uat|stag|prod — which Spyne backend the server should call
 }
 
 // Minimal per-agent totals for the prior equal-length window — the basis for real period deltas.
@@ -397,6 +398,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
   const query: Record<string, string> = opts.start && opts.end
     ? { team_id: teamId, start: opts.start, end: opts.end }
     : { team_id: teamId, bucket: opts.bucket ?? "last30" };
+  if (opts.spyneEnv) query.env = opts.spyneEnv;
 
   // Forward the host's Spyne token (prod) as a Bearer header so /api/reports can resolve timezone +
   // onboarded agents. Omitted locally → the server falls back to its env token.
@@ -509,7 +511,7 @@ export interface ActionItemCloser { assignedTo: string; closed: number }
 
 export async function fetchActionItemStats(
   teamId: string,
-  opts: { start?: string; end?: string; bucket?: Bucket; service?: "sales" | "service" | "both"; spyneToken?: string } = {},
+  opts: { start?: string; end?: string; bucket?: Bucket; service?: "sales" | "service" | "both"; spyneToken?: string; spyneEnv?: string } = {},
 ): Promise<{ stats: ActionItemStats; closers: ActionItemCloser[] } | null> {
   if (!teamId) return null;
   const query: Record<string, string> = { team_id: teamId, scope: "stats", serviceType: opts.service ?? "both" };
@@ -518,6 +520,7 @@ export async function fetchActionItemStats(
   // client-side here, which is what drifted the Action Items tab off the Overview card.
   if (opts.start && opts.end) { query.start = opts.start; query.end = opts.end; }
   else if (opts.bucket) { query.bucket = opts.bucket; }
+  if (opts.spyneEnv) query.env = opts.spyneEnv;
   try {
     const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
     const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
@@ -649,7 +652,7 @@ export interface Conversation {
 }
 export async function fetchConversations(
   teamId: string,
-  opts: { channel?: "call" | "sms" | "both"; service?: "sales" | "service" | "both"; since?: string; end?: string; bucket?: Bucket; leadId?: string; limit?: number; spyneToken?: string } = {},
+  opts: { channel?: "call" | "sms" | "both"; service?: "sales" | "service" | "both"; since?: string; end?: string; bucket?: Bucket; leadId?: string; limit?: number; spyneToken?: string; spyneEnv?: string } = {},
 ): Promise<Conversation[]> {
   if (!teamId) return [];
   const query: Record<string, string> = {
@@ -666,6 +669,7 @@ export async function fetchConversations(
   else if (opts.bucket && !opts.since) query.bucket = opts.bucket;
   // Lead-scoped drill-down: fetch this lead's full recent history (server ignores the time window).
   if (opts.leadId) query.leadId = opts.leadId;
+  if (opts.spyneEnv) query.env = opts.spyneEnv;
   try {
     const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
     const r = await fetch(`/api/conversations?${new URLSearchParams(query)}`, { cache: "no-store", headers });
@@ -687,6 +691,7 @@ export interface MeetingFetchOpts {
   end?: string;
   agentType?: string; // report slot id (sales_ib/…) — scopes the drill to that agent's booked leads
   spyneToken?: string; // host-forwarded Spyne token (prod); omit locally (server uses env)
+  spyneEnv?: string; // host-forwarded ?env=uat|stag|prod — which Spyne backend the server should call
 }
 
 /* Fetch the meeting/appointment records behind an appointment count (scope:"window") or the upcoming
@@ -694,9 +699,10 @@ export interface MeetingFetchOpts {
  * token never reaches the browser. Returns an empty list on any error → the card/modal shows its empty
  * state rather than breaking. */
 export async function fetchMeetings(opts: MeetingFetchOpts): Promise<MeetingsResult> {
-  const { teamId, enterpriseId, service = "both", scope = "window", bucket, start, end, agentType, spyneToken } = opts;
+  const { teamId, enterpriseId, service = "both", scope = "window", bucket, start, end, agentType, spyneToken, spyneEnv } = opts;
   const query: Record<string, string> = { team_id: teamId, serviceType: service, scope };
   if (enterpriseId) query.enterprise_id = enterpriseId;
+  if (spyneEnv) query.env = spyneEnv;
   if (scope === "window") {
     if (start && end) { query.start = start; query.end = end; }
     else query.bucket = bucket ?? "last30";

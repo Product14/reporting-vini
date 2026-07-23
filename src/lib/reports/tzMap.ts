@@ -3,6 +3,7 @@
  * team_tz map lives in tzStore.ts. */
 
 import type { RawRow } from "./schema";
+import { apiBaseForEnv } from "@/lib/spyne/client";
 
 /** Calendar day (YYYY-MM-DD) of `activityTs` in `tz`, or `rawDay` when tz is missing/invalid. */
 export function storeLocalDay(activityTs: string, tz: string | undefined, rawDay: string): string {
@@ -25,9 +26,9 @@ export type DayOfFn = (team: string, activityTs: string, rawDay: string) => stri
  * the admin-tools route the report used before. It also currently requires no token at all, so the sync
  * (which has no customer token) can resolve every rooftop's tz too — including brand-new ones — with no
  * admin credential. The optional `token` is forwarded when present (harmless) but is not required. */
-export async function fetchTeamTz(teamId: string, token?: string | null): Promise<string | null> {
+export async function fetchTeamTz(teamId: string, token?: string | null, env?: string | null): Promise<string | null> {
   if (!teamId) return null;
-  const base = process.env.SPYNE_API_BASE || "https://api.spyne.ai";
+  const base = apiBaseForEnv(env);
   try {
     const headers: Record<string, string> = { accept: "application/json, text/plain, */*" };
     if (token && token.trim()) headers.authorization = `Bearer ${token.trim()}`;
@@ -46,12 +47,12 @@ export async function fetchTeamTz(teamId: string, token?: string | null): Promis
 
 /* Resolve tz for a set of rooftops (concurrency-limited), dropping any that don't resolve. Used by the
  * sync to build the re-bucketing map for exactly the teams present in the pulled data. */
-export async function fetchTeamTzs(teamIds: string[], token?: string | null, concurrency = 16): Promise<Map<string, string>> {
+export async function fetchTeamTzs(teamIds: string[], token?: string | null, concurrency = 16, env?: string | null): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   const ids = [...new Set(teamIds.filter(Boolean))];
   for (let i = 0; i < ids.length; i += concurrency) {
     const batch = ids.slice(i, i + concurrency);
-    const tzs = await Promise.all(batch.map((t) => fetchTeamTz(t, token)));
+    const tzs = await Promise.all(batch.map((t) => fetchTeamTz(t, token, env)));
     batch.forEach((t, j) => { const tz = tzs[j]; if (tz) map.set(t, tz); });
   }
   return map;

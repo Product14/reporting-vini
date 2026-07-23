@@ -101,6 +101,7 @@ interface FetchOneOpts {
   endISO: string;
   sortOrder: "asc" | "desc";
   token?: string | null;
+  env?: string | null;
 }
 
 /* One serviceType's meetings in [startISO, endISO). Reads page 1, then — using the reported total —
@@ -121,7 +122,7 @@ async function fetchOne(o: FetchOneOpts): Promise<Meeting[]> {
       endDate: o.endISO,
     }).toString()}`;
 
-  const first = await spyneGet<MeetingsResp>(pageUrl(1), o.token);
+  const first = await spyneGet<MeetingsResp>(pageUrl(1), o.token, o.env);
   const raw: RawMeeting[] = Array.isArray(first?.data) ? [...first!.data!] : [];
   if (raw.length) {
     const total = first?.pagination?.total;
@@ -129,13 +130,13 @@ async function fetchOne(o: FetchOneOpts): Promise<Meeting[]> {
       // Known total → fetch the rest in one parallel burst (capped). page 1 is done; pull 2..lastPage.
       const lastPage = Math.min(MAX_PAGES, Math.ceil(total / PAGE_SIZE));
       const rest = await Promise.all(
-        Array.from({ length: lastPage - 1 }, (_, i) => spyneGet<MeetingsResp>(pageUrl(i + 2), o.token)),
+        Array.from({ length: lastPage - 1 }, (_, i) => spyneGet<MeetingsResp>(pageUrl(i + 2), o.token, o.env)),
       );
       for (const r of rest) if (Array.isArray(r?.data)) raw.push(...r!.data!);
     } else if (first?.pagination?.hasNextPage) {
       // No total reported → page sequentially while there's a next page.
       for (let page = 2; page <= MAX_PAGES; page++) {
-        const resp = await spyneGet<MeetingsResp>(pageUrl(page), o.token);
+        const resp = await spyneGet<MeetingsResp>(pageUrl(page), o.token, o.env);
         const rows = resp?.data;
         if (!Array.isArray(rows) || rows.length === 0) break;
         raw.push(...rows);
@@ -170,8 +171,9 @@ export async function fetchMeetings(opts: {
   leadIds?: string[]; // when set, return one meeting per lead for exactly these leads (the leads the tile counted)
   enterpriseId?: string | null; // explicit override (host-forwarded on the URL); else decoded from token
   token?: string | null;
+  env?: string | null; // host-forwarded ?env=uat|stag|prod — which Spyne backend to call
 }): Promise<MeetingsResult> {
-  const { teamId, service, startISO, endISO, sortOrder = "asc", bookedStartISO, bookedEndISO, leadIds, token } = opts;
+  const { teamId, service, startISO, endISO, sortOrder = "asc", bookedStartISO, bookedEndISO, leadIds, token, env } = opts;
   // Prefer an explicit enterpriseId (the host scopes the iframe with ?enterprise_id=&team_id=). Fall back
   // to decoding it from the token — both point at the same rooftop in prod; the override lets local dev
   // (one shared token) query any enterprise/team the token is allowed to read.
@@ -183,7 +185,7 @@ export async function fetchMeetings(opts: {
   const types: ServiceType[] = service === "both" ? ["sales", "service"] : [service];
   try {
     const lists = await Promise.all(
-      types.map((serviceType) => fetchOne({ teamId, enterpriseId, serviceType, startISO, endISO, sortOrder, token })),
+      types.map((serviceType) => fetchOne({ teamId, enterpriseId, serviceType, startISO, endISO, sortOrder, token, env })),
     );
     let meetings = lists.flat();
     // `total` is the count the modal headlines. Defaults to the rows we list; the lead-scoped drill

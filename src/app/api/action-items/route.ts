@@ -22,7 +22,7 @@
  * page through the full result set instead of guessing a big-enough single limit.
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
-import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -67,6 +67,7 @@ export async function GET(request: Request): Promise<Response> {
   const limit = Math.max(1, Math.min(200, Number(searchParams.get("limit")) || 50));
   const offset = Math.max(0, Number(searchParams.get("offset")) || 0);
   const spyneToken = spyneTokenFrom(request);
+  const spyneEnv = spyneEnvFrom(request);
   const bucketRaw = searchParams.get("bucket") || "";
   const BUCKETS = new Set(["today", "yesterday", "last7", "last14", "last30", "mtd", "lifetime"]);
 
@@ -80,7 +81,7 @@ export async function GET(request: Request): Promise<Response> {
     let s = dateOk(searchParams.get("start") || "") ? (searchParams.get("start") as string) : "";
     let e = dateOk(searchParams.get("end") || "") ? (searchParams.get("end") as string) : "";
     if ((!s || !e) && BUCKETS.has(bucketRaw)) {
-      const tz = await getStoreTimeZone(teamId, spyneToken);
+      const tz = await getStoreTimeZone(teamId, spyneToken, spyneEnv);
       const w = rangeFor(bucketRaw as Bucket, tz ?? undefined);
       if (!s) s = w.start;
       if (!e) e = w.end;

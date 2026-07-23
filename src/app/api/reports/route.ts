@@ -4,7 +4,7 @@ import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow,
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames } from "@/lib/spyne/teamContext";
-import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
  * already consumes — one fast query instead of the ~84 Metabase round-trips fetchAgents() used to do.
@@ -172,13 +172,16 @@ export async function GET(request: Request): Promise<Response> {
   // `Authorization: Bearer <secret>` doesn't shadow the real dealer token it sends as ?auth_key= — which
   // would silently drop timezone/onboarded-agent enrichment back to UTC/all-agents.
   const spyneToken = spyneTokenFrom(request);
+  // Which Spyne backend the enrichment calls below hit — the console now embeds a rooftop with
+  // ?env=uat|stag|prod, and a UAT dealer's token only works against the UAT API.
+  const spyneEnv = spyneEnvFrom(request);
 
   // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
   // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).
   const [timezone, onboardedSlots, onboardedNames] = await Promise.all([
-    getStoreTimeZone(teamId, spyneToken),
-    getOnboardedSlots(teamId, spyneToken),
-    getOnboardedNames(teamId, spyneToken),
+    getStoreTimeZone(teamId, spyneToken, spyneEnv),
+    getOnboardedSlots(teamId, spyneToken, spyneEnv),
+    getOnboardedNames(teamId, spyneToken, spyneEnv),
   ]);
 
   // Relative buckets resolve to a window in the STORE's timezone (so a Pacific rooftop's "Today" is a

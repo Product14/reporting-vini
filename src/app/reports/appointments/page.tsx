@@ -30,12 +30,12 @@ export default function AppointmentsPage() {
 }
 
 function AppointmentsView() {
-  const { teamId, account, spyneToken, enterpriseId } = useScenario();
+  const { teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
   const navQuery = reportNavQuery(teamId, bucket, custom, dept);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
 
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
   const [filter, setFilter] = useState<Filter>("all");
@@ -129,7 +129,7 @@ function AppointmentsView() {
         onClose={() => setModalOpen(false)}
         title={`Appointments · ${periodLabel}`}
         sub="Every booked appointment across this rooftop — sales & service"
-        fetchOpts={{ teamId, enterpriseId, service: dept === "all" ? "both" : dept, scope: "window", ...meetingWindow, spyneToken }}
+        fetchOpts={{ teamId, enterpriseId, service: dept === "all" ? "both" : dept, scope: "window", ...meetingWindow, spyneToken, spyneEnv }}
       />
     </div>
   );

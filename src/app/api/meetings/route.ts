@@ -1,6 +1,6 @@
 import { fetchMeetings, type ServiceType } from "@/lib/spyne/meetings";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
-import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getSupabase, AGENT_LEAD_DAYS, REPORT_APPOINTMENTS } from "@/lib/reports/supabase";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket, Meeting } from "@/components/reports/data";
@@ -145,6 +145,9 @@ export async function GET(request: Request): Promise<Response> {
   // SPYNE_API_TOKEN. spyneTokenFrom skips the CRON_SECRET so the cron's `Authorization: Bearer
   // <secret>` (which authorizes the request) never shadows the real dealer token it sends as ?auth_key=.
   const spyneToken = spyneTokenFrom(request);
+  // Which Spyne backend the live meetings/timezone calls below hit — a UAT-embedded rooftop's token
+  // only works against the UAT API.
+  const spyneEnv = spyneEnvFrom(request);
 
   const svcParam = (searchParams.get("serviceType") || "both").toLowerCase();
   const service: ServiceType | "both" = svcParam === "sales" || svcParam === "service" ? svcParam : "both";
@@ -185,6 +188,7 @@ export async function GET(request: Request): Promise<Response> {
       bookedEndISO: new Date(now + 86_400_000).toISOString(), // through end of today
       enterpriseId,
       token: spyneToken,
+      env: spyneEnv,
     });
     const counts = new Map<string, number>();
     for (const m of result.meetings) {
@@ -229,7 +233,7 @@ export async function GET(request: Request): Promise<Response> {
       start = startQ;
       end = endQ;
     } else {
-      const timezone = await getStoreTimeZone(teamId, spyneToken);
+      const timezone = await getStoreTimeZone(teamId, spyneToken, spyneEnv);
       ({ start, end } = rangeFor((searchParams.get("bucket") as Bucket) ?? "last30", timezone ?? undefined));
     }
     startISO = dayToISO(start);
@@ -261,7 +265,7 @@ export async function GET(request: Request): Promise<Response> {
     }
   }
 
-  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId, token: spyneToken });
+  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId, token: spyneToken, env: spyneEnv });
   return Response.json(result, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });

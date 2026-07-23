@@ -26,9 +26,12 @@ type SlotId = AgentData["id"]; // "sales_ib" | "sales_ob" | "service_ib" | "serv
 // data anyway, so a genuinely changed tz is still picked up promptly.
 const tzPersisted = new Set<string>();
 
-export async function getStoreTimeZone(teamId: string, token?: string | null): Promise<string | null> {
+export async function getStoreTimeZone(teamId: string, token?: string | null, env?: string | null): Promise<string | null> {
   if (!teamId) return null;
-  const live = await cached(`tz:${teamId}`, () => fetchTeamTz(teamId, token));
+  // Cache key includes env — the SAME teamId can be queried once via a prod token/env and once via UAT
+  // (e.g. a rooftop staged in both), and those two calls hit different backends that can legitimately
+  // disagree; keying on teamId alone would let one silently clobber the other's cached tz.
+  const live = await cached(`tz:${env ?? "prod"}:${teamId}`, () => fetchTeamTz(teamId, token, env));
   if (live) {
     if (!tzPersisted.has(teamId)) {
       const sb = getSupabase();
@@ -65,10 +68,10 @@ function slotOf(a: OnboardedAgent): SlotId | null {
 
 /* The raw onboarded-agents list for a team (cached), or null when unavailable. Both getOnboardedSlots
  * and getOnboardedNames derive from this, so a report costs at most ONE call to the endpoint. */
-async function getOnboardedAgents(teamId: string, token?: string | null): Promise<OnboardedAgent[] | null> {
+async function getOnboardedAgents(teamId: string, token?: string | null, env?: string | null): Promise<OnboardedAgent[] | null> {
   if (!teamId) return null;
-  return cached(`oa:${teamId}`, async () => {
-    const list = await spyneGet<OnboardedAgent[]>(`/conversation/agents/team/${encodeURIComponent(teamId)}/onboarded-agents`, token);
+  return cached(`oa:${env ?? "prod"}:${teamId}`, async () => {
+    const list = await spyneGet<OnboardedAgent[]>(`/conversation/agents/team/${encodeURIComponent(teamId)}/onboarded-agents`, token, env);
     return Array.isArray(list) ? list : null;
   });
 }
@@ -76,8 +79,8 @@ async function getOnboardedAgents(teamId: string, token?: string | null): Promis
 /* The set of slot ids the dealer has onboarded (isOnboarded === true), or null when the list is
  * unavailable. Null means "don't gate" — the report shows all slots, as before. An empty set means the
  * call succeeded but nothing is onboarded (a real, gated-to-empty rooftop). */
-export async function getOnboardedSlots(teamId: string, token?: string | null): Promise<Set<SlotId> | null> {
-  const list = await getOnboardedAgents(teamId, token);
+export async function getOnboardedSlots(teamId: string, token?: string | null, env?: string | null): Promise<Set<SlotId> | null> {
+  const list = await getOnboardedAgents(teamId, token, env);
   if (!list) return null;
   const slots = new Set<SlotId>();
   for (const a of list) {
@@ -92,8 +95,8 @@ export async function getOnboardedSlots(teamId: string, token?: string | null): 
  * personas (Emily/Jenny/Mia/Theo) so the report shows the name the dealer actually gave each agent.
  * A slot with more than one onboarded agent (e.g. two service-outbound campaigns) joins its distinct
  * names with " & ". Null / a missing slot → caller keeps the mock persona. */
-export async function getOnboardedNames(teamId: string, token?: string | null): Promise<Partial<Record<SlotId, string>> | null> {
-  const list = await getOnboardedAgents(teamId, token);
+export async function getOnboardedNames(teamId: string, token?: string | null, env?: string | null): Promise<Partial<Record<SlotId, string>> | null> {
+  const list = await getOnboardedAgents(teamId, token, env);
   if (!list) return null;
   const perSlot = new Map<SlotId, string[]>();
   for (const a of list) {

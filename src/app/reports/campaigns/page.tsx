@@ -37,7 +37,7 @@ export default function CampaignsReportPage() {
 function CampaignsReportView() {
   const router = useRouter();
   const { launchedCampaigns } = useNewCampaign();
-  const { scenario, view, teamId, account, spyneToken } = useScenario();
+  const { scenario, view, teamId, account, spyneToken, spyneEnv } = useScenario();
   // The window rides in the URL only so tab navigation keeps it — campaign run metrics themselves are a
   // CUMULATIVE (~120d) snapshot from report_campaigns and are NOT windowed by the date filter.
   const { bucket, custom } = useDateRange();
@@ -50,19 +50,19 @@ function CampaignsReportView() {
   // Live rooftop feed — the campaigns list rides on the same /api/reports payload the other tabs use
   // (report_campaigns attached per outbound agent). Window doesn't matter for this table; use the
   // default bucket so the cache is shared with the Overview.
-  const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, bucket: "last30", spyneToken }));
+  const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, bucket: "last30", spyneToken, spyneEnv }));
   useEffect(() => {
     if (!teamId) return;
     let on = true;
-    const cached = peekAgents({ teamId, bucket: "last30", spyneToken });
+    const cached = peekAgents({ teamId, bucket: "last30", spyneToken, spyneEnv });
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFeed(cached);
-    fetchAgents({ teamId, bucket: "last30", spyneToken })
+    fetchAgents({ teamId, bucket: "last30", spyneToken, spyneEnv })
       .then((res) => { if (on) setFeed(res); })
       .catch(() => { if (on && !cached) setFeed(null); });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId, spyneToken]);
+  }, [teamId, spyneToken, spyneEnv]);
 
   // Union of every outbound agent's campaigns (each campaign belongs to one agent_type → no dupes),
   // ranked by appointments — the canonical "what's working" order.

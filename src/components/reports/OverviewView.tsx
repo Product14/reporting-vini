@@ -60,12 +60,13 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const router = useRouter();
   // Selected window comes from the URL so it persists across navigation to the By-agent tab (and back).
   const { bucket, custom, setPreset, setCustom } = useDateRange();
-  const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
+  const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
 
 
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for the query.
-  // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
+  // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents;
+  // spyneEnv picks which Spyne backend (uat/stag/prod) those calls hit.
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
   // Live fleet for the selected rooftop. Seed from the client cache so navigating back paints
   // instantly instead of flashing a skeleton; null === nothing cached yet (cold load).
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
@@ -128,9 +129,9 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     // count for the wrong (server-default) window on cold load.
     if (!teamId || !feed?.start || !feed?.end) { setAiStats(null); return; }
     let on = true;
-    fetchActionItemStats(teamId, { start: feed.start, end: feed.end, service: svc, spyneToken }).then((r) => { if (on) setAiStats(r); });
+    fetchActionItemStats(teamId, { start: feed.start, end: feed.end, service: svc, spyneToken, spyneEnv }).then((r) => { if (on) setAiStats(r); });
     return () => { on = false; };
-  }, [teamId, feed?.start, feed?.end, svc, spyneToken]);
+  }, [teamId, feed?.start, feed?.end, svc, spyneToken, spyneEnv]);
 
   // Open action items → the "Work these now" queue (overdue / soonest-due first). Separate from the
   // scoreboard counts above; a small named list the team can action directly.
@@ -155,9 +156,9 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     setConversations(null);
     // Bound BOTH ends of the window (server-resolved store-local feed.start/end) so "Yesterday" shows
     // yesterday's conversations, not everything since yesterday-through-now (RETCONVAI-4152).
-    fetchConversations(teamId, { channel: "both", service: svc, since: feed?.start, end: feed?.end, limit: 12, spyneToken }).then((r) => { if (on) setConversations(r); });
+    fetchConversations(teamId, { channel: "both", service: svc, since: feed?.start, end: feed?.end, limit: 12, spyneToken, spyneEnv }).then((r) => { if (on) setConversations(r); });
     return () => { on = false; };
-  }, [teamId, svc, feed?.start, feed?.end, spyneToken]);
+  }, [teamId, svc, feed?.start, feed?.end, spyneToken, spyneEnv]);
 
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);

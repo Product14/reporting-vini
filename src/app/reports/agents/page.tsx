@@ -75,11 +75,12 @@ function AgentReportsView() {
   // when set, the appointment-count drill-down modal is open (lists the leads behind the number)
   const [apptModal, setApptModal] = useState<{ service: "sales" | "service"; agentType: string; title: string; sub: string } | null>(null);
   // Resolved up-front (before the effects/handlers below that reference teamId for analytics).
-  const { scenario, view, teamId, account, spyneToken, enterpriseId } = useScenario();
+  const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
 
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
-  // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents.
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
+  // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents;
+  // spyneEnv picks which Spyne backend (uat/stag/prod) those calls hit.
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
   // Live agents for the selected rooftop, overlaid from Metabase. Seed from the client cache so
   // navigating back paints instantly instead of flashing a skeleton; null === nothing cached (cold).
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
@@ -466,7 +467,7 @@ function AgentReportsView() {
   const buildActionItemsSheet = async (): Promise<ExportSheet> => {
     const service = a.dept === "Service" ? "service" : "sales";
     const [stats, items] = await Promise.all([
-      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken }),
+      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken, spyneEnv }),
       fetchAllActionItems(teamId, { scope: "open", service, spyneToken }),
     ]);
     return {
@@ -633,7 +634,7 @@ function AgentReportsView() {
   const buildActionItemsPdfSection = async (): Promise<PdfSection> => {
     const service = a.dept === "Service" ? "service" : "sales";
     const [stats, items] = await Promise.all([
-      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken }),
+      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken, spyneEnv }),
       fetchAllActionItems(teamId, { scope: "open", service, spyneToken }),
     ]);
     const preview = items.slice(0, 30);
@@ -993,7 +994,7 @@ function AgentReportsView() {
               )}
             </div>
             <p className="px-6 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Upcoming</p>
-            <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} service={a.dept === "Service" ? "service" : "sales"} />
+            <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} spyneEnv={spyneEnv} service={a.dept === "Service" ? "service" : "sales"} />
           </Card>
 
           {/* ── Action items — BELOW appointments ── */}
@@ -1136,7 +1137,7 @@ function AgentReportsView() {
         onClose={() => setApptModal(null)}
         title={apptModal?.title ?? "Appointments"}
         sub={apptModal?.sub}
-        fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", agentType: apptModal?.agentType, scope: "window", ...meetingWindow, spyneToken }}
+        fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", agentType: apptModal?.agentType, scope: "window", ...meetingWindow, spyneToken, spyneEnv }}
       />
     </div>
   );
@@ -1394,7 +1395,7 @@ function QCell({ label, value, status }: { label: string; value: string; status?
  * Scoped to the agent's DEPARTMENT (sales meetings on Sales agents, service on Service) so a service
  * rooftop's bookings don't leak onto the Sales cards. From now forward. Self-fetches so the card stays
  * live regardless of the Q12227 aggregate; degrades to the empty state on no-data / error. */
-function UpcomingAppointments({ teamId, enterpriseId, spyneToken, service }: { teamId: string; enterpriseId: string; spyneToken: string; service: "sales" | "service" }) {
+function UpcomingAppointments({ teamId, enterpriseId, spyneToken, spyneEnv, service }: { teamId: string; enterpriseId: string; spyneToken: string; spyneEnv: string; service: "sales" | "service" }) {
   const [state, setState] = useState<{ loading: boolean; meetings: Meeting[] }>({ loading: true, meetings: [] });
   useEffect(() => {
     let on = true;
@@ -1403,11 +1404,11 @@ function UpcomingAppointments({ teamId, enterpriseId, spyneToken, service }: { t
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!teamId) { setState({ loading: false, meetings: [] }); return; }
     setState({ loading: true, meetings: [] });
-    fetchMeetings({ teamId, enterpriseId, service, scope: "upcoming", spyneToken })
+    fetchMeetings({ teamId, enterpriseId, service, scope: "upcoming", spyneToken, spyneEnv })
       .then((r) => { if (on) setState({ loading: false, meetings: r.meetings }); })
       .catch(() => { if (on) setState({ loading: false, meetings: [] }); });
     return () => { on = false; };
-  }, [teamId, enterpriseId, spyneToken, service]);
+  }, [teamId, enterpriseId, spyneToken, spyneEnv, service]);
 
   if (state.loading) {
     return (

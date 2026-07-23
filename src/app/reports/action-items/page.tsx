@@ -36,7 +36,7 @@ export default function ActionItemsPage() {
 }
 
 function ActionItemsView() {
-  const { teamId, account, spyneToken } = useScenario();
+  const { teamId, account, spyneToken, spyneEnv } = useScenario();
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
   const navQuery = reportNavQuery(teamId, bucket, custom, dept);
@@ -57,11 +57,11 @@ function ActionItemsView() {
     if (!teamId) { setStats(null); return; }
     let on = true;
     const opts = custom
-      ? { start: custom.start, end: addDay(custom.end), service, spyneToken }
-      : { bucket, service, spyneToken };
+      ? { start: custom.start, end: addDay(custom.end), service, spyneToken, spyneEnv }
+      : { bucket, service, spyneToken, spyneEnv };
     fetchActionItemStats(teamId, opts).then((r) => { if (on) setStats(r); });
     return () => { on = false; };
-  }, [teamId, bucket, custom, service, spyneToken]);
+  }, [teamId, bucket, custom, service, spyneToken, spyneEnv]);
 
   // The working list — open queue or the overdue escalation list.
   useEffect(() => {

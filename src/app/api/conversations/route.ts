@@ -11,7 +11,7 @@
  * Degrades to an empty list — never 502s the pipeline.
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
-import { requireTeamAuth, spyneTokenFrom } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -77,7 +77,7 @@ export async function GET(request: Request): Promise<Response> {
   let winStart = since && ISO_RE.test(since) ? since : "";
   let winEnd = untilRaw && ISO_RE.test(untilRaw) ? untilRaw : "";
   if (!leadScoped && (!winStart || !winEnd) && BUCKETS.has(bucketRaw)) {
-    const tz = await getStoreTimeZone(teamId, spyneTokenFrom(request));
+    const tz = await getStoreTimeZone(teamId, spyneTokenFrom(request), spyneEnvFrom(request));
     const w = rangeFor(bucketRaw as Bucket, tz ?? undefined);
     if (!winStart) winStart = w.start;
     if (!winEnd) winEnd = w.end;

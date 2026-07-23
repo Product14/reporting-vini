@@ -64,6 +64,7 @@ interface Ctx {
   account: Account;
   spyneToken: string; // host-forwarded Spyne API token from the URL (prod); "" locally → server uses env
   enterpriseId: string; // host-forwarded ?enterprise_id= (scopes the live meetings API); "" → decode from token
+  spyneEnv: string; // host-forwarded ?env=uat|stag|prod — which Spyne backend our API routes should call; "" → prod
 }
 const ScenarioCtx = createContext<Ctx | null>(null);
 
@@ -90,6 +91,7 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
   const [account, setAccount] = useState<Account | null>(null);
   const [spyneToken, setSpyneToken] = useState("");
   const [enterpriseId, setEnterpriseId] = useState("");
+  const [spyneEnv, setSpyneEnv] = useState("");
   useEffect(() => {
     // intentional: read the browser-only URL after mount, then render children for the first time
     const sp = new URLSearchParams(window.location.search);
@@ -102,11 +104,15 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
     // The host also scopes the rooftop's enterprise via ?enterprise_id= — used by the live meetings API
     // (the count drill-down + upcoming card). Empty → the server decodes it from the token.
     setEnterpriseId((sp.get("enterprise_id") || "").trim());
+    // The host also scopes which Spyne backend to call via ?env=uat|stag|prod (the Sales/Service split —
+    // a UAT-embedded rooftop's token is only valid against the UAT API, not prod). Empty → server default.
+    const rawEnv = (sp.get("env") || "").trim().toLowerCase();
+    setSpyneEnv(rawEnv === "uat" || rawEnv === "stag" || rawEnv === "prod" ? rawEnv : "");
     setAccount(resolveAccount(sp.get("team_id")));
   }, []);
 
   if (account === null) return <ScenarioResolving />;
-  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId }}>{children}</ScenarioCtx.Provider>;
+  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId, spyneEnv }}>{children}</ScenarioCtx.Provider>;
 }
 
 export function useScenario(): {
@@ -115,6 +121,7 @@ export function useScenario(): {
   teamId: string;
   spyneToken: string;
   enterpriseId: string;
+  spyneEnv: string;
   view: ScenarioView;
 } {
   const c = useContext(ScenarioCtx);
@@ -126,6 +133,7 @@ export function useScenario(): {
     teamId: account.teamId,
     spyneToken: c?.spyneToken ?? "",
     enterpriseId: c?.enterpriseId ?? "",
+    spyneEnv: c?.spyneEnv ?? "",
     view: scenarioView(scenario),
   };
 }

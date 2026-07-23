@@ -48,13 +48,13 @@ export default function ReportingPage() {
 }
 
 function ReportingView() {
-  const { teamId, account, spyneToken } = useScenario();
+  const { teamId, account, spyneToken, spyneEnv } = useScenario();
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept();
   const svc = dept === "all" ? "both" : dept; // shared dept scope → action-items serviceType
   const navQuery = reportNavQuery(teamId, bucket, custom, dept);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken } : { bucket, spyneToken };
+  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
 
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
   const [aiStats, setAiStats] = useState<{ stats: ActionItemStats; closers: ActionItemCloser[] } | null>(null);
@@ -71,9 +71,9 @@ function ReportingView() {
   useEffect(() => {
     if (!teamId) { setAiStats(null); return; }
     let on = true;
-    fetchActionItemStats(teamId, { start: feed?.start, end: feed?.end, service: svc, spyneToken }).then((r) => { if (on) setAiStats(r); });
+    fetchActionItemStats(teamId, { start: feed?.start, end: feed?.end, service: svc, spyneToken, spyneEnv }).then((r) => { if (on) setAiStats(r); });
     return () => { on = false; };
-  }, [teamId, feed?.start, feed?.end, svc, spyneToken]);
+  }, [teamId, feed?.start, feed?.end, svc, spyneToken, spyneEnv]);
 
   // Scope to the rooftop's agents, then to the selected department (the shared header switcher).
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
