@@ -63,7 +63,7 @@ function AgentReportsView() {
   const paramAgent = searchParams.get("agent"); // the agent the overview "who drove it" link picked
   // Selected window comes from the URL so it persists when arriving from the Overview tab (and back).
   const { bucket, custom, setPreset, setCustom } = useDateRange();
-  const { dept } = useDept(); // top-level scope (shared header, URL-persisted) — scopes the agent pills
+  const { dept, locked } = useDept(); // top-level scope (shared header, URL-persisted) — scopes the agent pills
   // open on the agent passed in; the picker on the page then drives selection locally.
   // An invalid/absent id is corrected by the validity effect below once agents load.
   const [activeId, setActiveId] = useState<string>(paramAgent || "sales_ib");
@@ -138,7 +138,7 @@ function AgentReportsView() {
   const hasTeam = teamId !== "";
   // Carries team scope + the selected window into the tab links and the back arrow, so the window
   // survives navigation back to the Overview tab.
-  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked);
   // Gated on lifetime "ever live", NOT the selected window — a live rooftop with an empty window (e.g.
   // "Today" before its first synced call) renders the report with zeros instead of the on-its-way gate.
   // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.

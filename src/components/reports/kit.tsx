@@ -12,24 +12,21 @@ export * from "./data";
 /* ── tabs ── */
 export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting";
 
-// Tabs the parent product ALSO provides — hidden when this app runs embedded (any non-localhost host),
-// since it's iframed into a console that already has them. Overview + By agent are this app's own views
-// and always show. On localhost (dev) every tab shows so the full app is reachable.
-const PARENT_PROVIDED_TABS = new Set(["appointments", "calls", "actions", "customers", "campaigns", "reporting"]);
-
 export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamId?: string; query?: string }) {
   // keep the rooftop scope AND the selected date window across tab navigation. `query` (built by the
   // page from team_id + the URL date range) is preferred; fall back to team_id only when absent.
   const q = query ?? (teamId ? `?team_id=${teamId}` : "");
-  // Default to EMBEDDED (show only Overview + By agent) so the iframe/prod never flashes the full tab bar
-  // — the parent console already provides the rest. SSR + first client render use this default (they
-  // match), then on localhost only, the effect expands to every tab so the full app stays reachable in dev.
+  // The parent console now owns navigation between EVERY section (Overview, By agent, Appointments, …),
+  // each iframing a different reporting-vini route — so embedded (any non-localhost host) shows NO tab
+  // strip at all. SSR + first client render default to embedded (hidden) so the iframe/prod never flashes
+  // the tab bar; on localhost only, the effect reveals every tab so the full app stays reachable in dev.
   const [isLocal, setIsLocal] = useState(false);
   useEffect(() => {
     const h = window.location.hostname;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsLocal(h === "localhost" || h === "127.0.0.1" || h === "0.0.0.0" || h === "");
   }, []);
+  if (!isLocal) return null;
   const allTabs = [
     { id: "overview", label: "Overview", href: `/reports${q}` },
     { id: "appointments", label: "Appointments", href: `/reports/appointments${q}` },
@@ -40,10 +37,9 @@ export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamI
     { id: "campaigns", label: "Campaigns", href: `/reports/campaigns${q}` },
     { id: "reporting", label: "Reporting", href: `/reports/reporting${q}` },
   ] as const;
-  const tabs = isLocal ? allTabs : allTabs.filter((t) => !PARENT_PROVIDED_TABS.has(t.id));
   return (
     <div className="no-print mx-auto max-w-[1400px] mt-4 flex flex-wrap items-center gap-1">
-      {tabs.map((t) =>
+      {allTabs.map((t) =>
         active === t.id ? (
           <span key={t.id} className="flex items-center px-3 py-1.5 rounded-md text-[12.5px] font-semibold bg-[#f3eaff] text-[#813fed]">
             {t.label}
@@ -97,7 +93,7 @@ export function ReportTopBar({
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
   // top-level department scope — shared across every tab (persisted in the URL via useDept).
-  const { dept, setDept } = useDept();
+  const { dept, setDept, locked } = useDept();
 
   return (
     <div
@@ -126,7 +122,7 @@ export function ReportTopBar({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          {teamId && <DeptSwitcher dept={dept} setDept={setDept} />}
+          {teamId && !locked && <DeptSwitcher dept={dept} setDept={setDept} />}
           {right}
         </div>
       </div>

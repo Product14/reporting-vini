@@ -35,23 +35,37 @@ export function dateQS(bucket: Bucket, custom: { start: string; end: string } | 
 
 /* Build a ?team_id=…&<date> query string for tab/back/drill links. enterprise_id and the Spyne token
  * are NOT carried here on purpose — they're held in the ScenarioProvider context, which survives
- * client-side navigation, so only the rooftop scope + window need to ride the URL. */
-export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: string; end: string } | null, dept: Dept = "all"): string {
-  const parts = [dateQS(bucket, custom), dept !== "all" ? `dept=${dept}` : ""].filter(Boolean);
+ * client-side navigation, so only the rooftop scope + window need to ride the URL.
+ *
+ * `locked` (host-scoped via ?serviceType=, see useDept below) re-encodes the scope as `serviceType=`
+ * instead of `dept=` so the NEXT page's useDept() also sees it as host-locked — otherwise an in-app nav
+ * (e.g. Overview → By-agent, same iframe) would silently drop the lock and the switcher would reappear. */
+export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: string; end: string } | null, dept: Dept = "all", locked = false): string {
+  const deptQS = dept !== "all" ? `${locked ? "serviceType" : "dept"}=${dept}` : "";
+  const parts = [dateQS(bucket, custom), deptQS].filter(Boolean);
   const tail = parts.length ? parts.join("&") : "";
   if (teamId) return `?team_id=${teamId}${tail ? `&${tail}` : ""}`;
   return tail ? `?${tail}` : "";
 }
 
-/* Read + write the department scope via the URL (shared across all report tabs). */
-export function useDept(): { dept: Dept; setDept: (d: Dept) => void } {
+/* Read + write the department scope via the URL (shared across all report tabs).
+ *
+ * The console now gives Sales and Service each their own dedicated space (no more unified "All" view),
+ * so a ?serviceType=sales|service on the iframe URL LOCKS the whole report to that department: `dept`
+ * resolves straight from it, `setDept` becomes a no-op, and callers (the header's DeptSwitcher) use
+ * `locked` to hide the switcher entirely. Absent serviceType (localhost dev, or an older embed) falls
+ * back to the in-app switcher via ?dept=, exactly as before. */
+export function useDept(): { dept: Dept; setDept: (d: Dept) => void; locked: boolean } {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
+  const svcParam = params.get("serviceType");
+  const locked = svcParam === "sales" || svcParam === "service";
   const p = params.get("dept");
-  const dept: Dept = p === "sales" || p === "service" ? p : "all";
+  const dept: Dept = locked ? (svcParam as Dept) : p === "sales" || p === "service" ? p : "all";
   const setDept = useCallback(
     (d: Dept) => {
+      if (locked) return; // host-scoped — no in-app override
       const sp = new URLSearchParams(params.toString());
       if (d === "all") sp.delete("dept");
       else sp.set("dept", d);
@@ -59,9 +73,9 @@ export function useDept(): { dept: Dept; setDept: (d: Dept) => void } {
       // replace (not push) so toggling scope doesn't stack browser-history entries.
       router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     },
-    [params, pathname, router],
+    [params, pathname, router, locked],
   );
-  return { dept, setDept };
+  return { dept, setDept, locked };
 }
 
 /* Read + write the selected window via the URL. Returns memoized `bucket`/`custom` (stable references
