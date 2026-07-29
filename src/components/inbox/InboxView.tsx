@@ -108,6 +108,7 @@ const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><
 const IconChevron = (p: IconProps) => <Svg {...p}><path d="m6 9 6 6 6-6" /></Svg>;
 const IconList = (p: IconProps) =><Svg {...p}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></Svg>;
 const IconCalendar = (p: IconProps) => <Svg {...p}><rect x="3" y="4.5" width="18" height="17" rx="2" /><path d="M3 9h18M8 2.5v4M16 2.5v4" /></Svg>;
+const IconBolt = (p: IconProps) => <Svg {...p}><path d="M13 2 4 14h7l-1 8 9-12h-7z" /></Svg>;
 const IconThumbUp = (p: IconProps) => <Svg {...p}><path d="M7 10v11H3V10zM7 10l5-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1.3 7A2 2 0 0 1 16.7 21H7" /></Svg>;
 const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 14l-5 7a2 2 0 0 1-2-2v-3H5a2 2 0 0 1-2-2.3l1.3-7A2 2 0 0 1 7.3 3H17" /></Svg>;
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
@@ -733,11 +734,14 @@ function ThreadNodeView({ node, fb }: { node: ThreadNode; fb: FbCtx }) {
     );
   }
   if (node.kind === "trace") {
+    // §03 tool-call trace — a subtle "AI action" chip (never raw JSON; ISO timestamps humanized).
     return (
       <div className="flex justify-end px-0.5">
-        <div className="flex items-center gap-1.5 text-[11px]" style={{ color: C.sub }}>
-          <IconSearch size={10} /> {node.label}
-        </div>
+        <span className="inline-flex max-w-[70%] items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]"
+          style={{ borderColor: `${C.primary}2e`, background: `${C.primary}0a` }}>
+          <IconBolt size={11} className="shrink-0" style={{ color: C.primary }} />
+          <span style={{ color: C.dark }}>{humanizeTrace(node.label)}</span>
+        </span>
       </div>
     );
   }
@@ -796,9 +800,10 @@ function MessageBubble({ side, sender, text, tool, at, fbNode, fb }: {
             </div>
           )}
           {tool && (
-            <div className="flex items-center gap-1.5 px-0.5 text-[11px]" style={{ color: C.dark }} title={toolDetail(tool)}>
-              <IconSearch size={10} /> {toolLabel(tool)}
-            </div>
+            <span className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]" title={toolDetail(tool)}
+              style={{ borderColor: `${C.primary}2e`, background: `${C.primary}0a` }}>
+              <IconBolt size={11} className="shrink-0" style={{ color: C.primary }} /> <span style={{ color: C.dark }}>{toolLabel(tool)}</span>
+            </span>
           )}
           <div className="flex items-center gap-2 px-0.5">
             {fbNode && fb && text && (
@@ -1574,6 +1579,13 @@ function toolLabel(name: string): string {
 }
 function toolDetail(name: string): string {
   return `The AI used a tool to ${toolLabel(name).toLowerCase()}.`;
+}
+// Make a tool-trace line presentable: replace raw ISO datetimes with a readable date/time.
+function humanizeTrace(s: string): string {
+  return (s || "").replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?/g, (m) => {
+    const d = new Date(m.endsWith("Z") ? m : `${m}Z`);
+    return Number.isFinite(d.getTime()) ? d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : m;
+  });
 }
 
 // §01 — buying stage. Map the raw stage code to the doc's funnel wording where recognizable.
