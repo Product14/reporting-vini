@@ -229,6 +229,10 @@ export interface ToolCall {
 export interface TranscriptTurn {
   role: "assistant" | "bot" | "agent" | "user" | "system" | "tool" | string;
   content?: string;
+  secondsFromStart?: number; // offset from call start, for timestamped transcript lines
+  time?: number;
+  endTime?: number;
+  duration?: number;
   // A `role:"tool"` turn carries its (often large, JSON) result here — never render this raw.
   message?: string;
   result?: unknown;

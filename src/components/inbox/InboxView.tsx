@@ -22,8 +22,10 @@ import {
   fetchInboxFeedback,
   postInboxFeedback,
   stopInboxEngagement,
+  fetchInboxTranscript,
   parseSmsText,
   parseCallTranscript,
+  type TranscriptTurn,
   type InboxAuth,
   type InboxCustomer,
   type LeadsPage,
@@ -109,6 +111,10 @@ const IconChevron = (p: IconProps) => <Svg {...p}><path d="m6 9 6 6 6-6" /></Svg
 const IconList = (p: IconProps) =><Svg {...p}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></Svg>;
 const IconCalendar = (p: IconProps) => <Svg {...p}><rect x="3" y="4.5" width="18" height="17" rx="2" /><path d="M3 9h18M8 2.5v4M16 2.5v4" /></Svg>;
 const IconBolt = (p: IconProps) => <Svg {...p}><path d="M13 2 4 14h7l-1 8 9-12h-7z" /></Svg>;
+const IconCallIn = (p: IconProps) => <Svg {...p}><path d="M17 7 7 17" /><path d="M16 17H7V8" /></Svg>;
+const IconCallOut = (p: IconProps) => <Svg {...p}><path d="M7 17 17 7" /><path d="M8 7h9v9" /></Svg>;
+const IconPlay = (p: IconProps) => <Svg {...p}><path d="M6 4l14 8-14 8z" /></Svg>;
+const IconFlag = (p: IconProps) => <Svg {...p}><path d="M4 21V4M4 4h13l-2 5 2 5H4" /></Svg>;
 const IconThumbUp = (p: IconProps) => <Svg {...p}><path d="M7 10v11H3V10zM7 10l5-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1.3 7A2 2 0 0 1 16.7 21H7" /></Svg>;
 const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 14l-5 7a2 2 0 0 1-2-2v-3H5a2 2 0 0 1-2-2.3l1.3-7A2 2 0 0 1 7.3 3H17" /></Svg>;
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
@@ -638,7 +644,7 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
           </div>
         ) : (
           <div className="mx-auto flex w-full max-w-[760px] flex-col gap-6">
-            {renderWithDividers(nodes, fbCtx)}
+            {renderWithDividers(nodes, fbCtx, auth, customer.customer_name || "")}
             <div ref={bottomRef} />
           </div>
         )}
@@ -724,7 +730,7 @@ interface FbCtx {
 }
 
 /* Insert TODAY/date dividers between nodes on day boundaries (§13). */
-function renderWithDividers(nodes: ThreadNode[], fb: FbCtx): React.ReactNode[] {
+function renderWithDividers(nodes: ThreadNode[], fb: FbCtx, auth: InboxAuth, customerName: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let lastDay = "";
   nodes.forEach((n, i) => {
@@ -734,18 +740,18 @@ function renderWithDividers(nodes: ThreadNode[], fb: FbCtx): React.ReactNode[] {
       out.push(<DayDivider key={`d${i}`} label={dl} />);
       lastDay = dl;
     }
-    out.push(<ThreadNodeView key={`n${i}`} node={n} fb={fb} />);
+    out.push(<ThreadNodeView key={`n${i}`} node={n} fb={fb} auth={auth} customerName={customerName} />);
   });
   return out;
 }
 
-function ThreadNodeView({ node, fb }: { node: ThreadNode; fb: FbCtx }) {
+function ThreadNodeView({ node, fb, auth, customerName }: { node: ThreadNode; fb: FbCtx; auth: InboxAuth; customerName: string }) {
   if (node.kind === "call") {
     // Place calls on the correct side, like messages: incoming (customer) left, outgoing (AI) right.
     const inbound = (node.rec.callData?.callType || "").toLowerCase().includes("inbound");
     return (
       <div className={`flex ${inbound ? "justify-start" : "justify-end"}`}>
-        <CallCard rec={node.rec} fb={fb} />
+        <CallCard rec={node.rec} fb={fb} auth={auth} customerName={customerName} />
       </div>
     );
   }
@@ -893,91 +899,105 @@ function Avatar({ kind, name }: { kind: "agent" | "customer"; name: string }) {
   );
 }
 
-/* §02 — a voice call entry, rendered like the production console: direction + status header, Call Title,
- * Agent, an INLINE recording player (always visible — the recordingUrl is a range-enabled S3 mp3), and
- * the transcript on demand. (conversations-v2 exposes no call `summary` field, so we show the transcript
- * in its place; a real summary would need an API/field the dev must add.) */
-function CallCard({ rec, fb }: { rec: ConvRecord; fb: FbCtx }) {
-  const [showTranscript, setShowTranscript] = useState(false);
+/* §02 — a voice call entry (Figma "Call types" 10015-275). Four variants by direction + outcome, each
+ * with a colored direction icon; connected calls show a play-pill that expands to the recording player
+ * + a timestamped transcript (fetched from the transcript endpoint) and a Report action. Missed /
+ * didn't-connect calls have no recording, so no player/expand. */
+function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx; auth: InboxAuth; customerName: string }) {
+  const [open, setOpen] = useState(false);
+  const [turns, setTurns] = useState<TranscriptTurn[] | null>(null);
   const cd = rec.callData || {};
-  const dur = fmtDuration(cd.callDuration);
-  const turns = parseCallTranscript(cd.transcript || "");
-  const recording = cd.recordingUrl || null;
   const inbound = (cd.callType || "").toLowerCase().includes("inbound");
-  const dirLabel = inbound ? "Incoming call" : "Outgoing call";
-  const statusOk = (rec.status || "").toLowerCase() === "completed";
-  const rating = fb.map[`${rec.conversationId}#0`]; // call-level feedback (channel "call", index 0)
+  const durSec = parseFloat(cd.callDuration || "0");
+  const recording = cd.recordingUrl || null;
+  const noAnswer = /voicemail|no[-_ ]?answer|missed|not[-_ ]?connect|failed|before[-_ ]?warm/i.test(cd.endedReason || "");
+  const connected = !!recording && durSec > 3 && !noAnswer;
+  const rating = fb.map[`${rec.conversationId}#0`];
+  const name = (rec.customerDetails?.name || customerName || "the customer").trim();
+  const custFirst = name.split(/\s+/)[0] || name;
+  const dur = fmtDuration(cd.callDuration);
+
+  // Only spoken turns in the transcript — drop tool-call/result turns (role "tool" or JSON content).
+  const spoken = (turns ?? []).filter((t) => {
+    const c = (t.content || "").trim();
+    if (!c || c.startsWith("{")) return false;
+    return ["bot", "assistant", "agent", "user"].includes((t.role || "").toLowerCase());
+  });
+  const variant = inbound ? (connected ? "inbound" : "missed") : connected ? "outbound" : "didnt";
+  const V = {
+    inbound: { title: `Inbound call from ${name}`, Icon: IconCallIn, bg: C.blueAccent, fg: "#2f7bff" },
+    outbound: { title: `Outbound call to ${name}`, Icon: IconCallOut, bg: "#e3ffea", fg: "#0a6029" },
+    missed: { title: `Missed call from ${name}`, Icon: IconCallIn, bg: "#fdecee", fg: C.red },
+    didnt: { title: `Call to ${name} didn't connect`, Icon: IconCallOut, bg: "#fdecee", fg: C.red },
+  }[variant];
+
+  // Fetch the timestamped transcript on first expand (falls back to the inline callData transcript).
+  useEffect(() => {
+    if (!open || turns !== null || !(rec.callId || rec.conversationId)) return;
+    let on = true;
+    fetchInboxTranscript(auth, rec.callId || rec.conversationId).then((t) => {
+      if (!on) return;
+      setTurns(t.length ? t : parseCallTranscript(cd.transcript || "").map((x) => ({ role: x.speaker === "AI" ? "bot" : "user", content: x.text } as TranscriptTurn)));
+    });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   return (
-    <div className="w-[85%] max-w-[440px]">
+    <div className="w-[90%] max-w-[560px]">
       <div className="overflow-hidden rounded-[14px] border bg-white" style={{ borderColor: C.border }}>
-        {/* header: direction + time + status */}
-        <div className="flex items-center justify-between gap-3 border-b px-4 py-2.5" style={{ borderColor: C.border }}>
-          <span className="flex items-center gap-2 text-[12px] font-semibold" style={{ color: C.dark }}>
-            <span className="flex size-6 items-center justify-center rounded-full" style={{ background: `${C.primary}14`, color: C.primary }}><IconPhone size={12} /></span>
-            {dirLabel}
-            <span className="font-normal" style={{ color: C.sub }}>· {fmtTime(rec.createdAt)}</span>
-          </span>
-          <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize"
-            style={statusOk ? { background: "#e3ffea", color: "#0a6029" } : { background: "#f1f5f9", color: "#64748b" }}>
-            {prettify(rec.status || "")}
-          </span>
+        <div className="flex items-center gap-3 px-3.5 py-3">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-full" style={{ background: V.bg, color: V.fg }}><V.Icon size={15} /></span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-semibold" style={{ color: C.dark }}>{V.title}</p>
+            {rec.callTitle && <p className="truncate text-[12px]" style={{ color: C.sub }}>{rec.callTitle}</p>}
+          </div>
+          {recording && (
+            <button onClick={() => setOpen((v) => !v)} className="flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors hover:bg-[#f7f4ff]"
+              style={{ borderColor: `${C.primary}44`, color: C.primary }}>
+              <IconPlay size={9} /> {dur || "Play"}
+            </button>
+          )}
+          <span className="shrink-0 text-[12px]" style={{ color: C.sub }}>{fmtTime(rec.createdAt)}</span>
+          {recording && (
+            <button onClick={() => setOpen((v) => !v)} className="shrink-0" title={open ? "Collapse" : "Expand"}>
+              <IconChevron size={14} className={open ? "rotate-180" : ""} style={{ color: C.sub }} />
+            </button>
+          )}
         </div>
-        <div className="flex flex-col gap-3 px-4 py-3">
-          {rec.callTitle && (
-            <Field label="Call Title"><span className="text-[12px] font-medium" style={{ color: C.dark }}>{rec.callTitle}</span></Field>
-          )}
-          {cd.agentName && (
-            <Field label="Agent"><span className="text-[12px]" style={{ color: C.dark }}>{cd.agentName}</span></Field>
-          )}
-          {recording ? (
-            <Field label="Call Recording">
-              <audio controls preload="metadata" src={recording} className="h-9 w-full max-w-[360px]">
-                <track kind="captions" />
-              </audio>
-            </Field>
-          ) : (
-            <Field label="Call Recording"><span className="text-[11px]" style={{ color: C.sub }}>No recording available{dur ? ` · ${dur}` : ""}</span></Field>
-          )}
-          {turns.length > 0 && (
-            <div>
-              <button onClick={() => setShowTranscript((v) => !v)} className="flex items-center gap-1 text-[11px] font-medium" style={{ color: C.primary }}>
-                {showTranscript ? "Hide transcript" : "View transcript"} <IconChevron size={12} className={showTranscript ? "rotate-180" : ""} />
+
+        {open && recording && (
+          <div className="border-t px-4 py-3" style={{ borderColor: C.border }}>
+            <audio controls preload="metadata" src={recording} className="h-9 w-full"><track kind="captions" /></audio>
+            <div className="mt-3 flex items-center justify-between border-b" style={{ borderColor: C.border }}>
+              <span className="border-b-2 px-1 pb-1.5 text-[12px] font-semibold" style={{ borderColor: C.primary, color: C.primary }}>Transcript</span>
+              <button onClick={() => fb.openReport(rec.conversationId, 0, rec.callTitle || "Call", "call")}
+                className="flex items-center gap-1 pb-1.5 text-[11px] font-medium" style={{ color: rating === "down" ? C.red : C.sub }} title="Report this call">
+                <IconFlag size={11} /> {rating === "down" ? "Reported" : "Report"}
               </button>
-              {showTranscript && (
-                <div className="mt-2 flex flex-col gap-2 rounded-[10px] border p-3" style={{ borderColor: C.border, background: C.bg }}>
-                  {turns.map((t, i) => (
-                    <div key={i} className={`flex ${t.speaker === "AI" ? "justify-end" : "justify-start"}`}>
-                      <div className="max-w-[80%] rounded-[10px] px-3 py-1.5 text-[12px] leading-[17px]"
-                        style={t.speaker === "AI" ? { background: C.blueAccent, color: C.dark } : { border: `1px solid ${C.border}`, background: "#fff", color: C.dark }}>
-                        {t.text}
-                      </div>
+            </div>
+            <div className="mt-2 flex flex-col gap-1">
+              {turns === null ? (
+                <p className="text-[11px]" style={{ color: C.sub }}>Loading transcript…</p>
+              ) : spoken.length === 0 ? (
+                <p className="text-[11px]" style={{ color: C.sub }}>No transcript available.</p>
+              ) : (
+                spoken.map((t, i) => {
+                  const isAI = ["assistant", "bot", "agent"].includes((t.role || "").toLowerCase());
+                  return (
+                    <div key={i} className="flex gap-2.5 rounded-[8px] px-2 py-1" style={isAI ? undefined : { background: "#fff9e6" }}>
+                      <span className="shrink-0 pt-0.5 text-[10px] tabular-nums" style={{ color: C.sub }}>{fmtSecs(t.secondsFromStart)}</span>
+                      <p className="text-[12px] leading-[17px]" style={{ color: C.dark }}>
+                        <span className="font-semibold" style={{ color: isAI ? C.primary : "#0a6029" }}>{isAI ? cd.agentName || "Vini" : custFirst}:</span> {t.content}
+                      </p>
                     </div>
-                  ))}
-                </div>
+                  );
+                })
               )}
             </div>
-          )}
-          {/* call-level feedback / report (channel "call") */}
-          <div className="flex items-center gap-3 border-t pt-2.5" style={{ borderColor: C.border }}>
-            <span className="text-[11px]" style={{ color: C.sub }}>Was this call handled well?</span>
-            <button onClick={() => fb.vote(rec.conversationId, 0, rec.callTitle || "Call", "up", "call")}
-              title="Good call" style={{ color: rating === "up" ? C.primary : C.sub }}><IconThumbUp size={13} /></button>
-            <button onClick={() => fb.openReport(rec.conversationId, 0, rec.callTitle || "Call", "call")}
-              title="Report this call" style={{ color: rating === "down" ? C.red : C.sub }}><IconThumbDown size={13} /></button>
           </div>
-        </div>
+        )}
       </div>
-    </div>
-  );
-}
-
-// A labeled row inside the call card (label left, value right) — mirrors the console's Call Title / Agent rows.
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start gap-4">
-      <span className="w-[100px] shrink-0 pt-0.5 text-[11px] font-medium" style={{ color: C.sub }}>{label}</span>
-      <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
 }
@@ -1720,6 +1740,12 @@ function dirLabel(d: "in" | "out" | "unknown"): string {
 function fmtDuration(sec?: string): string {
   const n = Math.round(parseFloat(sec || "0"));
   if (!n) return "";
+  return `${Math.floor(n / 60)}:${(n % 60).toString().padStart(2, "0")}`;
+}
+// mm:ss from a numeric seconds offset (transcript line timestamps).
+function fmtSecs(s?: number): string {
+  if (s == null || !Number.isFinite(s)) return "";
+  const n = Math.floor(s);
   return `${Math.floor(n / 60)}:${(n % 60).toString().padStart(2, "0")}`;
 }
 
