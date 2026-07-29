@@ -616,6 +616,16 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
         </div>
       </div>
 
+      {/* sticky summary — stays pinned below the header while the conversation scrolls */}
+      {summary && (
+        <div className="shrink-0 border-b px-5 py-2.5" style={{ borderColor: `${C.primary}33`, background: C.primaryAccent }}>
+          <div className="mx-auto w-full max-w-[760px]">
+            <p className="mb-0.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.primary }}>✦ Summary</p>
+            <p className="line-clamp-2 text-[12px] font-medium leading-[17px]" style={{ color: C.dark }}>{summary}</p>
+          </div>
+        </div>
+      )}
+
       {/* body */}
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         {conv === null ? (
@@ -628,12 +638,6 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
           </div>
         ) : (
           <div className="mx-auto flex w-full max-w-[760px] flex-col gap-6">
-            {summary && (
-              <div className="rounded-[15px] border px-5 py-3.5" style={{ borderColor: `${C.primary}33`, background: C.primaryAccent }}>
-                <p className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.primary }}>✦ Summary</p>
-                <p className="text-[12px] font-medium leading-[18px]" style={{ color: C.dark }}>{summary}</p>
-              </div>
-            )}
             {renderWithDividers(nodes, fbCtx)}
             <div ref={bottomRef} />
           </div>
