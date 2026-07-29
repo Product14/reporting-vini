@@ -65,7 +65,7 @@ export async function spyneServiceSend<T>(
   path: string,
   token: string | null,
   env: string | null,
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PATCH" | "DELETE" | "PUT",
   body: unknown,
 ): Promise<ProxyResult<T>> {
   const auth = resolveToken(token);

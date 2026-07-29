@@ -163,6 +163,10 @@ export interface AppointmentItem {
   [k: string]: unknown;
 }
 export interface ActionItem {
+  _id?: string;
+  id?: string;
+  action_item_id?: string;
+  actionItemId?: string;
   intent?: string;
   description?: string;
   summary?: string | null;
@@ -381,6 +385,63 @@ export async function postInboxFeedback(
     return r.ok;
   } catch {
     return false;
+  }
+}
+
+/* Resolve (mark complete) or re-open an action item. */
+export async function resolveInboxActionItem(a: InboxAuth, actionItemId: string, isCompleted = true): Promise<boolean> {
+  if (!a.teamId || !actionItemId) return false;
+  const p = new URLSearchParams({ team_id: a.teamId });
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/action-item?${p}`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "content-type": "application/json", ...(a.spyneToken ? { Authorization: `Bearer ${a.spyneToken}` } : {}) },
+      body: JSON.stringify({ actionItemId, isCompleted }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/* Call intelligence / AI review (GET /conversation/calls/:callUid). */
+export interface CallAnalysis {
+  outcome?: string | null;
+  primaryOutcome?: string | null;
+  customerIntent?: string | null;
+  primaryIntent?: string | null;
+  queryResolved?: boolean | null;
+  qualified?: boolean | null;
+  summary?: string | null;
+  qualityScorePct?: number | null;
+  qualityScore?: number | null;
+  qualityGrade?: string | null;
+  sentimentScore?: number | null;
+  customerFrustrated?: boolean | null;
+  appointmentScheduled?: boolean | null;
+  [k: string]: unknown;
+}
+export interface CallDetail {
+  callUid?: string;
+  direction?: string;
+  status?: string;
+  durationMs?: number;
+  recordingUrl?: string | null;
+  analysis?: CallAnalysis;
+}
+export async function fetchInboxCall(a: InboxAuth, callId: string): Promise<CallDetail | null> {
+  if (!a.teamId || !callId) return null;
+  const p = new URLSearchParams({ team_id: a.teamId, callId });
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/call?${p}`, { cache: "no-store", headers: authHeaders(a) });
+    const j = (await r.json().catch(() => null)) as { data?: CallDetail } | CallDetail | null;
+    if (!r.ok || !j) return null;
+    return ((j as { data?: CallDetail }).data ?? (j as CallDetail)) || null;
+  } catch {
+    return null;
   }
 }
 

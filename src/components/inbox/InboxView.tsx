@@ -23,9 +23,12 @@ import {
   postInboxFeedback,
   stopInboxEngagement,
   fetchInboxTranscript,
+  fetchInboxCall,
+  resolveInboxActionItem,
   parseSmsText,
   parseCallTranscript,
   type TranscriptTurn,
+  type CallAnalysis,
   type InboxAuth,
   type InboxCustomer,
   type LeadsPage,
@@ -33,6 +36,7 @@ import {
   type ConvRecord,
   type LeadJourneyEvent,
   type AppointmentItem,
+  type ActionItem,
   type Persona,
 } from "./api";
 
@@ -118,6 +122,7 @@ const IconFlag = (p: IconProps) => <Svg {...p}><path d="M4 21V4M4 4h13l-2 5 2 5H
 const IconThumbUp = (p: IconProps) => <Svg {...p}><path d="M7 10v11H3V10zM7 10l5-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1.3 7A2 2 0 0 1 16.7 21H7" /></Svg>;
 const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 14l-5 7a2 2 0 0 1-2-2v-3H5a2 2 0 0 1-2-2.3l1.3-7A2 2 0 0 1 7.3 3H17" /></Svg>;
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
+const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Root
@@ -433,7 +438,7 @@ type ThreadNode =
   | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
-  | { t: number; kind: "event"; emoji: string; title: string; detail: string } // lead-journey milestone, interleaved in the chat
+  | { t: number; kind: "event"; emoji: string; title: string; detail: string; subtle?: boolean } // lead-journey milestone, interleaved in the chat
   | { t: number; kind: "call"; rec: ConvRecord };
 
 const EVENT_GRADIENT =
@@ -566,7 +571,10 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
     // Lead-journey milestones interleaved chronologically in the chat (also shown in the right panel).
     for (const ev of conv.leadJourney ?? []) {
       const m = journeyMeta(ev);
-      out.push({ t: +new Date(ev.timestamp) || 0, kind: "event", emoji: m.emoji, title: m.title, detail: m.detail });
+      // Per-touch "side tasks" (campaign/follow-up sends) are routine — render them subtly so the
+      // milestones (lead created, speed-to-lead, appointment) stay the visual anchors of the journey.
+      const subtle = /task/i.test(ev.eventType || "") || /task$/i.test(m.title);
+      out.push({ t: +new Date(ev.timestamp) || 0, kind: "event", emoji: m.emoji, title: m.title, detail: m.detail, subtle });
     }
     return out.sort((a, b) => a.t - b.t);
   }, [conv, dir, aiAgentName, custFirst]);
@@ -768,6 +776,19 @@ function ThreadNodeView({ node, fb, auth, customerName }: { node: ThreadNode; fb
     );
   }
   if (node.kind === "event") {
+    // Subtle "side task" (routine campaign/follow-up touch) — a quiet gray line, no gradient pill.
+    if (node.subtle) {
+      return (
+        <div className="flex justify-center">
+          <span className="flex items-center gap-1.5 px-2 py-0.5 text-[11px]" style={{ color: C.sub }}>
+            <span className="opacity-60">{node.emoji}</span>
+            <span className="font-medium">{node.title}</span>
+            {node.detail && <span className="opacity-80">· {node.detail}</span>}
+            <span className="opacity-70">· {fmtTime(new Date(node.t).toISOString())}</span>
+          </span>
+        </div>
+      );
+    }
     // Lead-journey milestone pill, interleaved in the chat.
     return (
       <div className="flex justify-center">
@@ -906,6 +927,8 @@ function Avatar({ kind, name }: { kind: "agent" | "customer"; name: string }) {
 function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx; auth: InboxAuth; customerName: string }) {
   const [open, setOpen] = useState(false);
   const [turns, setTurns] = useState<TranscriptTurn[] | null>(null);
+  const [tab, setTab] = useState<"transcript" | "review">("transcript");
+  const [detail, setDetail] = useState<CallAnalysis | null | undefined>(undefined); // undefined=unfetched, null=none
   const cd = rec.callData || {};
   const inbound = (cd.callType || "").toLowerCase().includes("inbound");
   const durSec = parseFloat(cd.callDuration || "0");
@@ -939,6 +962,10 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
       if (!on) return;
       setTurns(t.length ? t : parseCallTranscript(cd.transcript || "").map((x) => ({ role: x.speaker === "AI" ? "bot" : "user", content: x.text } as TranscriptTurn)));
     });
+    // Call intelligence (AI Review): outcome, summary, query resolution, AI score, sentiment, intent.
+    if (rec.callId) fetchInboxCall(auth, rec.callId).then((d) => { if (on) setDetail(d?.analysis ?? null); });
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- no callId ⇒ no analysis to fetch
+    else setDetail(null);
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -970,34 +997,100 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
           <div className="border-t px-4 py-3" style={{ borderColor: C.border }}>
             <audio controls preload="metadata" src={recording} className="h-9 w-full"><track kind="captions" /></audio>
             <div className="mt-3 flex items-center justify-between border-b" style={{ borderColor: C.border }}>
-              <span className="border-b-2 px-1 pb-1.5 text-[12px] font-semibold" style={{ borderColor: C.primary, color: C.primary }}>Transcript</span>
+              <div className="flex items-center gap-4">
+                {(["transcript", "review"] as const).map((t) => (
+                  <button key={t} onClick={() => setTab(t)}
+                    className="px-1 pb-1.5 text-[12px] font-semibold transition-colors"
+                    style={tab === t ? { borderBottom: `2px solid ${C.primary}`, color: C.primary } : { color: C.sub }}>
+                    {t === "transcript" ? "Transcript" : "AI Review"}
+                  </button>
+                ))}
+              </div>
               <button onClick={() => fb.openReport(rec.conversationId, 0, rec.callTitle || "Call", "call")}
                 className="flex items-center gap-1 pb-1.5 text-[11px] font-medium" style={{ color: rating === "down" ? C.red : C.sub }} title="Report this call">
                 <IconFlag size={11} /> {rating === "down" ? "Reported" : "Report"}
               </button>
             </div>
-            <div className="mt-2 flex flex-col gap-1">
-              {turns === null ? (
-                <p className="text-[11px]" style={{ color: C.sub }}>Loading transcript…</p>
-              ) : spoken.length === 0 ? (
-                <p className="text-[11px]" style={{ color: C.sub }}>No transcript available.</p>
-              ) : (
-                spoken.map((t, i) => {
-                  const isAI = ["assistant", "bot", "agent"].includes((t.role || "").toLowerCase());
-                  return (
-                    <div key={i} className="flex gap-2.5 rounded-[8px] px-2 py-1" style={isAI ? undefined : { background: "#fff9e6" }}>
-                      <span className="shrink-0 pt-0.5 text-[10px] tabular-nums" style={{ color: C.sub }}>{fmtSecs(t.secondsFromStart)}</span>
-                      <p className="text-[12px] leading-[17px]" style={{ color: C.dark }}>
-                        <span className="font-semibold" style={{ color: isAI ? C.primary : "#0a6029" }}>{isAI ? cd.agentName || "Vini" : custFirst}:</span> {t.content}
-                      </p>
-                    </div>
-                  );
-                })
-              )}
-            </div>
+            {tab === "transcript" ? (
+              <div className="mt-2 flex flex-col gap-1">
+                {turns === null ? (
+                  <p className="text-[11px]" style={{ color: C.sub }}>Loading transcript…</p>
+                ) : spoken.length === 0 ? (
+                  <p className="text-[11px]" style={{ color: C.sub }}>No transcript available.</p>
+                ) : (
+                  spoken.map((t, i) => {
+                    const isAI = ["assistant", "bot", "agent"].includes((t.role || "").toLowerCase());
+                    return (
+                      <div key={i} className="flex gap-2.5 rounded-[8px] px-2 py-1" style={isAI ? undefined : { background: "#fff9e6" }}>
+                        <span className="shrink-0 pt-0.5 text-[10px] tabular-nums" style={{ color: C.sub }}>{fmtSecs(t.secondsFromStart)}</span>
+                        <p className="text-[12px] leading-[17px]" style={{ color: C.dark }}>
+                          <span className="font-semibold" style={{ color: isAI ? C.primary : "#0a6029" }}>{isAI ? cd.agentName || "Vini" : custFirst}:</span> {t.content}
+                        </p>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            ) : (
+              <CallReview detail={detail} />
+            )}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// AI Review — call intelligence from GET /conversation/calls/:callUid (analysis). Every field is
+// optional on UAT, so each renders only when present and the panel degrades to "not available yet".
+function CallReview({ detail }: { detail: CallAnalysis | null | undefined }) {
+  if (detail === undefined) return <p className="mt-3 text-[11px]" style={{ color: C.sub }}>Loading AI review…</p>;
+  const a = detail || {};
+  const outcome = a.primaryOutcome || a.outcome || null;
+  const intent = a.primaryIntent || a.customerIntent || null;
+  const summary = a.summary || null;
+  const scorePct = typeof a.qualityScorePct === "number" ? a.qualityScorePct
+    : typeof a.qualityScore === "number" ? Math.round(a.qualityScore * (a.qualityScore <= 1 ? 100 : 1)) : null;
+  const yesNo = (v: boolean | null | undefined) => (v === true ? "Yes" : v === false ? "No" : null);
+  const sentiment = typeof a.sentimentScore === "number"
+    ? a.sentimentScore >= 0.6 ? "Positive" : a.sentimentScore <= 0.4 ? "Negative" : "Neutral"
+    : a.customerFrustrated === true ? "Frustrated" : null;
+
+  const stats: { label: string; value: string; tone?: "good" | "bad" }[] = [];
+  if (scorePct != null) stats.push({ label: "AI score", value: `${scorePct}%${a.qualityGrade ? ` · ${a.qualityGrade}` : ""}`, tone: scorePct >= 70 ? "good" : scorePct < 50 ? "bad" : undefined });
+  const qr = yesNo(a.queryResolved); if (qr) stats.push({ label: "Query resolved", value: qr, tone: a.queryResolved ? "good" : "bad" });
+  const ql = yesNo(a.qualified); if (ql) stats.push({ label: "Qualified", value: ql, tone: a.qualified ? "good" : undefined });
+  const ap = yesNo(a.appointmentScheduled); if (ap) stats.push({ label: "Appointment", value: ap, tone: a.appointmentScheduled ? "good" : undefined });
+  if (sentiment) stats.push({ label: "Sentiment", value: sentiment, tone: sentiment === "Positive" ? "good" : sentiment === "Negative" || sentiment === "Frustrated" ? "bad" : undefined });
+
+  const empty = !outcome && !intent && !summary && stats.length === 0;
+  if (empty) return <p className="mt-3 text-[11px]" style={{ color: C.sub }}>AI review isn&apos;t available for this call yet.</p>;
+
+  const toneColor = (t?: "good" | "bad") => (t === "good" ? C.green : t === "bad" ? C.red : C.dark);
+  return (
+    <div className="mt-3 flex flex-col gap-3">
+      {(outcome || intent) && (
+        <div className="flex flex-wrap gap-2">
+          {intent && <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: C.primaryAccent, color: C.primary }}>Intent · {prettify(intent)}</span>}
+          {outcome && <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: C.blueAccent, color: "#2f7bff" }}>Outcome · {prettify(outcome)}</span>}
+        </div>
+      )}
+      {stats.length > 0 && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {stats.map((s) => (
+            <div key={s.label} className="rounded-[10px] border px-2.5 py-2" style={{ borderColor: C.border, background: "#fafafa" }}>
+              <p className="text-[10px] uppercase tracking-wide" style={{ color: C.sub }}>{s.label}</p>
+              <p className="mt-0.5 text-[13px] font-semibold" style={{ color: toneColor(s.tone) }}>{s.value}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {summary && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wide" style={{ color: C.sub }}>Summary</p>
+          <p className="mt-1 text-[12px] leading-[18px]" style={{ color: C.dark }}>{summary}</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -1101,6 +1194,40 @@ function LeadTimeline({ journey, nextScheduled }: { journey: LeadJourneyEvent[];
   );
 }
 
+// Normalize a raw nextScheduledTasks[0] into the shape LeadTimeline/NextScheduledChip render.
+// Field names vary across providers, so probe the common ones (scheduledAt/scheduled_at/nextRunAt/…).
+function normalizeNextScheduled(raw: unknown): { timing?: string; detail?: string; scheduledAt?: string } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const str = (...keys: string[]) => {
+    for (const k of keys) { const v = r[k]; if (typeof v === "string" && v.trim()) return v.trim(); }
+    return undefined;
+  };
+  const scheduledAt = str("scheduledAt", "scheduled_at", "nextRunAt", "runAt", "scheduledFor", "scheduled_for", "dueAt", "due_date", "timestamp");
+  const timing = str("timing", "label", "when");
+  const channel = str("channel", "medium");
+  const kind = str("taskType", "task_type", "type", "source", "action");
+  const detail = [kind && prettify(kind), channel && prettify(channel)].filter(Boolean).join(" · ") || str("detail", "description", "summary");
+  if (!scheduledAt && !timing && !detail) return undefined;
+  return { timing, detail: detail || undefined, scheduledAt };
+}
+
+// Compact "next scheduled touch" chip surfaced at the top of the right panel (also in the journey box).
+function NextScheduledChip({ ns }: { ns: { timing?: string; detail?: string; scheduledAt?: string } }) {
+  const when = ns.timing || (ns.scheduledAt ? fmtListStamp(ns.scheduledAt) : "");
+  if (!when && !ns.detail) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-xl border border-dashed px-3.5 py-2.5" style={{ borderColor: `${C.primary}66`, background: C.primaryAccent }}>
+      <span className="mt-px shrink-0" style={{ color: C.primary }}><IconCalendar size={13} /></span>
+      <div className="min-w-0">
+        <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.primary }}>Next scheduled touch</p>
+        {when && <p className="mt-0.5 text-[12px] font-semibold" style={{ color: C.dark }}>{when}</p>}
+        {ns.detail && <p className="text-[11px]" style={{ color: C.sub }}>{ns.detail}</p>}
+      </div>
+    </div>
+  );
+}
+
 function TempBadge({ temp }: { temp: string }) {
   const t = temp.toLowerCase();
   const map: Record<string, { bg: string; fg: string }> = {
@@ -1131,6 +1258,77 @@ function ThreadSkeleton() {
  * Right panel — lead status pills, engagement, journey timeline, appointments,
  * action items (integration guide §7C-E). Milestones live here, NOT in the chat.
  * ════════════════════════════════════════════════════════════════════════════ */
+// The upstream id under any of the shapes Spyne returns; "" means we can't resolve it (hide the button).
+function actionItemId(a: ActionItem): string {
+  return String(a.actionItemId || a._id || a.id || a.action_item_id || "");
+}
+
+// One action item with a Resolve (✓) control — PUT /conversation/action-items/mark-completed. On success
+// it removes itself optimistically. `compact` is the tighter drawer styling.
+function ActionItemRow({ a, auth, compact }: { a: ActionItem; auth: InboxAuth; compact?: boolean }) {
+  const id = actionItemId(a);
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (done) return null;
+  async function resolve() {
+    if (!id || busy) return;
+    setBusy(true);
+    const ok = await resolveInboxActionItem(auth, id, true);
+    setBusy(false);
+    if (ok) setDone(true);
+    else if (typeof window !== "undefined") window.alert("Couldn't resolve this action item — please try again.");
+  }
+  return (
+    <div className={`rounded-xl border ${compact ? "p-2.5" : "p-3"}`} style={{ borderColor: C.border }}>
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[12px] font-medium" style={{ color: C.dark }}>{a.description || prettify(a.intent || "Follow up")}</p>
+        {a.priority && <span className="shrink-0 text-[9px] font-bold uppercase" style={{ color: a.priority === "HIGH" ? C.red : C.sub }}>{a.priority}</span>}
+      </div>
+      {a.due_date && <p className="mt-0.5 text-[11px]" style={{ color: C.sub }}>Due {fmtTime(a.due_date)}</p>}
+      {id && (
+        <button onClick={resolve} disabled={busy}
+          className="mt-2 flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors enabled:hover:bg-[#f0fdf4] disabled:opacity-50"
+          style={{ borderColor: `${C.green}55`, color: C.green }}>
+          <IconCheck size={11} /> {busy ? "Resolving…" : "Resolve"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Drawer variant of an action item (due badge + assignee) with the same Resolve control.
+function DrawerActionItemRow({ a, auth }: { a: ActionItem; auth: InboxAuth }) {
+  const id = actionItemId(a);
+  const due = dueLabel(a.due_date);
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (done) return null;
+  async function resolve() {
+    if (!id || busy) return;
+    setBusy(true);
+    const ok = await resolveInboxActionItem(auth, id, true);
+    setBusy(false);
+    if (ok) setDone(true);
+    else if (typeof window !== "undefined") window.alert("Couldn't resolve this action item — please try again.");
+  }
+  return (
+    <div className="rounded-[10px] border px-4 py-3" style={{ borderColor: C.border }}>
+      <p className="text-[12px] font-semibold capitalize leading-[18px]" style={{ color: C.dark }}>{a.description || prettify(a.intent || "Follow up")}</p>
+      <div className="mt-3 flex items-center justify-between">
+        {due.text ? <span className="rounded-[5px] px-3 py-0.5 text-[12px] font-medium" style={due.style}>{due.text}</span> : <span />}
+        <Assignee who={String(a.assigned_to ?? "")} />
+      </div>
+      {id && (
+        <button onClick={resolve} disabled={busy}
+          className="mt-3 flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors enabled:hover:bg-[#f0fdf4] disabled:opacity-50"
+          style={{ borderColor: `${C.green}55`, color: C.green }}>
+          <IconCheck size={11} /> {busy ? "Resolving…" : "Mark resolved"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: InboxCustomer; onExpand: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   const [persona, setPersona] = useState<Persona | null>(null);
@@ -1150,6 +1348,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   const lead = conv?.leads?.[0];
   const appts = conv?.nextAppointments ?? [];
   const actions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed);
+  const nextSched = normalizeNextScheduled(conv?.nextScheduledTasks?.[0]);
   const stopped = stoppedLocal ?? !!lead?.stopAiEngagement;
 
   // persona-sourced Intent + AI Insights (same fields the modal shows)
@@ -1205,6 +1404,8 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
             </span>
           </button>
 
+          {nextSched && <NextScheduledChip ns={nextSched} />}
+
           {appts.length > 0 && (
             <RightSection title="Next appointments">
               {appts.map((a, i) => {
@@ -1228,13 +1429,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
           {actions.length > 0 && (
             <RightSection title={`Action items (${actions.length})`}>
               {actions.slice(0, 8).map((a, i) => (
-                <div key={i} className="rounded-xl border p-3" style={{ borderColor: C.border }}>
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="text-[12px] font-medium" style={{ color: C.dark }}>{a.description || prettify(a.intent || "Follow up")}</p>
-                    {a.priority && <span className="shrink-0 text-[9px] font-bold uppercase" style={{ color: a.priority === "HIGH" ? C.red : C.sub }}>{a.priority}</span>}
-                  </div>
-                  {a.due_date && <p className="mt-0.5 text-[11px]" style={{ color: C.sub }}>Due {fmtTime(a.due_date)}</p>}
-                </div>
+                <ActionItemRow key={actionItemId(a) || i} a={a} auth={auth} />
               ))}
             </RightSection>
           )}
@@ -1269,7 +1464,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
           )}
 
           <RightSection title="Lead journey">
-            <LeadTimeline journey={conv?.leadJourney ?? []} nextScheduled={conv?.nextScheduledTasks?.[0] as { timing?: string; detail?: string; scheduledAt?: string } | undefined} />
+            <LeadTimeline journey={conv?.leadJourney ?? []} nextScheduled={normalizeNextScheduled(conv?.nextScheduledTasks?.[0])} />
           </RightSection>
         </div>
       )}
@@ -1407,23 +1602,14 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
                 <div className="mt-3 flex flex-col gap-2.5">
                   {openActions.length === 0 ? (
                     <p className="text-[12px]" style={{ color: C.sub }}>No open action items.</p>
-                  ) : openActions.map((a, i) => {
-                    const due = dueLabel(a.due_date);
-                    return (
-                      <div key={i} className="rounded-[10px] border px-4 py-3" style={{ borderColor: C.border }}>
-                        <p className="text-[12px] font-semibold capitalize leading-[18px]" style={{ color: C.dark }}>{a.description || prettify(a.intent || "Follow up")}</p>
-                        <div className="mt-3 flex items-center justify-between">
-                          {due.text ? <span className="rounded-[5px] px-3 py-0.5 text-[12px] font-medium" style={due.style}>{due.text}</span> : <span />}
-                          <Assignee who={String(a.assigned_to ?? "")} />
-                        </div>
-                      </div>
-                    );
-                  })}
+                  ) : openActions.map((a, i) => (
+                    <DrawerActionItemRow key={actionItemId(a) || i} a={a} auth={auth} />
+                  ))}
                 </div>
               </div>
             </div>
           ) : tab === "journey" ? (
-            <LeadTimeline journey={conv?.leadJourney ?? []} nextScheduled={conv?.nextScheduledTasks?.[0] as { timing?: string; detail?: string; scheduledAt?: string } | undefined} />
+            <LeadTimeline journey={conv?.leadJourney ?? []} nextScheduled={normalizeNextScheduled(conv?.nextScheduledTasks?.[0])} />
           ) : tab === "intent" ? (
             <div className="flex flex-col gap-3">
               {stage && <DetailCard title="Buying stage"><p className="text-[13px] font-medium" style={{ color: C.dark }}>{stageLabel(String(stage))}</p></DetailCard>}
