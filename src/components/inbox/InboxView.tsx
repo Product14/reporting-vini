@@ -108,6 +108,8 @@ const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><
 const IconChevron = (p: IconProps) => <Svg {...p}><path d="m6 9 6 6 6-6" /></Svg>;
 const IconList = (p: IconProps) =><Svg {...p}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></Svg>;
 const IconCalendar = (p: IconProps) => <Svg {...p}><rect x="3" y="4.5" width="18" height="17" rx="2" /><path d="M3 9h18M8 2.5v4M16 2.5v4" /></Svg>;
+const IconThumbUp = (p: IconProps) => <Svg {...p}><path d="M7 10v11H3V10zM7 10l5-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1.3 7A2 2 0 0 1 16.7 21H7" /></Svg>;
+const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 14l-5 7a2 2 0 0 1-2-2v-3H5a2 2 0 0 1-2-2.3l1.3-7A2 2 0 0 1 7.3 3H17" /></Svg>;
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -421,8 +423,9 @@ function ListSkeleton() {
  * Thread pane
  * ════════════════════════════════════════════════════════════════════════════ */
 type ThreadNode =
-  | { t: number; kind: "msg"; side: "in" | "out"; text: string; tool?: string; fb?: { conversationId: string; messageIndex: number } }
+  | { t: number; kind: "msg"; side: "in" | "out"; text: string; tool?: string; sender: string; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "trace"; label: string }
+  | { t: number; kind: "created"; emoji: string; title: string; detail: string }
   | { t: number; kind: "call"; rec: ConvRecord };
 
 function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; customer: InboxCustomer; onViewDetails: () => void }) {
@@ -489,6 +492,13 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
     return c;
   }, [conv]);
 
+  // The AI agent's display name (from any call's agentName; else the rooftop's AI, "Vini").
+  const aiAgentName = useMemo(
+    () => conv?.conversations.map((c) => c.callData?.agentName).find((n) => n && n.trim()) || "Vini",
+    [conv],
+  );
+  const custFirst = (customer.customer_name || "Customer").trim().split(/\s+/)[0];
+
   // §13 — one chronological, day-grouped stream: every SMS bubble + call + journey milestone interleaved.
   const nodes = useMemo<ThreadNode[]>(() => {
     if (!conv) return [];
@@ -513,6 +523,7 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
           const side = m.role === "user" ? "in" : "out";
           out.push({
             t, kind: "msg", side, text: parsed.text, tool: tool || undefined,
+            sender: side === "out" ? aiAgentName : custFirst,
             // Feedback attaches to AI messages only, keyed by conversation + message index (§03).
             fb: side === "out" ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
           });
@@ -521,9 +532,18 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
         out.push({ t: base, kind: "call", rec });
       }
     }
+    // Inline "created" events in the chat: appointment booked + action item created (at their createdAt).
+    for (const a of conv.nextAppointments ?? []) {
+      const t = +new Date((a.createdAt as string) || a.meeting_start_time || "") || 0;
+      if (t) out.push({ t, kind: "created", emoji: "🗓", title: "Appointment created", detail: apptLabel(a) });
+    }
+    for (const ai of conv.nextActionItems ?? []) {
+      const t = +new Date((ai.createdAt as string) || "") || 0;
+      if (t) out.push({ t, kind: "created", emoji: "⚑", title: "Action item created", detail: ai.description || prettify(ai.intent || "") });
+    }
     // Journey milestones are NOT interleaved here — they render in the right-panel timeline (guide §7C).
     return out.sort((a, b) => a.t - b.t);
-  }, [conv, dir]);
+  }, [conv, dir, aiAgentName, custFirst]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
@@ -714,7 +734,18 @@ function ThreadNodeView({ node, fb }: { node: ThreadNode; fb: FbCtx }) {
       </div>
     );
   }
-  return <MessageBubble side={node.side} text={node.text} tool={node.tool} at={new Date(node.t).toISOString()} fbNode={node.fb} fb={fb} />;
+  if (node.kind === "created") {
+    // Inline system event — appointment / action item created.
+    return (
+      <div className="flex justify-center">
+        <span className="flex items-center gap-1.5 rounded-full border px-3.5 py-1 text-[11px]" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
+          <span>{node.emoji}</span><span className="font-semibold">{node.title}</span>
+          {node.detail && <span style={{ color: C.sub }}>· {node.detail}</span>}
+        </span>
+      </div>
+    );
+  }
+  return <MessageBubble side={node.side} sender={node.sender} text={node.text} tool={node.tool} at={new Date(node.t).toISOString()} fbNode={node.fb} fb={fb} />;
 }
 
 function DayDivider({ label }: { label: string }) {
@@ -729,14 +760,15 @@ function DayDivider({ label }: { label: string }) {
 
 /* §02 — one SMS entry. AI (out) = right/blue; customer (in) = left/white. §03 tool-call trace shows a
  * plain-language label under the AI bubble; AI messages carry a thumbs up/down feedback control. */
-function MessageBubble({ side, text, tool, at, fbNode, fb }: {
-  side: "in" | "out"; text: string; tool?: string; at: string;
+function MessageBubble({ side, sender, text, tool, at, fbNode, fb }: {
+  side: "in" | "out"; sender: string; text: string; tool?: string; at: string;
   fbNode?: { conversationId: string; messageIndex: number }; fb?: FbCtx;
 }) {
+  const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)}</span>;
   if (side === "out") {
     const rating = fbNode && fb ? fb.map[`${fbNode.conversationId}#${fbNode.messageIndex}`] : undefined;
     return (
-      <div className="group flex justify-end gap-1.5">
+      <div className="group flex justify-end gap-2">
         <div className="flex max-w-[70%] flex-col items-end gap-1.5">
           {text && (
             <div className="rounded-[15px] rounded-br-none px-5 py-3.5 text-[12px] leading-[18px]" style={{ background: C.blueAccent, color: C.dark }}>
@@ -750,30 +782,46 @@ function MessageBubble({ side, text, tool, at, fbNode, fb }: {
           )}
           <div className="flex items-center gap-2 px-0.5">
             {fbNode && fb && text && (
-              <span className={`flex items-center gap-1.5 transition-opacity ${rating ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
+              <span className={`flex items-center gap-2 transition-opacity ${rating ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
                 <button onClick={() => fb.vote(fbNode.conversationId, fbNode.messageIndex, text, "up")}
-                  title="Good reply" className="text-[12px] leading-none" style={{ opacity: rating === "up" ? 1 : 0.5 }}>👍</button>
+                  title="Good reply" style={{ color: rating === "up" ? C.primary : C.sub }}><IconThumbUp size={13} /></button>
                 <button onClick={() => fb.openReport(fbNode.conversationId, fbNode.messageIndex, text)}
-                  title="Report this message" className="text-[12px] leading-none" style={{ opacity: rating === "down" ? 1 : 0.5 }}>👎</button>
+                  title="Report this message" style={{ color: rating === "down" ? C.red : C.sub }}><IconThumbDown size={13} /></button>
               </span>
             )}
-            <span className="text-[11px]" style={{ color: C.sub }}>{fmtTime(at)}</span>
+            {meta}
           </div>
         </div>
-        <div className="mt-0.5 size-8 shrink-0 rounded-full" style={{ background: `${C.primary}22` }} />
+        <Avatar kind="agent" name={sender} />
       </div>
     );
   }
   return (
-    <div className="flex justify-start gap-1.5">
-      <div className="mt-0.5 size-8 shrink-0 rounded-full bg-[#e5e7eb]" />
+    <div className="flex justify-start gap-2">
+      <Avatar kind="customer" name={sender} />
       <div className="flex max-w-[70%] flex-col items-start gap-1.5">
         <div className="rounded-[15px] rounded-bl-none border px-5 py-3.5 text-[12px] leading-[18px]" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
           {text}
         </div>
-        <span className="px-0.5 text-[11px]" style={{ color: C.sub }}>{fmtTime(at)}</span>
+        {meta}
       </div>
     </div>
+  );
+}
+
+// Message avatar — agent (flat headset glyph) vs customer (colored initials).
+function Avatar({ kind, name }: { kind: "agent" | "customer"; name: string }) {
+  if (kind === "agent") {
+    return (
+      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full" style={{ background: C.primaryAccent, color: C.primary }} title={name}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M4 14v-2a8 8 0 0 1 16 0v2" /><rect x="2.5" y="13.5" width="4" height="6" rx="1.5" /><rect x="17.5" y="13.5" width="4" height="6" rx="1.5" /><path d="M20 19v1a3 3 0 0 1-3 3h-3" /></svg>
+      </span>
+    );
+  }
+  return (
+    <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(name || "?") }} title={name}>
+      {initials(name)}
+    </span>
   );
 }
 
