@@ -453,9 +453,8 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
     fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then(async (data) => {
       if (!on) return;
       setConv(data);
-      // Load any existing feedback for each SMS conversation so thumbs reflect prior votes.
-      const smsConvs = data.conversations.filter((r) => r.type === "sms").map((r) => r.conversationId);
-      const lists = await Promise.all(smsConvs.map((id) => fetchInboxFeedback(auth, id)));
+      // Load any existing feedback for every conversation (SMS + call) so thumbs reflect prior votes.
+      const lists = await Promise.all(data.conversations.map((r) => fetchInboxFeedback(auth, r.conversationId)));
       if (!on) return;
       const map: Record<string, "up" | "down"> = {};
       lists.flat().forEach((f) => {
@@ -468,18 +467,18 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
   }, [auth, customer.customer_id]);
 
   const voteFeedback = useCallback(
-    (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", note?: string, reason?: string) => {
+    (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call", note?: string, reason?: string) => {
       const key = `${conversationId}#${messageIndex}`;
       setFbMap((m) => ({ ...m, [key]: rating }));
-      void postInboxFeedback(auth, { conversationId, channel: "sms", messageIndex, message, rating, note, reason });
+      void postInboxFeedback(auth, { conversationId, channel, messageIndex, message, rating, note, reason });
     },
     [auth],
   );
 
   // §Report-modal (Figma 9842-21472) — thumbs-down opens a report form; submit posts a "down" vote.
-  const [reportTarget, setReportTarget] = useState<{ conversationId: string; messageIndex: number; message: string } | null>(null);
+  const [reportTarget, setReportTarget] = useState<{ conversationId: string; messageIndex: number; message: string; channel: "sms" | "call" } | null>(null);
   const fbCtx = useMemo<FbCtx>(
-    () => ({ map: fbMap, vote: voteFeedback, openReport: (conversationId, messageIndex, message) => setReportTarget({ conversationId, messageIndex, message }) }),
+    () => ({ map: fbMap, vote: voteFeedback, openReport: (conversationId, messageIndex, message, channel) => setReportTarget({ conversationId, messageIndex, message, channel }) }),
     [fbMap, voteFeedback],
   );
 
@@ -643,7 +642,7 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
         <ReportModal
           onClose={() => setReportTarget(null)}
           onSubmit={(reason, note) => {
-            voteFeedback(reportTarget.conversationId, reportTarget.messageIndex, reportTarget.message, "down", note, reason);
+            voteFeedback(reportTarget.conversationId, reportTarget.messageIndex, reportTarget.message, "down", reportTarget.channel, note, reason);
             setReportTarget(null);
           }}
         />
@@ -703,8 +702,8 @@ function ReportModal({ onClose, onSubmit }: { onClose: () => void; onSubmit: (re
 
 interface FbCtx {
   map: Record<string, "up" | "down">;
-  vote: (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", note?: string) => void;
-  openReport: (conversationId: string, messageIndex: number, message: string) => void;
+  vote: (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call", note?: string, reason?: string) => void;
+  openReport: (conversationId: string, messageIndex: number, message: string, channel: "sms" | "call") => void;
 }
 
 /* Insert TODAY/date dividers between nodes on day boundaries (§13). */
@@ -729,7 +728,7 @@ function ThreadNodeView({ node, fb }: { node: ThreadNode; fb: FbCtx }) {
     const inbound = (node.rec.callData?.callType || "").toLowerCase().includes("inbound");
     return (
       <div className={`flex ${inbound ? "justify-start" : "justify-end"}`}>
-        <CallCard rec={node.rec} />
+        <CallCard rec={node.rec} fb={fb} />
       </div>
     );
   }
@@ -804,9 +803,9 @@ function MessageBubble({ side, sender, text, tool, at, fbNode, fb }: {
           <div className="flex items-center gap-2 px-0.5">
             {fbNode && fb && text && (
               <span className={`flex items-center gap-2 transition-opacity ${rating ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
-                <button onClick={() => fb.vote(fbNode.conversationId, fbNode.messageIndex, text, "up")}
+                <button onClick={() => fb.vote(fbNode.conversationId, fbNode.messageIndex, text, "up", "sms")}
                   title="Good reply" style={{ color: rating === "up" ? C.primary : C.sub }}><IconThumbUp size={13} /></button>
-                <button onClick={() => fb.openReport(fbNode.conversationId, fbNode.messageIndex, text)}
+                <button onClick={() => fb.openReport(fbNode.conversationId, fbNode.messageIndex, text, "sms")}
                   title="Report this message" style={{ color: rating === "down" ? C.red : C.sub }}><IconThumbDown size={13} /></button>
               </span>
             )}
@@ -850,7 +849,7 @@ function Avatar({ kind, name }: { kind: "agent" | "customer"; name: string }) {
  * Agent, an INLINE recording player (always visible — the recordingUrl is a range-enabled S3 mp3), and
  * the transcript on demand. (conversations-v2 exposes no call `summary` field, so we show the transcript
  * in its place; a real summary would need an API/field the dev must add.) */
-function CallCard({ rec }: { rec: ConvRecord }) {
+function CallCard({ rec, fb }: { rec: ConvRecord; fb: FbCtx }) {
   const [showTranscript, setShowTranscript] = useState(false);
   const cd = rec.callData || {};
   const dur = fmtDuration(cd.callDuration);
@@ -859,6 +858,7 @@ function CallCard({ rec }: { rec: ConvRecord }) {
   const inbound = (cd.callType || "").toLowerCase().includes("inbound");
   const dirLabel = inbound ? "Incoming call" : "Outgoing call";
   const statusOk = (rec.status || "").toLowerCase() === "completed";
+  const rating = fb.map[`${rec.conversationId}#0`]; // call-level feedback (channel "call", index 0)
 
   return (
     <div className="w-[85%] max-w-[440px]">
@@ -910,6 +910,14 @@ function CallCard({ rec }: { rec: ConvRecord }) {
               )}
             </div>
           )}
+          {/* call-level feedback / report (channel "call") */}
+          <div className="flex items-center gap-3 border-t pt-2.5" style={{ borderColor: C.border }}>
+            <span className="text-[11px]" style={{ color: C.sub }}>Was this call handled well?</span>
+            <button onClick={() => fb.vote(rec.conversationId, 0, rec.callTitle || "Call", "up", "call")}
+              title="Good call" style={{ color: rating === "up" ? C.primary : C.sub }}><IconThumbUp size={13} /></button>
+            <button onClick={() => fb.openReport(rec.conversationId, 0, rec.callTitle || "Call", "call")}
+              title="Report this call" style={{ color: rating === "down" ? C.red : C.sub }}><IconThumbDown size={13} /></button>
+          </div>
         </div>
       </div>
     </div>
