@@ -1,11 +1,10 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   BUCKET_LABELS,
   Card,
-  ComingSoon,
   DateFilter,
   Eyebrow,
   fmtInt,
@@ -14,6 +13,10 @@ import {
   SectionLabel,
   StepList,
 } from "@/components/reports/kit";
+import { TrainingOverview, type Direction, type DirectionStatus } from "@/components/reports/training";
+import { LiveOverview } from "@/components/reports/liveReplica";
+import { FirstTimeTour } from "@/components/reports/firstRun";
+import { StageStepper, OnboardingStub, type Stage } from "@/components/reports/stageFlow";
 import {
   ActionItemList,
   ActionItemsScoreboard,
@@ -183,8 +186,57 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // syncing state and let the re-arm effect below retry, rather than flip to the "coming soon" gate.
   const degraded = feed?.degraded === true;
   const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData);
+  // Preview-only override for reviewing the "just went live" training design AND the exact-replica Live
+  // design side by side, without waiting for a real comingSoon rooftop — e.g. ?state=training or
+  // ?state=live, plus (training only) forcing one direction's status via ?ib=/?ob= (not_sold |
+  // start_onboarding | continue_onboarding | training) since there's no real per-direction onboarding-
+  // status field yet. Never engages unless explicitly passed on the URL OR the rooftop really has no
+  // data yet (the real comingSoon gate, which still defaults to the training treatment).
+  const previewParams = useSearchParams();
+  const previewState = previewParams.get("state");
+  const previewActive = previewState === "onboarding" || previewState === "training" || previewState === "live";
+  const showPreview = comingSoon || previewActive;
+  // The dealer journey as one flow: Onboarding → Training → Live. ?state= picks the entry stage; the
+  // stepper + in-view CTAs move between them (manualStage wins once the user navigates). comingSoon
+  // (a genuine just-went-live rooftop with no data) enters at Training.
+  const [manualStage, setManualStage] = useState<Stage | null>(null);
+  const stage: Stage = manualStage ?? (previewState === "onboarding" ? "onboarding" : previewState === "live" ? "live" : "training");
+  // Onboarding & Training aren't reports — strip the report chrome (tabs, Sales/Service scope, date
+  // filter, and the "what your AI delivered" subtitle). Only Live is a report.
+  const setupChrome = showPreview && stage !== "live";
+  const directionOverrides = useMemo(() => {
+    const valid = new Set<DirectionStatus>(["not_sold", "start_onboarding", "continue_onboarding", "training"]);
+    const parse = (v: string | null): DirectionStatus | undefined => (v && valid.has(v as DirectionStatus) ? (v as DirectionStatus) : undefined);
+    return { Inbound: parse(previewParams.get("ib")), Outbound: parse(previewParams.get("ob")) } as Partial<Record<Direction, DirectionStatus>>;
+  }, [previewParams]);
+  // Training has two states as the first activity lands: Day 0 (nothing yet) and Day 3 ("starting to fill
+  // in" — early real numbers + progressing). ?day=3 forces the filling-in state for review; ?day=0 (or
+  // absent) shows the empty state. Real early numbers come from the fleet (small on a genuine day-3 rooftop).
+  const trainingEarly = previewParams.get("day") === "3"
+    ? { coveragePct: fleet.answerRateInbound, responseSec: fleet.responseTimeSec, followups: aiStats?.stats.created ?? null }
+    : null;
   const showReport = scenario !== "first_time" && scenario !== "onboarding";
-  const liveReady = showReport && hasTeam && feed !== null && !degraded && !comingSoon;
+  const liveReady = showReport && hasTeam && feed !== null && !degraded && !comingSoon && !showPreview;
+
+  // First-time welcome tour — a once-per-rooftop greeting for a genuine just-went-live dealer (the real
+  // comingSoon gate). It's a full-screen modal, so it must NOT auto-open while someone is REVIEWING via
+  // ?state= (its backdrop would swallow every click). During review it's reachable via "Take a tour" or
+  // ?tour=1. Auto-opens once per team (localStorage); records dismissal so it never nags twice. SSR-safe.
+  const [tourOpen, setTourOpen] = useState(false);
+  useEffect(() => {
+    if (!hasTeam) return;
+    const forced = previewParams.get("tour") === "1";
+    const autoFirstTime = comingSoon && !previewActive; // real first-timer only, never during ?state= review
+    if (!forced && !autoFirstTime) return;
+    let seen = false;
+    try { seen = localStorage.getItem(`vini_tour_seen_${teamId}`) === "1"; } catch { /* storage blocked */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (forced || !seen) setTourOpen(true);
+  }, [comingSoon, previewActive, hasTeam, teamId, previewParams]);
+  const closeTour = () => {
+    setTourOpen(false);
+    try { localStorage.setItem(`vini_tour_seen_${teamId}`, "1"); } catch { /* storage blocked */ }
+  };
   // Live rooftop, but the selected window has no activity yet → gentle inline note above the report.
   const emptyWindow = liveReady && feed !== null && !feed.hasData;
 
@@ -370,44 +422,63 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     },
   ];
 
+  // Date filter + Customize + refresh — the only report controls kept in the live flow. In the preview
+  // Live stage these render INSIDE the hero (below "…what your sales AI handled"), so the top bar is
+  // dropped entirely; on the production report they stay in the top bar.
+  const liveControls = hasTeam ? (
+    <div className="no-print flex items-center gap-3">
+      {(liveReady || (showPreview && stage === "live")) && <CustomizeToggle ctrl={ctrl} />}
+      <DateFilter
+        bucket={bucket}
+        custom={custom}
+        onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "overview", range: b, team_id: teamId }); }}
+        onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "overview", range: "custom", team_id: teamId }); }}
+      />
+      <button
+        onClick={refresh}
+        disabled={feed === null}
+        aria-label="Refresh data"
+        title="Refresh"
+        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#e5e7eb] bg-white text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed] disabled:opacity-50"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={feed === null ? "animate-spin" : ""}>
+          <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+          <path d="M21 3v6h-6" />
+        </svg>
+      </button>
+    </div>
+  ) : null;
+  // The whole preview flow (Onboarding/Training/Live) owns its own header — the stage stepper plus each
+  // stage's hero. The report top bar would only clash/duplicate, so drop it across all three stages.
+  const hideTopBar = showPreview;
+
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
       <div className="flex flex-1 flex-col">
 
+        {!hideTopBar && (
         <ReportTopBar
           title="Overview"
-          subtitle="What your AI agents delivered — appointments, conversations and hand-offs, in one report."
+          subtitle={
+            setupChrome
+              ? (stage === "onboarding" ? "Let's get your AI agents live." : "Your agents are live and calibrating — your full report fills in as the first data lands.")
+              : "What your AI agents delivered — appointments, conversations and hand-offs, in one report."
+          }
           active="overview"
           teamId={teamId}
           query={navQuery}
+          hideTabs={showPreview}
+          hideDept={showPreview}
+          hideTitle={showPreview && stage === "live"}
           right={
-            hasTeam ? (
-              <div className="no-print flex items-center gap-3">
-                {liveReady && <CustomizeToggle ctrl={ctrl} />}
-                <DateFilter
-                  bucket={bucket}
-                  custom={custom}
-                  onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "overview", range: b, team_id: teamId }); }}
-                  onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "overview", range: "custom", team_id: teamId }); }}
-                />
-                <button
-                  onClick={refresh}
-                  disabled={feed === null}
-                  aria-label="Refresh data"
-                  title="Refresh"
-                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#e5e7eb] bg-white text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed] disabled:opacity-50"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={feed === null ? "animate-spin" : ""}>
-                    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-                    <path d="M21 3v6h-6" />
-                  </svg>
-                </button>
-              </div>
+            setupChrome ? null : hasTeam ? (
+              liveControls
             ) : (
               <span className="rounded-lg bg-[#f3eaff] px-3 py-1.5 text-[12px] font-semibold text-[#813fed]">{view.liveLabel}</span>
             )
           }
         />
+        )}
 
         <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-9">
           {scenario === "first_time" && <FirstTimeOverview />}
@@ -415,11 +486,45 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
           {showReport && !hasTeam && <NoRooftop />}
           {showReport && hasTeam && (feed === null || degraded) && <OverviewSkeleton />}
-          {showReport && hasTeam && comingSoon && (
-            <ComingSoon
-              title={`${account.name}'s report is on its way`}
-              note="Your full report fills in here automatically as soon as your agents start handling calls and messages — usually within a day of going live. Nothing to set up on your end."
-            />
+          {showReport && hasTeam && feed !== null && !degraded && showPreview && (
+            <div className="flex flex-col gap-4">
+              <FirstTimeTour open={tourOpen} accountName={account.name} onClose={closeTour} />
+              <div className="flex items-center justify-between gap-3">
+                <StageStepper stage={stage} onJump={(s) => { setManualStage(s); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+                {stage !== "onboarding" && (
+                  <button
+                    onClick={() => setTourOpen(true)}
+                    className="no-print inline-flex items-center gap-1.5 rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed]"
+                  >
+                    <span aria-hidden>✨</span> Take a tour
+                  </button>
+                )}
+              </div>
+              {stage === "onboarding" ? (
+                <OnboardingStub onGoLive={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+              ) : stage === "training" ? (
+                <TrainingOverview account={account} overrides={directionOverrides} earlyStats={trainingEarly} fleet={fleet} aiStats={aiStats?.stats ?? null} onGoLive={() => { setManualStage("live"); window.scrollTo({ top: 0, behavior: "smooth" }); }} onOnboard={() => { setManualStage("onboarding"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+              ) : (
+                <LiveOverview
+                  account={account}
+                  fleet={fleet}
+                  agents={ranked}
+                  warmLeads={warmLeads}
+                  namedAppts={namedAppts}
+                  aiStats={aiStats}
+                  workItems={workItems}
+                  conversations={conversations}
+                  agentNames={agentNames}
+                  onOpenAgent={openAgent}
+                  onOpenApptModal={openApptModal}
+                  onOpenWarmModal={() => setWarmModalOpen(true)}
+                  onViewActionItems={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)}
+                  onViewConversations={() => goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`)}
+                  onBackToTraining={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                  headerControls={liveControls}
+                />
+              )}
+            </div>
           )}
 
           {liveReady && (
@@ -472,6 +577,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     </div>
   );
 }
+
 
 /* ── relative "synced X ago" label ── */
 function relTime(then: number, now: number): string {

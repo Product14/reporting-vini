@@ -8,7 +8,7 @@
 import React from "react";
 import { fmtInt, type IntentOutcomeRow, type NamedAppt, type OutcomeSlice, type WarmLeadItem } from "./data";
 import type { ActionItem, ActionItemStats, ActionItemCloser, Conversation } from "./liveData";
-import { FunnelBars, Td, Th } from "./kit";
+import { FunnelBars, Portal, Td, Th } from "./kit";
 import { track } from "@/lib/analytics";
 
 /* Display label for an action-item assignee. Every rooftop we've seen auto-creates + auto-resolves via
@@ -737,6 +737,7 @@ export function Modal({
 }) {
   if (!open) return null;
   return (
+    <Portal>
     <div className="no-print fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} aria-hidden />
       <div className={`relative z-10 flex max-h-[85vh] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ${wide ? "max-w-[880px]" : "max-w-[620px]"}`}>
@@ -750,6 +751,7 @@ export function Modal({
         <div className="overflow-y-auto px-5 py-4">{children}</div>
       </div>
     </div>
+    </Portal>
   );
 }
 
@@ -759,6 +761,7 @@ export function ConversationDrawer({ conv, onClose, agentNames }: { conv: Conver
   const inbound = conv.direction === "inbound";
   const bubbles = conv.sms ?? [];
   return (
+    <Portal>
     <div className="no-print fixed inset-0 z-[60] flex justify-end">
       <div className="absolute inset-0 bg-black/25" onClick={onClose} aria-hidden />
       <aside className="relative z-10 flex h-full w-full max-w-[440px] flex-col overflow-y-auto bg-white shadow-2xl">
@@ -824,6 +827,7 @@ export function ConversationDrawer({ conv, onClose, agentNames }: { conv: Conver
         )}
       </aside>
     </div>
+    </Portal>
   );
 }
 

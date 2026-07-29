@@ -71,6 +71,8 @@ function RecentCallsView() {
           active="calls"
           teamId={teamId}
           query={navQuery}
+          hideTabs
+          hideDept
           right={
             teamId ? (
               <DateFilter
