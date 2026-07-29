@@ -426,7 +426,11 @@ type ThreadNode =
   | { t: number; kind: "msg"; side: "in" | "out"; text: string; tool?: string; sender: string; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "trace"; label: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
+  | { t: number; kind: "event"; emoji: string; title: string; detail: string } // lead-journey milestone, interleaved in the chat
   | { t: number; kind: "call"; rec: ConvRecord };
+
+const EVENT_GRADIENT =
+  "linear-gradient(90deg, rgba(91,109,246,0.10) 1%, rgba(127,106,242,0.10) 23%, rgba(182,81,215,0.10) 66%, rgba(232,62,84,0.10) 86%, rgba(237,137,57,0.10) 113%)";
 
 function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; customer: InboxCustomer; onViewDetails: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
@@ -541,7 +545,11 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
       const t = +new Date((ai.createdAt as string) || "") || 0;
       if (t) out.push({ t, kind: "created", emoji: "⚑", title: "Action item created", detail: ai.description || prettify(ai.intent || "") });
     }
-    // Journey milestones are NOT interleaved here — they render in the right-panel timeline (guide §7C).
+    // Lead-journey milestones interleaved chronologically in the chat (also shown in the right panel).
+    for (const ev of conv.leadJourney ?? []) {
+      const m = journeyMeta(ev);
+      out.push({ t: +new Date(ev.timestamp) || 0, kind: "event", emoji: m.emoji, title: m.title, detail: m.detail });
+    }
     return out.sort((a, b) => a.t - b.t);
   }, [conv, dir, aiAgentName, custFirst]);
 
@@ -741,6 +749,19 @@ function ThreadNodeView({ node, fb }: { node: ThreadNode; fb: FbCtx }) {
         <span className="flex items-center gap-1.5 rounded-full border px-3.5 py-1 text-[11px]" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
           <span>{node.emoji}</span><span className="font-semibold">{node.title}</span>
           {node.detail && <span style={{ color: C.sub }}>· {node.detail}</span>}
+        </span>
+      </div>
+    );
+  }
+  if (node.kind === "event") {
+    // Lead-journey milestone pill, interleaved in the chat.
+    return (
+      <div className="flex justify-center">
+        <span className="flex items-center gap-2 rounded-[15px] px-5 py-1.5 text-[12px]" style={{ background: EVENT_GRADIENT }}>
+          <span className="text-[11px]">{node.emoji}</span>
+          <span className="font-semibold" style={{ color: C.dark }}>{node.title}</span>
+          {node.detail && <span style={{ color: C.dark }}>{node.detail}</span>}
+          <span style={{ color: C.sub }}>{fmtTime(new Date(node.t).toISOString())}</span>
         </span>
       </div>
     );
