@@ -424,8 +424,8 @@ function ListSkeleton() {
  * Thread pane
  * ════════════════════════════════════════════════════════════════════════════ */
 type ThreadNode =
-  | { t: number; kind: "msg"; side: "in" | "out"; text: string; tool?: string; sender: string; fb?: { conversationId: string; messageIndex: number } }
-  | { t: number; kind: "trace"; label: string }
+  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; fb?: { conversationId: string; messageIndex: number } }
+  | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
   | { t: number; kind: "event"; emoji: string; title: string; detail: string } // lead-journey milestone, interleaved in the chat
   | { t: number; kind: "call"; rec: ConvRecord };
@@ -512,21 +512,33 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
       if (dir !== "all" && convDirection(rec) !== dir) continue;
       const base = +new Date(rec.createdAt) || 0;
       if (rec.type === "sms" && Array.isArray(rec.smsMessages)) {
-        // §02/§03 — one entry per SMS. Customer-facing text → a bubble; a tool-result payload → a
-        // compact trace (never raw JSON). toolCalls on an AI message → a plain-language trace label.
-        rec.smsMessages.forEach((m, i) => {
-          const t = m._ts || base - (rec.smsMessages!.length - i);
-          const rawTool = (m.toolCalls ?? undefined)?.[0];
-          const tool = rawTool?.function?.name || rawTool?.name;
-          const parsed = parseSmsText(m.content);
-          if (parsed.kind === "tool") {
-            out.push({ t, kind: "trace", label: tool ? toolLabel(tool) : parsed.summary || "Completed an action" });
+        const msgs = rec.smsMessages;
+        // Pair each tool CALL (assistant msg w/ toolCalls) with its RESULT (role:"tool", toolCallId).
+        const resultByCallId: Record<string, { text: string; extra?: string }> = {};
+        for (const m of msgs) {
+          if ((m.role || "").toLowerCase() === "tool" && m.toolCallId) resultByCallId[m.toolCallId] = summarizeToolResult(m.content);
+        }
+        msgs.forEach((m, i) => {
+          const t = m._ts || base - (msgs.length - i);
+          const role = (m.role || "").toLowerCase();
+          if (role === "tool") return; // folded into its tool step (emitted from the call message)
+          const rc = (m.toolCalls ?? undefined)?.[0];
+          if (rc) {
+            // §03 — a tool step: action + query params + result, as an expandable "AI action" card.
+            const name = rc.function?.name || rc.name || "";
+            const res = rc.id ? resultByCallId[rc.id] : undefined;
+            out.push({ t, kind: "toolstep", label: toolLabel(name), rawName: name, args: formatArgs(rc.function?.arguments), result: res?.text, resultExtra: res?.extra });
             return;
           }
-          if (!parsed.text && !tool) return;
-          const side = m.role === "user" ? "in" : "out";
+          const parsed = parseSmsText(m.content);
+          if (parsed.kind === "tool") { // orphan tool result (no linked call in this list)
+            out.push({ t, kind: "toolstep", label: "Ran a tool", rawName: "", args: [], result: parsed.summary });
+            return;
+          }
+          if (!parsed.text) return;
+          const side = role === "user" ? "in" : "out";
           out.push({
-            t, kind: "msg", side, text: parsed.text, tool: tool || undefined,
+            t, kind: "msg", side, text: parsed.text,
             sender: side === "out" ? aiAgentName : custFirst,
             // Feedback attaches to AI messages only, keyed by conversation + message index (§03).
             fb: side === "out" ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
@@ -733,18 +745,7 @@ function ThreadNodeView({ node, fb }: { node: ThreadNode; fb: FbCtx }) {
       </div>
     );
   }
-  if (node.kind === "trace") {
-    // §03 tool-call trace — a subtle "AI action" chip (never raw JSON; ISO timestamps humanized).
-    return (
-      <div className="flex justify-end px-0.5">
-        <span className="inline-flex max-w-[70%] items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]"
-          style={{ borderColor: `${C.primary}2e`, background: `${C.primary}0a` }}>
-          <IconBolt size={11} className="shrink-0" style={{ color: C.primary }} />
-          <span style={{ color: C.dark }}>{humanizeTrace(node.label)}</span>
-        </span>
-      </div>
-    );
-  }
+  if (node.kind === "toolstep") return <ToolStepCard node={node} />;
   if (node.kind === "created") {
     // Inline system event — appointment / action item created.
     return (
@@ -769,7 +770,51 @@ function ThreadNodeView({ node, fb }: { node: ThreadNode; fb: FbCtx }) {
       </div>
     );
   }
-  return <MessageBubble side={node.side} sender={node.sender} text={node.text} tool={node.tool} at={new Date(node.t).toISOString()} fbNode={node.fb} fb={fb} />;
+  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} fbNode={node.fb} fb={fb} />;
+}
+
+/* §03 — a tool-use "behind the scenes" step: action + query params + result, expandable. Modeled on
+ * how chat assistants surface tool calls. Right-aligned (AI side). */
+function ToolStepCard({ node }: { node: Extract<ThreadNode, { kind: "toolstep" }> }) {
+  const [open, setOpen] = useState(false);
+  const hasDetail = node.args.length > 0 || !!node.result;
+  const subtitle = node.resultExtra || (node.result ? humanizeTrace(node.result) : "") ||
+    (node.args.length ? node.args.map((a) => a.v).join(" · ") : "");
+  return (
+    <div className="flex justify-end px-0.5">
+      <div className="max-w-[75%] overflow-hidden rounded-[12px] border" style={{ borderColor: `${C.primary}2e`, background: `${C.primary}08` }}>
+        <button onClick={() => hasDetail && setOpen((v) => !v)} className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${hasDetail ? "" : "cursor-default"}`}>
+          <span className="flex size-5 shrink-0 items-center justify-center rounded-full" style={{ background: `${C.primary}1a`, color: C.primary }}><IconBolt size={11} /></span>
+          <span className="text-[11px] font-semibold" style={{ color: C.dark }}>{node.label}</span>
+          {subtitle && <span className="truncate text-[11px]" style={{ color: C.sub }}>· {subtitle}</span>}
+          {hasDetail && <IconChevron size={12} className={`ml-auto shrink-0 transition-transform ${open ? "rotate-180" : ""}`} style={{ color: C.sub }} />}
+        </button>
+        {open && hasDetail && (
+          <div className="flex flex-col gap-2 border-t px-3 py-2" style={{ borderColor: `${C.primary}22` }}>
+            {node.args.length > 0 && (
+              <div>
+                <p className="mb-1 text-[9px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Query</p>
+                <div className="flex flex-col gap-0.5">
+                  {node.args.map((a, i) => (
+                    <div key={i} className="flex gap-2 text-[11px]">
+                      <span className="shrink-0 capitalize" style={{ color: C.sub }}>{a.k}</span>
+                      <span className="min-w-0 flex-1 break-words font-medium" style={{ color: C.dark }}>{a.v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {node.result && (
+              <div>
+                <p className="mb-1 text-[9px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Result</p>
+                <p className="text-[11px] leading-[16px]" style={{ color: C.dark }}>{humanizeTrace(node.result)}{node.resultExtra ? ` · ${node.resultExtra}` : ""}</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function DayDivider({ label }: { label: string }) {
@@ -782,10 +827,10 @@ function DayDivider({ label }: { label: string }) {
   );
 }
 
-/* §02 — one SMS entry. AI (out) = right/blue; customer (in) = left/white. §03 tool-call trace shows a
- * plain-language label under the AI bubble; AI messages carry a thumbs up/down feedback control. */
-function MessageBubble({ side, sender, text, tool, at, fbNode, fb }: {
-  side: "in" | "out"; sender: string; text: string; tool?: string; at: string;
+/* §02 — one SMS entry. AI (out) = right/blue; customer (in) = left/white. AI messages carry a
+ * thumbs-up / report feedback control; tool activity renders as its own ToolStepCard. */
+function MessageBubble({ side, sender, text, at, fbNode, fb }: {
+  side: "in" | "out"; sender: string; text: string; at: string;
   fbNode?: { conversationId: string; messageIndex: number }; fb?: FbCtx;
 }) {
   const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)}</span>;
@@ -798,12 +843,6 @@ function MessageBubble({ side, sender, text, tool, at, fbNode, fb }: {
             <div className="rounded-[15px] rounded-br-none px-5 py-3.5 text-[12px] leading-[18px]" style={{ background: C.blueAccent, color: C.dark }}>
               {text}
             </div>
-          )}
-          {tool && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]" title={toolDetail(tool)}
-              style={{ borderColor: `${C.primary}2e`, background: `${C.primary}0a` }}>
-              <IconBolt size={11} className="shrink-0" style={{ color: C.primary }} /> <span style={{ color: C.dark }}>{toolLabel(tool)}</span>
-            </span>
           )}
           <div className="flex items-center gap-2 px-0.5">
             {fbNode && fb && text && (
@@ -1573,12 +1612,40 @@ const TOOL_LABELS: Record<string, string> = {
   transfer_call: "Transferred the call",
   request_callback: "Logged a callback request",
   get_business_hours: "Checked store hours",
+  dealership_check_hours: "Checked store hours",
 };
 function toolLabel(name: string): string {
-  return TOOL_LABELS[name] || "Looked something up";
+  return TOOL_LABELS[name] || (name ? prettify(name.replace(/_v\d+$/, "")) : "Ran a tool");
 }
-function toolDetail(name: string): string {
-  return `The AI used a tool to ${toolLabel(name).toLowerCase()}.`;
+// Summarize a tool RESULT payload into a headline + a small "extra" chip (never dump raw JSON).
+function summarizeToolResult(content: string): { text: string; extra?: string } {
+  const raw = (content || "").trim();
+  if (!raw.startsWith("{")) return { text: raw || "Completed" };
+  try {
+    const j = JSON.parse(raw) as { message?: unknown; status?: unknown; vehicles?: unknown; hours?: { open?: string; close?: string } };
+    let text = "Completed";
+    if (typeof j.message === "string" && j.message) text = j.message;
+    else if (typeof j.status === "string" && j.status) text = prettify(j.status);
+    let extra: string | undefined;
+    if (Array.isArray(j.vehicles)) extra = `${j.vehicles.length} vehicle${j.vehicles.length === 1 ? "" : "s"}`;
+    if (j.hours?.open && j.hours?.close) extra = `${j.hours.open}–${j.hours.close}`;
+    return { text, extra };
+  } catch {
+    return { text: "Completed" };
+  }
+}
+// Turn a tool's `arguments` (JSON string or object) into readable query rows for the expanded step.
+function formatArgs(argsIn: unknown): { k: string; v: string }[] {
+  let obj: Record<string, unknown> | null = null;
+  if (typeof argsIn === "string") { try { obj = JSON.parse(argsIn) as Record<string, unknown>; } catch { obj = null; } }
+  else if (argsIn && typeof argsIn === "object") obj = argsIn as Record<string, unknown>;
+  if (!obj) return [];
+  const rows: { k: string; v: string }[] = [];
+  for (const [k, val] of Object.entries(obj)) {
+    if (val == null || val === "") continue;
+    rows.push({ k: prettify(k), v: typeof val === "object" ? JSON.stringify(val) : String(val) });
+  }
+  return rows.slice(0, 8);
 }
 // Make a tool-trace line presentable: replace raw ISO datetimes with a readable date/time.
 function humanizeTrace(s: string): string {
