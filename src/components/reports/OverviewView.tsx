@@ -17,6 +17,7 @@ import { TrainingOverview, type Direction, type DirectionStatus } from "@/compon
 import { LiveOverview } from "@/components/reports/liveReplica";
 import { FirstTimeTour } from "@/components/reports/firstRun";
 import { StageStepper, OnboardingStub, type Stage } from "@/components/reports/stageFlow";
+import { SAMPLE_SERVICE_FEED, SAMPLE_AISTATS, SAMPLE_WORKITEMS, SAMPLE_CONVERSATIONS } from "@/components/reports/sampleData";
 import {
   ActionItemList,
   ActionItemsScoreboard,
@@ -65,6 +66,10 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
 
+  // ?sample=1 → fully self-contained SAMPLE mode: every fetch is skipped and the built-in service demo
+  // data is fed in (no backend, no auth, no env). Declared up here so the fetch effects can short-circuit.
+  const previewParams = useSearchParams();
+  const sampleMode = previewParams.get("sample") != null;
 
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for the query.
   // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents;
@@ -83,7 +88,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // per opened report with the real team_id. team_id "" → "(unscoped)" in track().
   useEffect(() => { track("report_viewed", { tab: "overview", team_id: teamId }); }, [teamId]);
   useEffect(() => {
-    if (!teamId) return; // no rooftop selected → leave feed as-is (UI shows the no-rooftop state)
+    if (sampleMode || !teamId) return; // sample mode / no rooftop → leave feed as-is
     let on = true;
     // show cached data immediately (stale-while-revalidate); only blank to the skeleton when cold
     const cached = peekAgents({ teamId, ...rangeOpts });
@@ -130,6 +135,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   useEffect(() => {
     // Wait for the server-resolved window (feed.start/end) before fetching, so the tile never flashes a
     // count for the wrong (server-default) window on cold load.
+    if (sampleMode) return;
     if (!teamId || !feed?.start || !feed?.end) { setAiStats(null); return; }
     let on = true;
     fetchActionItemStats(teamId, { start: feed.start, end: feed.end, service: svc, spyneToken, spyneEnv }).then((r) => { if (on) setAiStats(r); });
@@ -140,7 +146,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // scoreboard counts above; a small named list the team can action directly.
   const [openItems, setOpenItems] = useState<ActionItem[]>([]);
   useEffect(() => {
-    if (!teamId) { setOpenItems([]); return; }
+    if (sampleMode || !teamId) { if (!sampleMode) setOpenItems([]); return; }
     let on = true;
     fetchActionItems(teamId, { scope: "open", service: svc, limit: 40, spyneToken }).then((r) => { if (on) setOpenItems(r); });
     return () => { on = false; };
@@ -154,6 +160,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // Recent conversations (calls + SMS) for the Overview preview list + drawer, scoped to dept + window.
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   useEffect(() => {
+    if (sampleMode) return;
     if (!teamId) { setConversations([]); return; }
     let on = true;
     setConversations(null);
@@ -163,12 +170,20 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     return () => { on = false; };
   }, [teamId, svc, feed?.start, feed?.end, spyneToken, spyneEnv]);
 
+  // SAMPLE mode: feed the built-in service demo data and skip every network fetch above (all guarded on
+  // sampleMode). Placed after every useState so the setters are in scope.
+  useEffect(() => {
+    if (!sampleMode) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFeed(SAMPLE_SERVICE_FEED); setAiStats(SAMPLE_AISTATS); setOpenItems(SAMPLE_WORKITEMS); setConversations(SAMPLE_CONVERSATIONS);
+  }, [sampleMode]);
+
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
   const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
 
-  const hasTeam = teamId !== "";
+  const hasTeam = teamId !== "" || sampleMode;
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
   // chosen date range survives navigation to the By-agent view.
   const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked);
@@ -192,15 +207,14 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // start_onboarding | continue_onboarding | training) since there's no real per-direction onboarding-
   // status field yet. Never engages unless explicitly passed on the URL OR the rooftop really has no
   // data yet (the real comingSoon gate, which still defaults to the training treatment).
-  const previewParams = useSearchParams();
   const previewState = previewParams.get("state");
   const previewActive = previewState === "onboarding" || previewState === "training" || previewState === "live";
-  const showPreview = comingSoon || previewActive;
+  const showPreview = comingSoon || previewActive || sampleMode;
   // The dealer journey as one flow: Onboarding → Training → Live. ?state= picks the entry stage; the
   // stepper + in-view CTAs move between them (manualStage wins once the user navigates). comingSoon
-  // (a genuine just-went-live rooftop with no data) enters at Training.
+  // (a genuine just-went-live rooftop with no data) enters at Training; ?sample= defaults to Live.
   const [manualStage, setManualStage] = useState<Stage | null>(null);
-  const stage: Stage = manualStage ?? (previewState === "onboarding" ? "onboarding" : previewState === "live" ? "live" : "training");
+  const stage: Stage = manualStage ?? (previewState === "onboarding" ? "onboarding" : previewState === "live" ? "live" : sampleMode ? "live" : "training");
   // Onboarding & Training aren't reports — strip the report chrome (tabs, Sales/Service scope, date
   // filter, and the "what your AI delivered" subtitle). Only Live is a report.
   const setupChrome = showPreview && stage !== "live";
