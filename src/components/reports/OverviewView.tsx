@@ -14,7 +14,7 @@ import {
   StepList,
 } from "@/components/reports/kit";
 import { TrainingOverview, type Direction, type DirectionStatus } from "@/components/reports/training";
-import { LiveOverview } from "@/components/reports/liveReplica";
+import { LiveOverview, LIVE_SECTIONS } from "@/components/reports/liveReplica";
 import { OnboardingStub, type Stage } from "@/components/reports/stageFlow";
 import { SAMPLE_SERVICE_FEED, SAMPLE_AISTATS, SAMPLE_WORKITEMS, SAMPLE_CONVERSATIONS } from "@/components/reports/sampleData";
 import {
@@ -43,6 +43,9 @@ import { track } from "@/lib/analytics";
 
 // Customizable section ids for the Overview (stable module constant → identity-stable across renders).
 const OVERVIEW_SECTION_IDS = ["value", "agents", "work", "conversations"];
+// Customize manifest for the NEW Live overview — ids/labels come straight from LiveOverview so they can
+// never drift from what actually renders.
+const LIVE_SECTION_IDS = LIVE_SECTIONS.map((s) => s.id);
 
 // "internal" (/reports/ root) → the By-agent drill-down lives in the SAME iframe, keep navigating there
 // via router.push. "parent" (/overview/, standalone) → By-agent is a DIFFERENT parent-console iframe now,
@@ -318,7 +321,11 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
   // Customizable layout — the customer can hide/reorder these sections (persisted per rooftop). The
   // manifest drives the Customize modal: sections (reorderable + hideable) + the individual tiles/cards.
+  // `ctrl` drives the legacy (?classic=1) layout; `liveCtrl` drives the new Live overview. Separate
+  // localStorage keys so the two layouts never clobber each other.
   const ctrl = useCustomize("overview", { teamId, enterpriseId, spyneToken }, OVERVIEW_SECTION_IDS);
+  const liveCtrl = useCustomize("overview-live", { teamId, enterpriseId, spyneToken }, LIVE_SECTION_IDS);
+  const liveGroups: CustomizeGroup[] = LIVE_SECTIONS.map((s) => ({ id: s.id, label: s.label }));
   const customizeGroups: CustomizeGroup[] = [
     { id: "value", label: "The value delivered", items: [
       { id: "tile.leads", label: "Leads touched" },
@@ -478,7 +485,8 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // dropped entirely; on the production report they stay in the top bar.
   const liveControls = hasTeam ? (
     <div className="no-print flex items-center gap-3">
-      {(liveReady || (showPreview && stage === "live")) && <CustomizeToggle ctrl={ctrl} />}
+      {liveReady && <CustomizeToggle ctrl={ctrl} />}
+      {showPreview && stage === "live" && <CustomizeToggle ctrl={liveCtrl} />}
       <DateFilter
         bucket={bucket}
         custom={custom}
@@ -561,6 +569,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   onViewActionItems={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)}
                   onViewConversations={() => goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`)}
                   onBackToTraining={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                  ctrl={liveCtrl}
                 />
               )}
             </div>
@@ -611,8 +620,10 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
         agentNames={agentNames}
         loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken, spyneEnv })}
       />
-      {/* Customize layout — hide/reorder sections + hide individual cards/tiles (opened from the header). */}
+      {/* Customize layout — hide/reorder sections (opened from the header). Two modals: `ctrl` for the
+          legacy layout, `liveCtrl` for the new Live overview. Each renders only when ITS editing is on. */}
       <CustomizeModal ctrl={ctrl} groups={customizeGroups} accountLabel={account.name} />
+      <CustomizeModal ctrl={liveCtrl} groups={liveGroups} accountLabel={account.name} />
     </div>
   );
 }

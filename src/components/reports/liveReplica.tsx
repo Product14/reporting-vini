@@ -26,6 +26,7 @@ import type { FleetLive } from "./liveData";
 import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, agentDisplayName, ConversationDrawer } from "./kitV3";
 import { UnlockPotentialBanner } from "./valueStory";
 import { CountUp, useInView } from "./anim";
+import type { CustomizeCtrl } from "./customize";
 
 /* ── palette (exact Figma tokens for this design — intentionally not the site's #813fed accent) ── */
 const C = {
@@ -703,10 +704,27 @@ export interface LiveOverviewProps {
   onViewConversations: () => void;
   onBackToTraining?: () => void; // legacy hook; Training is no longer surfaced, so unused on Live
   headerControls?: React.ReactNode; // date filter + customize, rendered inside the hero (this IS the header)
+  ctrl?: CustomizeCtrl; // Customize: hide + reorder the sections below (omit → default order, all shown)
 }
+
+// The customizable sections of the Live overview, in default order. Exposed so OverviewView can build
+// the matching useCustomize(ids) + Customize modal groups from the SAME list (ids never drift).
+export const LIVE_SECTIONS: { id: string; label: string }[] = [
+  { id: "live.hero", label: "Hero metric tiles" },
+  { id: "live.agents", label: "Agent performance" },
+  { id: "live.funnel", label: "Lead-to-sale funnel" },
+  { id: "live.hotleads", label: "Hot Leads" },
+  { id: "live.appts", label: "Appointments" },
+  { id: "live.actions", label: "Action Items" },
+  { id: "live.conversations", label: "Recent Conversations" },
+];
+// Hot Leads + Appointments render side-by-side when both are visible AND adjacent (the default), and go
+// full-width when hidden/separated — so reorder + independent hide work without breaking the layout.
+const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
+
 export function LiveOverview({
   fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
-  onOpenAgent, onOpenApptModal, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls,
+  onOpenAgent, onOpenApptModal, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
@@ -715,24 +733,48 @@ export function LiveOverview({
   // The department in play (from whichever agent IS live), so a missing direction shows the right
   // "Get {dept} {dir}" upsell placeholder instead of an empty slot.
   const deptLabel: "Sales" | "Service" = (inbound ?? outbound)?.dept ?? (serviceMode ? "Service" : "Sales");
-  return (
-    <div className="flex flex-col gap-4">
-      <LiveAnims />
-      <div className="lv-rise" style={{ animationDelay: "0ms" }}><LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} /></div>
-      <div className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: "70ms" }}>
+
+  const nodes: Record<string, React.ReactNode> = {
+    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} />,
+    "live.agents": (
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
         {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" />}
         {outbound ? <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Outbound" />}
       </div>
-      <div className="lv-rise flex flex-col gap-3.5" style={{ animationDelay: "140ms" }}>
+    ),
+    "live.funnel": (
+      <div className="flex flex-col gap-3.5">
         <UnlockPotentialBanner liveCount={1} total={3} />
         <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />
       </div>
-      <div className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: "210ms" }}>
-        <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />
-        <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onOpenApptModal} />
-      </div>
-      <div className="lv-rise" style={{ animationDelay: "280ms" }}><LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} /></div>
-      <div className="lv-rise" style={{ animationDelay: "350ms" }}><LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} /></div>
+    ),
+    "live.hotleads": <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />,
+    "live.appts": <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onOpenApptModal} />,
+    "live.actions": <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,
+    "live.conversations": <LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} />,
+  };
+
+  // Apply the customize layout: chosen order (ctrl.order) minus hidden ids; default order + all shown
+  // when there's no ctrl. Unknown ids are skipped so a stale saved layout never renders a ghost.
+  const defaultOrder = LIVE_SECTIONS.map((s) => s.id);
+  const order = (ctrl ? ctrl.order.filter((id) => nodes[id] !== undefined) : defaultOrder).filter((id) => !ctrl?.hidden.has(id));
+  const rows: React.ReactNode[] = [];
+  for (let i = 0; i < order.length; i++) {
+    const id = order[i];
+    const next = order[i + 1];
+    const delay = `${rows.length * 70}ms`;
+    if (PAIRABLE.has(id) && next && PAIRABLE.has(next)) {
+      rows.push(<div key={id} className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: delay }}>{nodes[id]}{nodes[next]}</div>);
+      i++; // consumed the pair
+    } else {
+      rows.push(<div key={id} className="lv-rise" style={{ animationDelay: delay }}>{nodes[id]}</div>);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <LiveAnims />
+      {rows}
     </div>
   );
 }
