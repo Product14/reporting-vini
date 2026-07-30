@@ -125,7 +125,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
   // Department switcher (All / Sales / Service) — scopes the WHOLE report: agents (fleet + IB/OB split),
   // named appointments, warm leads, action items and recent conversations. "all" → both departments.
-  const { dept, locked } = useDept(); // top-level scope (shared header, URL-persisted)
+  const { dept, setDept, locked } = useDept(); // top-level scope (shared header, URL-persisted)
   const svc = dept === "all" ? "both" : dept;
 
   // Action-item scoreboard (created/closed for the window + open/overdue/due-today now + who-closed-most).
@@ -182,6 +182,12 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
   const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
+  // A rooftop running BOTH Sales and Service agents can't be auto-skinned from the fleet — the Live view
+  // needs an explicit Sales/Service scope so the right department (and its service/sales skin) shows.
+  const hasBothDepts = useMemo(() => {
+    const s = new Set(allAgents.map((a) => a.dept));
+    return s.has("Sales") && s.has("Service");
+  }, [allAgents]);
 
   const hasTeam = teamId !== "" || sampleMode;
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
@@ -209,12 +215,31 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // data yet (the real comingSoon gate, which still defaults to the training treatment).
   const previewState = previewParams.get("state");
   const previewActive = previewState === "onboarding" || previewState === "training" || previewState === "live";
-  const showPreview = comingSoon || previewActive || sampleMode;
+  const showReport = scenario !== "first_time" && scenario !== "onboarding";
+  // A genuinely-live rooftop: has a team, its data has loaded, it's past onboarding. This is the real
+  // production audience — they now get the new stepper/Live experience by default. ?classic=1 is the
+  // safe rollback: it forces the legacy overview for this session without a redeploy.
+  const classic = previewParams.get("classic") != null;
+  const liveTeam = showReport && hasTeam && feed !== null && !degraded && !comingSoon;
+  // The new experience (Onboarding → Training → Live) drives previews (comingSoon / ?state= / ?sample=)
+  // AND real live rooftops. ?classic=1 opts a real live team back to the old MetricTile overview — it
+  // never disables an explicit preview/sample, only the live-team auto-enable.
+  const showPreview = comingSoon || previewActive || sampleMode || (liveTeam && !classic);
   // The dealer journey as one flow: Onboarding → Training → Live. ?state= picks the entry stage; the
   // stepper + in-view CTAs move between them (manualStage wins once the user navigates). comingSoon
   // (a genuine just-went-live rooftop with no data) enters at Training; ?sample= defaults to Live.
   const [manualStage, setManualStage] = useState<Stage | null>(null);
-  const stage: Stage = manualStage ?? (previewState === "onboarding" ? "onboarding" : previewState === "live" ? "live" : sampleMode ? "live" : "training");
+  // Entry stage: an explicit ?state= wins; otherwise a real live rooftop lands on Live, a genuine
+  // just-went-live (comingSoon) rooftop enters at Training, and ?sample= defaults to Live. manualStage
+  // (the stepper / in-view CTAs) overrides once the user navigates.
+  const stage: Stage = manualStage ?? (
+    previewState === "onboarding" ? "onboarding"
+    : previewState === "live" ? "live"
+    : previewState === "training" ? "training"
+    : sampleMode ? "live"
+    : comingSoon ? "training"
+    : "live"
+  );
   // Onboarding & Training aren't reports — strip the report chrome (tabs, Sales/Service scope, date
   // filter, and the "what your AI delivered" subtitle). Only Live is a report.
   const setupChrome = showPreview && stage !== "live";
@@ -229,8 +254,8 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const trainingEarly = previewParams.get("day") === "3"
     ? { coveragePct: fleet.answerRateInbound, responseSec: fleet.responseTimeSec, followups: aiStats?.stats.created ?? null }
     : null;
-  const showReport = scenario !== "first_time" && scenario !== "onboarding";
-  const liveReady = showReport && hasTeam && feed !== null && !degraded && !comingSoon && !showPreview;
+  // Legacy overview path: a real live rooftop that has explicitly opted out via ?classic=1.
+  const liveReady = liveTeam && classic;
 
   // First-time welcome tour — a once-per-rooftop greeting for a genuine just-went-live dealer (the real
   // comingSoon gate). It's a full-screen modal, so it must NOT auto-open while someone is REVIEWING via
@@ -441,6 +466,22 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // dropped entirely; on the production report they stay in the top bar.
   const liveControls = hasTeam ? (
     <div className="no-print flex items-center gap-3">
+      {/* Sales/Service scope — only when the rooftop runs BOTH departments and isn't host-locked. Lives
+          here (not the top bar) because the new Live experience drops the top bar entirely. */}
+      {!locked && hasBothDepts && showPreview && stage === "live" && (
+        <div className="inline-flex items-center rounded-lg border border-[#e5e7eb] bg-white p-0.5 text-[12px] font-semibold">
+          {(["all", "sales", "service"] as const).map((d) => (
+            <button
+              key={d}
+              onClick={() => { setDept(d); track("dept_scope_changed", { tab: "overview", dept: d, team_id: teamId }); }}
+              className="rounded-md px-2.5 py-1 capitalize transition-colors"
+              style={dept === d ? { background: "#4600f2", color: "#fff" } : { color: "#6b7280" }}
+            >
+              {d === "all" ? "All" : d}
+            </button>
+          ))}
+        </div>
+      )}
       {(liveReady || (showPreview && stage === "live")) && <CustomizeToggle ctrl={ctrl} />}
       <DateFilter
         bucket={bucket}

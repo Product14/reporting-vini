@@ -24,6 +24,7 @@ export interface ReportEvents {
   report_viewed: { tab: ReportTab; team_id: string };
   report_tab_clicked: { from: ReportTab; to: ReportTab; team_id: string }; // nav flow between tabs
   date_range_changed: { tab: ReportTab; range: string; team_id: string };
+  dept_scope_changed: { tab: ReportTab; dept: string; team_id: string }; // Sales/Service/All scope toggle
   campaigns_filtered: { team_id: string; subtype: string }; // campaigns sub-type filter
   report_refreshed: { tab: ReportTab; team_id: string };
   report_exported: { tab: ReportTab; team_id: string; format: "csv" | "xlsx" | "print" };
