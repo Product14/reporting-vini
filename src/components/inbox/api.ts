@@ -261,22 +261,44 @@ export async function fetchInboxTranscript(a: InboxAuth, callId: string): Promis
 }
 
 /* ── Persona (View Details) ─────────────────────────────────────────────────── */
+// Every persona attribute arrives as this envelope: the value plus how sure the AI is (confidence 0..1)
+// and whether it was CONFIRMED by the customer or merely INFERRED. "NOT_DISCUSSED"/null ⇒ not captured.
+export interface PField<T = string | number> {
+  value?: T | null;
+  status?: string | null;     // CONFIRMED | INFERRED | null
+  confidence?: number | null; // 0..1
+  updatedAt?: string | null;
+}
+// A vehicle the customer looked at beyond their primary interest (vehicleInterest.watchedOtherVehicles).
+export interface WatchedVehicle {
+  make?: string | null; model?: string | null; year?: number | null; color?: string | null;
+  watchedPrice?: number | null; vin?: string | null; dealerVinId?: string | null;
+  confidence?: number | null; createdAt?: string | null; lastEngagedAt?: string | null;
+}
 export interface Persona {
   customerId?: string;
-  conversationMemory?: { summaryShort?: string; topMotivations?: string[]; topObjections?: string[] };
+  conversationMemory?: { summaryShort?: string; topMotivations?: string[]; topObjections?: string[]; doNotRepeat?: string[] };
   customerPreferences?: {
-    finance?: { budgetMax?: { value?: number | string | null }; monthlyBudgetMax?: { value?: number | string | null } };
+    finance?: {
+      budgetMax?: PField<number | string>;
+      monthlyBudgetMax?: PField<number | string>;
+      paymentMethod?: PField<string>; // FINANCE | LEASE | CASH
+    };
     vehicleInterest?: {
-      make?: { value?: string | null };
-      model?: { value?: string | null };
-      year?: { value?: number | string | null };
-      trim?: { value?: string | null };
+      make?: PField<string>; model?: PField<string>; year?: PField<number | string>; trim?: PField<string>;
+      bodyType?: PField<string>; color?: PField<string>; price?: PField<number>; vin?: PField<string>;
+      conditionPreference?: PField<string>; dealerVinId?: PField<string>;
+      lastEngagedAt?: string | null;
+      vehicleSignals?: { makes?: string[]; models?: string[]; bodyTypes?: string[]; colors?: string[]; trims?: string[]; years?: (number | string)[] };
+      vehiclePreferences?: { featurePreference?: string[]; fuelTypePreference?: string | null; transmissionPreference?: string | null; useCase?: string | null };
+      watchedOtherVehicles?: WatchedVehicle[];
     };
   };
-  purchaseIntent?: { stage?: { value?: string | null }; timelineToBuy?: { value?: string | null } };
+  purchaseIntent?: { stage?: PField<string>; timelineToBuy?: PField<string>; hotLeadScore?: number | null };
   tradeVehicles?: { vehicle?: { make?: string; model?: string; year?: number } }[];
   decisionContext?: { motivations?: { value: string }[]; painPoints?: { value: string }[]; objections?: { value: string }[] };
   engagement?: { lastContactedAt?: string; lastSmsContactAt?: string; lastCallContactAt?: string };
+  appointmentIntent?: { status?: PField<string> };
 }
 /* ── parsing helpers ────────────────────────────────────────────────────────── */
 // Classify one SMS message's content.

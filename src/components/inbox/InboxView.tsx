@@ -1372,6 +1372,176 @@ function DrawerActionItemRow({ a, auth, onResolved }: { a: ActionItem; auth: Inb
   );
 }
 
+/* ── persona (Lead Details) rendering ─────────────────────────────────────────
+ * The persona API backs far more than we used to show: per-field AI confidence +
+ * CONFIRMED/INFERRED status, purchase timeline, payment method, the vehicles the
+ * customer actually looked at, cross-vehicle signals, and "do not repeat" memory.
+ * Everything degrades independently — "NOT_DISCUSSED"/null fields simply don't render. */
+const NOT_DISCUSSED = (v: unknown) => v == null || v === "NOT_DISCUSSED" || v === "";
+function pval<T>(f?: { value?: T | null } | null): T | undefined {
+  return f && !NOT_DISCUSSED(f.value) ? (f.value as T) : undefined;
+}
+function money(v: unknown): string { return typeof v === "number" ? `$${v.toLocaleString()}` : String(v ?? ""); }
+// Small chip showing how sure the AI is about a field + whether the customer confirmed it.
+function ConfBadge({ f }: { f?: { confidence?: number | null; status?: string | null } | null }) {
+  if (!f || typeof f.confidence !== "number") return null;
+  const confirmed = (f.status || "").toUpperCase() === "CONFIRMED";
+  return (
+    <span className="ml-1.5 shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold"
+      style={{ background: confirmed ? "#e6f7ef" : C.primaryAccent, color: confirmed ? C.green : C.primary }}
+      title={confirmed ? "Confirmed by the customer" : "Inferred by the AI"}>
+      {Math.round(f.confidence * 100)}%
+    </span>
+  );
+}
+function Chips({ items }: { items: (string | number)[] }) {
+  const seen = new Set<string>();
+  const uniq = items.map((x) => String(x)).filter((x) => x && !seen.has(x.toLowerCase()) && seen.add(x.toLowerCase()));
+  if (!uniq.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {uniq.map((x) => <span key={x} className="rounded-full px-2 py-0.5 text-[11px] capitalize" style={{ background: "#f1f5f9", color: "#475569" }}>{x}</span>)}
+    </div>
+  );
+}
+function VehicleCard({ title, sub, price, viewedAt, inStock }: { title: string; sub?: string; price?: unknown; viewedAt?: string | null; inStock?: boolean }) {
+  return (
+    <div className="rounded-xl border p-3" style={{ borderColor: C.border }}>
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[12px] font-semibold" style={{ color: C.dark }}>{title}</p>
+        {inStock && <span className="shrink-0 rounded-full px-2 py-0.5 text-[9px] font-semibold" style={{ background: "#e6f7ef", color: C.green }}>In stock</span>}
+      </div>
+      {sub && <p className="mt-0.5 text-[11px] capitalize" style={{ color: C.sub }}>{sub}</p>}
+      <div className="mt-1 flex items-center gap-2 text-[11px]" style={{ color: C.sub }}>
+        {price != null && !NOT_DISCUSSED(price) && <span className="font-semibold" style={{ color: C.primary }}>{money(price)}</span>}
+        {viewedAt && <span>· viewed {fmtListStamp(viewedAt)}</span>}
+      </div>
+    </div>
+  );
+}
+
+// The full persona detail set. `scope` lets the tabbed drawer show just Intent-side or just Insights-side.
+function PersonaSections({ persona, conv, scope = "all" }: { persona?: Persona | null; conv: ConversationsV2 | null; scope?: "all" | "intent" | "insights" }) {
+  const p = persona || undefined;
+  const vi = p?.customerPreferences?.vehicleInterest;
+  const fin = p?.customerPreferences?.finance;
+  const stage = p?.purchaseIntent?.stage;
+  const timeline = pval<string>(p?.purchaseIntent?.timelineToBuy);
+  const payMethod = pval<string>(fin?.paymentMethod);
+  const monthly = pval<number | string>(fin?.monthlyBudgetMax);
+  const budget = pval<number | string>(fin?.budgetMax);
+  const trade = p?.tradeVehicles?.[0]?.vehicle;
+  const mem = p?.conversationMemory;
+  const sig = vi?.vehicleSignals;
+  const features = vi?.vehiclePreferences?.featurePreference ?? [];
+  const watched = (vi?.watchedOtherVehicles ?? []).filter((w) => w.make || w.model);
+  const primaryVeh = vi ? [pval(vi.year), pval(vi.make), pval(vi.model), pval(vi.trim)].filter(Boolean).join(" ") : "";
+  const stageVal = pval<string>(stage);
+  const motivations = [...(mem?.topMotivations ?? []), ...(p?.decisionContext?.motivations ?? []).map((m) => m.value)].filter(Boolean);
+  const objections = [...(mem?.topObjections ?? []), ...(p?.decisionContext?.objections ?? []).map((m) => m.value), ...(p?.decisionContext?.painPoints ?? []).map((m) => m.value)].filter(Boolean);
+  const doNotRepeat = (mem?.doNotRepeat ?? []).filter(Boolean);
+  const lastContacted = p?.engagement?.lastContactedAt;
+  const touches = conv?.conversations?.length ?? 0;
+
+  const showIntent = scope !== "insights";
+  const showInsights = scope !== "intent";
+  const hasIntent = !!(stageVal || timeline || payMethod || monthly != null || budget != null || primaryVeh || trade || watched.length || (sig && (sig.makes?.length || sig.models?.length || sig.bodyTypes?.length)) || features.length);
+  const hasInsights = !!(mem?.summaryShort || motivations.length || objections.length || doNotRepeat.length || lastContacted);
+
+  return (
+    <>
+      {showIntent && (stageVal || timeline) && (
+        <RightSection title="Purchase intent">
+          <div className="rounded-xl border p-3" style={{ borderColor: C.border }}>
+            {stageVal && (
+              <div className="flex items-center justify-between py-0.5">
+                <span className="text-[11px]" style={{ color: C.sub }}>Buying stage</span>
+                <span className="flex items-center text-[12px] font-medium" style={{ color: C.dark }}>{stageLabel(stageVal)}<ConfBadge f={stage} /></span>
+              </div>
+            )}
+            {timeline && <Row label="Timeline to buy" value={prettify(timeline)} />}
+          </div>
+        </RightSection>
+      )}
+
+      {showIntent && (payMethod || monthly != null || budget != null) && (
+        <RightSection title="Payment">
+          <div className="rounded-xl border p-3" style={{ borderColor: C.border }}>
+            {(monthly != null || budget != null) && (
+              <div className="flex items-center justify-between py-0.5">
+                <span className="text-[11px]" style={{ color: C.sub }}>Budget</span>
+                <span className="flex items-center text-[12px] font-medium" style={{ color: C.dark }}>
+                  {monthly != null ? `${money(monthly)}/mo` : money(budget)}
+                  {payMethod && <span className="lowercase" style={{ color: C.sub }}>&nbsp;· {prettify(payMethod)}</span>}
+                  <ConfBadge f={fin?.paymentMethod} />
+                </span>
+              </div>
+            )}
+            {monthly == null && budget == null && payMethod && <Row label="Payment method" value={prettify(payMethod)} />}
+          </div>
+        </RightSection>
+      )}
+
+      {showIntent && (primaryVeh || watched.length > 0) && (
+        <RightSection title="Considered vehicles">
+          {primaryVeh && (
+            <VehicleCard title={primaryVeh}
+              sub={[pval(vi?.conditionPreference), pval(vi?.bodyType), pval(vi?.color)].filter(Boolean).map((x) => prettify(String(x))).join(" · ") || undefined}
+              price={pval<number>(vi?.price)} viewedAt={vi?.lastEngagedAt}
+              inStock={!!(pval(vi?.dealerVinId) || pval(vi?.vin))} />
+          )}
+          {watched.map((w, i) => (
+            <VehicleCard key={i} title={[w.year, w.make, w.model].filter(Boolean).join(" ")}
+              sub={w.color ? prettify(w.color) : undefined} price={w.watchedPrice ?? undefined}
+              viewedAt={w.lastEngagedAt} inStock={!!(w.dealerVinId || w.vin)} />
+          ))}
+        </RightSection>
+      )}
+
+      {showIntent && trade && (
+        <RightSection title="Trade-in">
+          <div className="rounded-xl border p-3" style={{ borderColor: C.border }}>
+            <p className="text-[12px] font-medium" style={{ color: C.dark }}>{[trade.year, trade.make, trade.model].filter(Boolean).join(" ") || "On file"}</p>
+          </div>
+        </RightSection>
+      )}
+
+      {showIntent && sig && (!!sig.makes?.length || !!sig.models?.length || !!sig.bodyTypes?.length || features.length > 0) && (
+        <RightSection title="Signals">
+          <div className="flex flex-col gap-2">
+            {!!sig.makes?.length && (<div><p className="mb-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Makes</p><Chips items={sig.makes} /></div>)}
+            {!!sig.models?.length && (<div><p className="mb-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Models</p><Chips items={sig.models} /></div>)}
+            {!!sig.bodyTypes?.length && (<div><p className="mb-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Body</p><Chips items={sig.bodyTypes} /></div>)}
+            {features.length > 0 && (<div><p className="mb-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Features</p><Chips items={features} /></div>)}
+          </div>
+        </RightSection>
+      )}
+
+      {showInsights && (mem?.summaryShort || motivations.length || objections.length || doNotRepeat.length) && (
+        <RightSection title="Conversation memory">
+          {mem?.summaryShort && <p className="text-[12px] leading-[18px]" style={{ color: C.dark }}>{mem.summaryShort}</p>}
+          {motivations.length > 0 && (<div><p className="mb-1 mt-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Motivations</p><ul className="flex flex-col gap-1">{motivations.slice(0, 5).map((m, i) => <li key={i} className="text-[11px] leading-[16px]" style={{ color: C.dark }}>• {m}</li>)}</ul></div>)}
+          {objections.length > 0 && (<div><p className="mb-1 mt-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Objections &amp; pain points</p><ul className="flex flex-col gap-1">{objections.slice(0, 5).map((m, i) => <li key={i} className="text-[11px] leading-[16px]" style={{ color: C.dark }}>• {m}</li>)}</ul></div>)}
+          {doNotRepeat.length > 0 && (<div><p className="mb-1 mt-1 text-[10px] font-semibold uppercase" style={{ color: C.orange }}>Do not repeat</p><ul className="flex flex-col gap-1">{doNotRepeat.slice(0, 6).map((m, i) => <li key={i} className="text-[11px] leading-[16px]" style={{ color: C.sub }}>• {m}</li>)}</ul></div>)}
+        </RightSection>
+      )}
+
+      {showInsights && (lastContacted || touches > 0) && (
+        <RightSection title="Engagement">
+          <div className="rounded-xl border p-3" style={{ borderColor: C.border }}>
+            {lastContacted && <Row label="Last contacted" value={fmtListStamp(lastContacted)} />}
+            {touches > 0 && <Row label="Touches" value={String(touches)} />}
+          </div>
+        </RightSection>
+      )}
+
+      {scope === "all" && !hasIntent && !hasInsights && (
+        <p className="text-[12px]" style={{ color: C.sub }}>No lead insights captured yet.</p>
+      )}
+    </>
+  );
+}
+
 function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: InboxCustomer; onExpand: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   const [persona, setPersona] = useState<Persona | null>(null);
@@ -1396,17 +1566,6 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   const actions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const nextSched = normalizeNextScheduled(conv?.nextScheduledTasks?.[0]);
   const stopped = stoppedLocal ?? !!lead?.stopAiEngagement;
-
-  // persona-sourced Intent + AI Insights (same fields the modal shows)
-  const vi = persona?.customerPreferences?.vehicleInterest;
-  const vehicle = vi ? [vi.year?.value, vi.make?.value, vi.model?.value, vi.trim?.value].filter(Boolean).join(" ") : "";
-  const budget = persona?.customerPreferences?.finance?.budgetMax?.value;
-  const pStage = persona?.purchaseIntent?.stage?.value;
-  const trade = persona?.tradeVehicles?.[0]?.vehicle;
-  const summary = persona?.conversationMemory?.summaryShort;
-  const motivations = persona?.decisionContext?.motivations ?? [];
-  const objections = [...(persona?.decisionContext?.objections ?? []), ...(persona?.decisionContext?.painPoints ?? [])];
-  const hasIntent = !!(vehicle || (budget != null && budget !== "NOT_DISCUSSED") || pStage || trade);
 
   async function handleStop() {
     if (stopped || busy || !lead?.lead_id) return;
@@ -1481,34 +1640,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
             </RightSection>
           )}
 
-          {hasIntent && (
-            <RightSection title="Intent">
-              <div className="rounded-xl border p-3" style={{ borderColor: C.border }}>
-                {pStage && <Row label="Buying stage" value={stageLabel(String(pStage))} />}
-                {vehicle && <Row label="Vehicle" value={vehicle} />}
-                {budget != null && budget !== "NOT_DISCUSSED" && <Row label="Budget" value={typeof budget === "number" ? `$${budget.toLocaleString()}` : String(budget)} />}
-                {trade && <Row label="Trade-in" value={[trade.year, trade.make, trade.model].filter(Boolean).join(" ")} />}
-              </div>
-            </RightSection>
-          )}
-
-          {(summary || motivations.length > 0 || objections.length > 0) && (
-            <RightSection title="AI insights">
-              {summary && <p className="text-[12px] leading-[18px]" style={{ color: C.dark }}>{summary}</p>}
-              {motivations.length > 0 && (
-                <div>
-                  <p className="mb-1 mt-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Motivations</p>
-                  <ul className="flex flex-col gap-1">{motivations.slice(0, 4).map((m, i) => <li key={i} className="text-[11px] leading-[16px]" style={{ color: C.dark }}>• {m.value}</li>)}</ul>
-                </div>
-              )}
-              {objections.length > 0 && (
-                <div>
-                  <p className="mb-1 mt-1 text-[10px] font-semibold uppercase" style={{ color: C.sub }}>Objections & pain points</p>
-                  <ul className="flex flex-col gap-1">{objections.slice(0, 4).map((m, i) => <li key={i} className="text-[11px] leading-[16px]" style={{ color: C.dark }}>• {m.value}</li>)}</ul>
-                </div>
-              )}
-            </RightSection>
-          )}
+          <PersonaSections persona={persona} conv={conv} />
 
           <RightSection title="Lead journey">
             <LeadTimeline journey={conv?.leadJourney ?? []} nextScheduled={normalizeNextScheduled(conv?.nextScheduledTasks?.[0])} />
@@ -1577,15 +1709,6 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
     if (ok) setStoppedLocal(true);
     else if (typeof window !== "undefined") window.alert("Couldn't stop engagement — please try again.");
   }
-
-  const vi = P?.customerPreferences?.vehicleInterest;
-  const vehicle = vi ? [vi.year?.value, vi.make?.value, vi.model?.value, vi.trim?.value].filter(Boolean).join(" ") : "";
-  const budget = P?.customerPreferences?.finance?.budgetMax?.value;
-  const stage = P?.purchaseIntent?.stage?.value;
-  const trade = P?.tradeVehicles?.[0]?.vehicle;
-  const motivations = P?.decisionContext?.motivations ?? [];
-  const objections = [...(P?.decisionContext?.objections ?? []), ...(P?.decisionContext?.painPoints ?? [])];
-  const summary = P?.conversationMemory?.summaryShort;
 
   const TABS: { id: DetailTab; label: string; count?: number }[] = [
     { id: "intent", label: "Intent" },
@@ -1661,19 +1784,14 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
           ) : tab === "journey" ? (
             <LeadTimeline journey={conv?.leadJourney ?? []} nextScheduled={normalizeNextScheduled(conv?.nextScheduledTasks?.[0])} />
           ) : tab === "intent" ? (
-            <div className="flex flex-col gap-3">
-              {stage && <DetailCard title="Buying stage"><p className="text-[13px] font-medium" style={{ color: C.dark }}>{stageLabel(String(stage))}</p></DetailCard>}
-              {vehicle && <DetailCard title="Vehicle interest"><p className="text-[13px] font-medium" style={{ color: C.dark }}>{vehicle}</p></DetailCard>}
-              {budget != null && budget !== "NOT_DISCUSSED" && <DetailCard title="Budget"><p className="text-[13px] font-medium" style={{ color: C.dark }}>{typeof budget === "number" ? `$${budget.toLocaleString()}` : String(budget)}</p></DetailCard>}
-              {trade && <DetailCard title="Trade-in"><p className="text-[13px] font-medium" style={{ color: C.dark }}>{[trade.year, trade.make, trade.model].filter(Boolean).join(" ")}</p></DetailCard>}
-              {!stage && !vehicle && budget == null && !trade && <EmptyDetail label={persona === "error" ? "Intent profile unavailable." : "No intent signals captured yet."} />}
+            <div className="flex flex-col gap-4">
+              {P ? <PersonaSections persona={P} conv={conv} scope="intent" />
+                : <EmptyDetail label={persona === "error" ? "Intent profile unavailable." : "No intent signals captured yet."} />}
             </div>
           ) : (
-            <div className="flex flex-col gap-3">
-              {summary && <DetailCard title="Summary"><p className="text-[12px] leading-[18px]" style={{ color: C.dark }}>{summary}</p></DetailCard>}
-              {motivations.length > 0 && <DetailCard title="Motivations"><ul className="flex flex-col gap-1">{motivations.slice(0, 5).map((m, i) => <li key={i} className="text-[12px] leading-[17px]" style={{ color: C.dark }}>• {m.value}</li>)}</ul></DetailCard>}
-              {objections.length > 0 && <DetailCard title="Objections & pain points"><ul className="flex flex-col gap-1">{objections.slice(0, 5).map((m, i) => <li key={i} className="text-[12px] leading-[17px]" style={{ color: C.dark }}>• {m.value}</li>)}</ul></DetailCard>}
-              {!summary && motivations.length === 0 && objections.length === 0 && <EmptyDetail label={persona === "error" ? "AI insights unavailable." : "No AI insights captured yet."} />}
+            <div className="flex flex-col gap-4">
+              {P ? <PersonaSections persona={P} conv={conv} scope="insights" />
+                : <EmptyDetail label={persona === "error" ? "AI insights unavailable." : "No AI insights captured yet."} />}
             </div>
           )}
         </div>
@@ -1707,15 +1825,6 @@ function Assignee({ who }: { who: string }) {
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
       {name}
     </span>
-  );
-}
-
-function DetailCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border p-3.5" style={{ borderColor: C.border, background: C.bg }}>
-      <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>{title}</p>
-      {children}
-    </div>
   );
 }
 
