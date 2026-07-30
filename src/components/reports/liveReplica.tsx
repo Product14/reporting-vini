@@ -108,21 +108,40 @@ function HeroTile({ icon, value, label, sub, missing, onUpsell }: { icon: string
   );
 }
 
+// Service hero: 4 metric tiles in ONE divided container, each an icon-chip + "N Noun" headline + sub
+// (matches the Figma service overview — not the sales tile grid).
+function ServiceHeroTiles({ fleet, actionStats, hotLeads }: { fleet: FleetLive; actionStats: ActionItemStats | null; hotLeads: number }) {
+  const tiles = [
+    { icon: "/live-overview/icon-afterhours.svg", chipBg: "#ede9fe", headline: <><CountUp value={fleet.afterHours} /> Leads</>, sub: "Captured after-hours" },
+    { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <>{actionStats ? <CountUp value={actionStats.created} /> : "—"} Action Items</>, sub: actionStats ? `${fmtInt(actionStats.open)} items are still open` : "syncing…" },
+    { icon: "🔥", chipBg: "#fde9ec", headline: <><CountUp value={hotLeads} /> Hot Leads</>, sub: "warmed & in-market now" },
+    { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={fleet.appointments} /> Appointments</>, sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
+  ];
+  return (
+    <div className="flex w-full flex-wrap items-stretch overflow-hidden rounded-xl border border-[#e5e7eb] bg-white">
+      {tiles.map((t, i) => (
+        <div key={i} className={`flex flex-1 basis-[210px] items-start gap-3 px-6 py-5 ${i > 0 ? "border-l border-[#e5e7eb]" : ""}`}>
+          <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg" style={{ background: t.chipBg }}>
+            {t.icon.startsWith("/") ? <Image src={t.icon} alt="" width={18} height={18} /> : <span className="text-[16px] leading-none">{t.icon}</span>}
+          </span>
+          <div className="flex flex-col gap-1">
+            <p className="text-[18px] font-bold leading-[22px] text-[#030712]">{t.headline}</p>
+            <p className="text-[12px] text-[#626f81]">{t.sub}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function LiveHero({ fleet, actionStats, onUpsell, controls, serviceMode, hotLeads = 0 }: { fleet: FleetLive; actionStats: ActionItemStats | null; onUpsell?: () => void; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number }) {
-  const tiles = serviceMode
-    ? [
-        { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Leads", sub: "captured after-hours" },
-        { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items", sub: actionStats ? `${fmtInt(actionStats.open)} items still open` : "syncing…" },
-        { icon: "🔥", value: <CountUp value={hotLeads} />, label: "Hot Leads", sub: "warmed & in-market now" },
-        { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
-      ]
-    : [
-        { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: "avg first response", missing: fleet.responseTimeSec == null },
-        { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
-        { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…" },
-        { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
-        { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed" },
-      ];
+  const tiles = [
+    { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: "avg first response", missing: fleet.responseTimeSec == null },
+    { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
+    { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…" },
+    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
+    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed" },
+  ];
   return (
     <section
       className="flex flex-col items-center justify-center gap-6 rounded-lg border border-[#e5e7eb] px-10 py-6"
@@ -134,9 +153,13 @@ export function LiveHero({ fleet, actionStats, onUpsell, controls, serviceMode, 
         <p className="text-[22px] font-bold tracking-[-0.01em] text-[#030712]">{serviceMode ? "Here’s what your Service AI agents handled" : "Here’s what your sales AI handled"}</p>
       </div>
       {controls && <div className="no-print flex flex-wrap items-center justify-center gap-2.5">{controls}</div>}
-      <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
-        {tiles.map((t) => <HeroTile key={t.label} {...t} onUpsell={onUpsell} />)}
-      </div>
+      {serviceMode ? (
+        <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} />
+      ) : (
+        <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
+          {tiles.map((t) => <HeroTile key={t.label} {...t} onUpsell={onUpsell} />)}
+        </div>
+      )}
     </section>
   );
 }
@@ -175,31 +198,37 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
   ];
   return (
     <button onClick={onClick} className="lv-lift flex flex-1 basis-0 flex-col items-start gap-6 overflow-hidden rounded-[15px] border border-[#e5e7eb] bg-white p-5 text-left">
-      <div className="flex w-full items-start justify-between gap-4 rounded-[15px] border border-[#e5e7eb] p-5">
-        <div className="flex items-center gap-3">
-          <span className="relative h-12 w-12 flex-none overflow-hidden rounded-full border border-[#e5e7eb]">
-            <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top" />
+      <div className="flex w-full items-start justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <span
+            className="relative flex h-[60px] w-[60px] flex-none items-center justify-center rounded-full p-[2.5px]"
+            style={{ background: inbound ? "linear-gradient(135deg,#86efac,#93c5fd,#c4b5fd)" : "linear-gradient(135deg,#fdba74,#fca5a5,#f0abfc)" }}
+          >
+            <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white">
+              <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top" />
+            </span>
           </span>
-          <div className="flex flex-col items-start gap-1.5">
+          <div className="flex flex-col items-start gap-2">
             <p className="text-[20px] font-semibold leading-none text-[#030712]">{possessive(person)} Performance</p>
             <span
-              className="flex items-center gap-1 rounded px-2.5 py-1 text-[12px] font-medium"
+              className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium"
               style={inbound ? { background: C.blueBg, color: C.blue } : { background: C.greenBg, color: C.green }}
             >
               {inbound ? "↙" : "↗"} {agent.dept} {agent.dir}
             </span>
           </div>
         </div>
-        <div className="flex flex-col items-end gap-1">
+        <div className="flex flex-col items-end gap-0.5">
           <p className="text-[32px] font-semibold leading-none tracking-[-1px] text-[#030712]">{fmtRate(appts, qualified)}</p>
           <p className="text-[12px] font-medium text-[#626f81]">Close Rate</p>
-          <p className="text-[11px] font-medium text-[#9aa1ac]">{fmtInt(appts)} of {fmtInt(qualified)} Qualified</p>
         </div>
       </div>
 
-      <div className="flex w-full flex-col items-start gap-2.5 px-[15px]">
-        <p className="text-[12px] font-semibold text-[#030712]">Where {possessive(person)} leads stand</p>
-        <p className="text-[20px] font-semibold tracking-[-0.4px] text-[#030712]"><CountUp value={reached} /></p>
+      <div className="flex w-full flex-col gap-3 rounded-[15px] border border-[#e5e7eb] p-4">
+        <div className="flex w-full items-center justify-between">
+          <p className="text-[13px] font-semibold text-[#030712]">Where {possessive(person)} leads stand</p>
+          <p className="text-[22px] font-bold tracking-[-0.4px] text-[#030712]"><CountUp value={reached} /></p>
+        </div>
         <div ref={barRef} className="flex h-2 w-full overflow-hidden rounded-lg bg-[#f3f4f6]">
           {segments.map((s, i) => (
             <div
@@ -209,12 +238,14 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
             />
           ))}
         </div>
-        <div className="grid w-full grid-cols-2 gap-x-[15px] gap-y-[15px]">
-          {legend.map((l) => (
-            <div key={l.label} className="flex items-center gap-2">
-              <span className="h-3 w-3 flex-none rounded-sm" style={{ background: l.color }} />
-              <span className="text-[14px] font-medium tracking-[-0.28px] text-[#030712]"><CountUp value={l.value} /></span>
-              <span className="text-[12px] tracking-[-0.24px] text-[#626f81]">{l.label}</span>
+        <div className="flex w-full flex-col">
+          {legend.map((l, i) => (
+            <div key={l.label} className={`flex w-full items-center justify-between py-2.5 ${i > 0 ? "border-t border-[#f0f1f3]" : ""}`}>
+              <div className="flex items-center gap-2.5">
+                <span className="h-3 w-3 flex-none rounded-sm" style={{ background: l.color }} />
+                <span className="text-[13px] tracking-[-0.24px] text-[#626f81]">{l.label}</span>
+              </div>
+              <span className="text-[15px] font-semibold tracking-[-0.28px] text-[#030712]"><CountUp value={l.value} /></span>
             </div>
           ))}
         </div>
@@ -532,9 +563,28 @@ export function LiveConversationsTable({
   const [tab, setTab] = React.useState("attention");
   const all = items ?? [];
   const unresolved = all.filter((c) => !convStatus(c).ok).length;
-  const rows = (tab === "attention" ? all.filter((c) => !convStatus(c).ok) : all).slice(0, 6);
+  // "Real conversation" (canonical): the customer actually engaged — a call they stayed on (not a
+  // voicemail/no-answer blip) OR an SMS thread with a human reply. No connected flag on the row, so
+  // proxy calls by a short talk-time floor and SMS by the presence of an inbound/human message.
+  const isReal = (c: Conversation) =>
+    c.channel === "call"
+      ? (c.durationSec ?? 0) >= 15
+      : (c.sms?.some((m) => m.direction === "inbound" || m.authorType === "human") ?? (c.msgs ?? 0) > 1);
+  const match = (c: Conversation) => {
+    switch (tab) {
+      case "attention": return !convStatus(c).ok;
+      case "real": return isReal(c);
+      case "call": return c.channel === "call";
+      case "sms": return c.channel === "sms";
+      default: return true; // all
+    }
+  };
+  const rows = all.filter(match).slice(0, 6);
   const tabs = [
     { key: "attention", label: "Needs Attention", count: unresolved },
+    { key: "real", label: "Real", count: all.filter(isReal).length },
+    { key: "call", label: "Calls", count: all.filter((c) => c.channel === "call").length },
+    { key: "sms", label: "SMS", count: all.filter((c) => c.channel === "sms").length },
     { key: "all", label: "All", count: all.length },
   ];
   return (
