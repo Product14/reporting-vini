@@ -21,7 +21,7 @@
  * is the true product state and also drives the exact expansion narrative the story wants. */
 
 import React from "react";
-import { fmtSecs } from "./kitV3";
+import { fmtSecs, Modal } from "./kitV3";
 import { CountUp } from "./anim";
 import type { FleetLive, ActionItemStats } from "./liveData";
 
@@ -211,25 +211,75 @@ function OffFlow({ bucket, delay, onBackToTraining, mode }: { bucket: BucketDef;
 
 /* The headline "unlock full potential" banner — shown in Live above the impact story. Names how many of
  * the three flows are live and drives the dealer back to Training to switch the rest on. */
-// Value nudge on Live: how many flows are switched on, and that more can be. `onCta` is optional — when
-// provided it navigates (kept for internal review); when absent the CTA is an informational pill that
-// points the dealer to their Spyne team rather than a retired in-app destination.
-export function UnlockPotentialBanner({ liveCount = 1, total = 3, onCta }: { liveCount?: number; total?: number; onCta?: () => void }) {
+// Email CTA target — the dealer's point of contact at Spyne. Prefilled subject + body so the ask is
+// one click. (Confirm the alias with the team; support@spyne.ai is the safe default.)
+const SPYNE_CONTACT = "support@spyne.ai";
+const flowMailto = () => {
+  const subject = "Turn on more Vini flows for my store";
+  const body =
+    "Hi Spyne team,\n\n" +
+    "My AI agent is live on the After-hours flow. I'd like to turn on the Overflow and All-Leads flows so no lead is ever missed, any hour.\n\n" +
+    "Can you help me enable them?\n\nThanks";
+  return `mailto:${SPYNE_CONTACT}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+};
+
+// Explains the three flows (what each covers, which are on) and hands the dealer an email CTA to their
+// Spyne team. Portal-backed Modal, so it never traps the page (see the drawer/portal fix).
+function FlowsModal({ open, onClose, liveCount, total }: { open: boolean; onClose: () => void; liveCount: number; total: number }) {
   return (
-    <div className="vs-rise flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#d8caff] px-5 py-4" style={{ background: "linear-gradient(100deg,#f6f1ff,#fdf1f6)" }}>
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex h-7 w-7 flex-none items-center justify-center rounded-full text-[14px]" style={{ background: "#efe9ff" }}>🔓</span>
-        <div>
-          <p className="text-[13.5px] font-bold text-[#030712]">You&apos;re running {liveCount} of {total} flows — your agent can do more.</p>
-          <p className="text-[11.5px] leading-snug text-[#626f81]">You&apos;re live on After-hours. Overflow and All-Leads can capture every lead, any hour — ask your Spyne team to switch them on.</p>
-        </div>
+    <Modal open={open} onClose={onClose} title="Your AI can cover more of your leads" sub={`${liveCount} of ${total} flows live — here's what turning on the rest means`}>
+      <div className="flex flex-col gap-4">
+        <p className="text-[13px] leading-relaxed text-[#626f81]">
+          Vini works your leads in three flows. You&apos;re live on the first — switching on the next two means
+          every lead gets answered instantly, any hour, whether the floor is closed or every advisor is busy.
+        </p>
+        {VALUE_BUCKETS.map((b, i) => {
+          const on = i < liveCount;
+          return (
+            <div key={b.id} className="rounded-xl border p-4" style={{ borderColor: on ? "#c7e9d3" : "#ececf2", background: on ? "#f6fef9" : "#fff" }}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[13.5px] font-bold text-[#030712]">{i + 1}. {b.title}</p>
+                  <p className="text-[11.5px] text-[#9aa1ac]">{b.window}</p>
+                </div>
+                <StatusChip tone={on ? "green" : "grey"} label={on ? "Live" : "Not yet on"} />
+              </div>
+              <p className="mt-2.5 text-[12.5px] leading-snug text-[#626f81]"><span className="font-semibold" style={{ color: C.red }}>Without it:</span> {b.pain}</p>
+              <p className="mt-1 text-[12.5px] leading-snug text-[#626f81]"><span className="font-semibold" style={{ color: C.green }}>With it:</span> {b.gain}</p>
+            </div>
+          );
+        })}
+        <a
+          href={flowMailto()}
+          className="mt-1 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-[13px] font-bold text-white"
+          style={{ background: C.primary }}
+        >
+          ✉ Email my Spyne team to enable these →
+        </a>
+        <p className="text-center text-[11px] text-[#9aa1ac]">Opens your email to {SPYNE_CONTACT} with the request ready to send.</p>
       </div>
-      {onCta ? (
-        <button onClick={onCta} className="flex-none rounded-lg px-4 py-2 text-[12.5px] font-bold text-white" style={{ background: C.primary }}>Enable more flows →</button>
-      ) : (
-        <span className="flex-none rounded-lg border border-[#d8caff] bg-white px-4 py-2 text-[12.5px] font-bold" style={{ color: C.primary }}>Talk to your Spyne team →</span>
-      )}
-    </div>
+    </Modal>
+  );
+}
+
+// Value nudge on Live: how many flows are switched on, and that more can be. The CTA opens an explainer
+// modal (what the flows mean) with an email CTA to the dealer's Spyne team — no retired in-app path.
+export function UnlockPotentialBanner({ liveCount = 1, total = 3 }: { liveCount?: number; total?: number }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <>
+      <div className="vs-rise flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#d8caff] px-5 py-4" style={{ background: "linear-gradient(100deg,#f6f1ff,#fdf1f6)" }}>
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex h-7 w-7 flex-none items-center justify-center rounded-full text-[14px]" style={{ background: "#efe9ff" }}>🔓</span>
+          <div>
+            <p className="text-[13.5px] font-bold text-[#030712]">You&apos;re running {liveCount} of {total} flows — your agent can do more.</p>
+            <p className="text-[11.5px] leading-snug text-[#626f81]">You&apos;re live on After-hours. Overflow and All-Leads can capture every lead, any hour — ask your Spyne team to switch them on.</p>
+          </div>
+        </div>
+        <button onClick={() => setOpen(true)} className="flex-none rounded-lg border border-[#d8caff] bg-white px-4 py-2 text-[12.5px] font-bold transition-colors hover:bg-[#f6f1ff]" style={{ color: C.primary }}>Talk to your Spyne team →</button>
+      </div>
+      <FlowsModal open={open} onClose={() => setOpen(false)} liveCount={liveCount} total={total} />
+    </>
   );
 }
 
