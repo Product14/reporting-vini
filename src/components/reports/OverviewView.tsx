@@ -266,16 +266,19 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     [allAgents],
   );
 
-  // Agent drill-down — internal (/reports/ root: By-agent lives in the same iframe) navigates the app's
-  // own route; parent (/overview/, standalone) breaks out to the parent console's Reports page instead,
-  // since that view is now a different iframe entirely.
+  // Agent drill-down — clicking an agent card takes the user to the parent console's Reporting tab
+  // (top-level nav), NEVER renders the By-agent view inside the Overview. Whenever this app runs inside
+  // the console iframe (embedded), OR the route is wired as the parent Overview, break OUT to the parent
+  // Reports page. Only a truly standalone app (direct/localhost, no parent frame) navigates the in-app
+  // route so the By-agent view stays reachable in dev.
   const openAgent = (agentId: string) => {
     track("agent_opened", { team_id: teamId, agent: agentId });
     const internalPath = `/reports/agents${navQuery}${navQuery ? "&" : "?"}agent=${agentId}`;
-    if (agentLinkMode === "internal") {
-      router.push(internalPath);
-    } else {
+    const embedded = typeof window !== "undefined" && window.top !== window.self;
+    if (embedded || agentLinkMode === "parent") {
       goCrossPage("reports", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined, agent: agentId }, internalPath);
+    } else {
+      router.push(internalPath);
     }
   };
 
