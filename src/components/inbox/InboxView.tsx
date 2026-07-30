@@ -127,6 +127,16 @@ function fmtListStamp(iso: string | null | undefined): string {
   if (dk === dayKeyTz(new Date(Date.now() - 86400000))) return "Yesterday";
   return d.toLocaleDateString([], withTz({ month: "short", day: "numeric" }));
 }
+// Dealer-local date without a time (for campaign spans — their start is a date-only 00:00Z stamp).
+function fmtDateOnly(iso: string | null | undefined): string {
+  const d = parseDate(iso);
+  return d ? d.toLocaleDateString([], withTz({ month: "short", day: "numeric" })) : "";
+}
+// Campaign length in whole days between start and end (INVAI-4965): "N days" / "Same day".
+function campaignDays(start: string, end: string): string {
+  const n = Math.max(0, daysBetweenTzDays(new Date(end), new Date(start)));
+  return n === 0 ? "Same day" : n === 1 ? "1 day" : `${n} days`;
+}
 // Render `text` with the first case-insensitive occurrence of `q` tinted (search typeahead highlight).
 function Highlight({ text, q }: { text: string; q: string }) {
   const query = q.trim();
@@ -160,7 +170,6 @@ const Svg = ({ size = 16, children, className, style }: IconProps & { children: 
 const IconSearch = (p: IconProps) => <Svg {...p}><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></Svg>;
 const IconDownload = (p: IconProps) => <Svg {...p}><path d="M12 3v12" /><path d="m7 12 5 5 5-5" /><path d="M5 21h14" /></Svg>;
 const IconFilter = (p: IconProps) => <Svg {...p}><path d="M3 5h18" /><path d="M6 12h12" /><path d="M10 19h4" /></Svg>;
-const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
 const IconChevron = (p: IconProps) => <Svg {...p}><path d="m6 9 6 6 6-6" /></Svg>;
 const IconList = (p: IconProps) =><Svg {...p}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></Svg>;
 const IconCalendar = (p: IconProps) => <Svg {...p}><rect x="3" y="4.5" width="18" height="17" rx="2" /><path d="M3 9h18M8 2.5v4M16 2.5v4" /></Svg>;
@@ -212,9 +221,8 @@ function Inbox() {
   // Which date the range/sort applies to (API sortBy). "conversation" = most-recently-active first,
   // the natural inbox ordering; "lead" = newest lead first (filters on lead createdAt).
   const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
-  const [department, setDepartment] = useState<"" | "sales" | "service">("");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const activeFilterCount = leadType.length + leadSource.length + (dateRange !== "all" ? 1 : 0) + (department ? 1 : 0);
+  const activeFilterCount = leadType.length + leadSource.length + (dateRange !== "all" ? 1 : 0);
 
   const [tz, setTz] = useState<string | null>(null);
   const [page, setPage] = useState<LeadsPage | null>(null);
@@ -235,6 +243,13 @@ function Inbox() {
   // reflect real data, so they persist after a conversation is read (unlike the unread dot).
   const [rowMeta, setRowMeta] = useState<Record<string, { appt: number; actions: number }>>({});
   const rowMetaCache = useRef<Record<string, { appt: number; actions: number }>>({});
+  // Customers opened this session — treated as read (INVAI-4968; no read-state write API exists).
+  const [readIds, setReadIds] = useState<Set<string>>(new Set());
+  const openCustomer = useCallback((c: InboxCustomer) => {
+    setSelected(c);
+    setDetailsOpen(false);
+    setReadIds((prev) => (prev.has(c.customer_id) ? prev : new Set(prev).add(c.customer_id)));
+  }, []);
 
   // Debounce the search box → searchTerm query.
   useEffect(() => {
@@ -255,7 +270,6 @@ function Inbox() {
       searchTerm: debounced || undefined,
       leadType: leadType.length ? leadType : undefined,
       leadSource: leadSource.length ? leadSource : undefined,
-      department: department || undefined,
       sortBy: dateBasis,
       startDate: range.startDate,
       endDate: range.endDate,
@@ -276,7 +290,7 @@ function Inbox() {
     });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, leadSource, dateRange, dateBasis, department]);
+  }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, leadSource, dateRange, dateBasis]);
 
   const customers = useMemo(() => page?.customers ?? [], [page]);
 
@@ -298,7 +312,10 @@ function Inbox() {
   }, [search, customers]);
   const showSuggest = searchFocused && search.trim().length >= 1 && suggestions.length > 0;
   const totalAll = page?.pagination.totalCustomers ?? customers.length;
-  const totalUnread = page?.pagination.unreadCount ?? 0;
+  // Customers opened this session count as read immediately (there's no read-state write API), so the
+  // Unread count + the row dot update on open instead of staying stale (INVAI-4968).
+  const readInSession = customers.filter((c) => readIds.has(c.customer_id) && (c.unreadCounts?.totalUnread ?? 0) > 0).length;
+  const totalUnread = Math.max(0, (page?.pagination.unreadCount ?? 0) - readInSession);
 
   // Enrich visible rows with appointment + open-action-item counts (cached by customer_id).
   useEffect(() => {
@@ -358,7 +375,6 @@ function Inbox() {
               leadSource={leadSource} onLeadSource={setLeadSource}
               dateRange={dateRange} onDateRange={setDateRange}
               dateBasis={dateBasis} onDateBasis={setDateBasis}
-              department={department} onDepartment={setDepartment}
               onClose={() => setFiltersOpen(false)}
             />
           )}
@@ -430,7 +446,8 @@ function Inbox() {
                   c={c}
                   meta={rowMeta[c.customer_id]}
                   active={selected?.customer_id === c.customer_id}
-                  onClick={() => { setSelected(c); setDetailsOpen(false); }}
+                  read={readIds.has(c.customer_id)}
+                  onClick={() => openCustomer(c)}
                 />
               ))
             )}
@@ -444,7 +461,6 @@ function Inbox() {
               key={selected.customer_id}
               auth={auth}
               customer={selected}
-              onViewDetails={() => setDetailsOpen(true)}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-[13px]" style={{ color: C.sub }}>
@@ -485,8 +501,8 @@ function TabBtn({ active, onClick, label }: { active: boolean; onClick: () => vo
   );
 }
 
-function ConversationRow({ c, meta, active, onClick }: { c: InboxCustomer; meta?: { appt: number; actions: number }; active: boolean; onClick: () => void }) {
-  const unread = c.unreadCounts?.totalUnread ?? 0;
+function ConversationRow({ c, meta, active, read, onClick }: { c: InboxCustomer; meta?: { appt: number; actions: number }; active: boolean; read?: boolean; onClick: () => void }) {
+  const unread = read ? 0 : c.unreadCounts?.totalUnread ?? 0;
   const callUnread = c.unreadCounts?.callUnread ?? 0;
   const name = c.customer_name || c.mobile_number || "Unknown";
   return (
@@ -559,7 +575,7 @@ type ThreadNode =
 const EVENT_GRADIENT =
   "linear-gradient(90deg, rgba(91,109,246,0.10) 1%, rgba(127,106,242,0.10) 23%, rgba(182,81,215,0.10) 66%, rgba(232,62,84,0.10) 86%, rgba(237,137,57,0.10) 113%)";
 
-function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; customer: InboxCustomer; onViewDetails: () => void }) {
+function ThreadPane({ auth, customer }: { auth: InboxAuth; customer: InboxCustomer }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   // §7A purple summary box — persona.conversationMemory.summaryShort, shown at the top of the chat.
   const [summary, setSummary] = useState<string>("");
@@ -674,17 +690,34 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
         out.push({ t: base, kind: "call", rec });
       }
     }
+    // Direction of each conversation by id — so appointments/action items (which reference their source
+    // conversation) only show under the matching inbound/outbound filter (INVAI-4952/-4960). Under the
+    // "All" view everything shows; under a specific direction, only chips whose source matches it.
+    const dirByConvId: Record<string, "in" | "out" | "unknown"> = {};
+    for (const rec of conv.conversations) dirByConvId[rec.conversationId] = convDirection(rec);
+    const matchesDir = (cid?: string) => dir === "all" || (!!cid && dirByConvId[cid] === dir);
+
     // Inline "created" events in the chat: appointment booked + action item created (at their createdAt).
     for (const a of conv.nextAppointments ?? []) {
+      if (!matchesDir(a.conversation_id)) continue;
       const t = +new Date((a.createdAt as string) || a.meeting_start_time || "") || 0;
       if (t) out.push({ t, kind: "created", emoji: "🗓", title: "Appointment created", detail: apptLabel(a) });
     }
     for (const ai of conv.nextActionItems ?? []) {
+      if (!matchesDir(ai.meta?.conversationId)) continue;
       const t = +new Date((ai.createdAt as string) || "") || 0;
       if (t) out.push({ t, kind: "created", emoji: "⚑", title: "Action item created", detail: ai.description || prettify(ai.intent || "") });
     }
+    // A speed-to-lead that fires at the same instant as a CAMPAIGN sms is really the campaign send, not a
+    // genuine speed-to-lead — suppress the STL pill in that case (INVAI-4967).
+    const campaignSmsTs = new Set(
+      (conv.leadJourney ?? [])
+        .filter((e) => e.eventType === "outbound_task" && (e.source || "").toUpperCase() === "CAMPAIGN" && (e.channel || "").toLowerCase() === "sms")
+        .map((e) => +new Date(e.timestamp) || 0),
+    );
     // Lead-journey milestones interleaved chronologically in the chat (also shown in the right panel).
     for (const ev of conv.leadJourney ?? []) {
+      if (ev.eventType === "stl_triggered" && campaignSmsTs.has(+new Date(ev.timestamp) || 0)) continue;
       const m = journeyMeta(ev);
       // Per-touch "side tasks" (campaign/follow-up sends) are routine — render them subtly so the
       // milestones (lead created, speed-to-lead, appointment) stay the visual anchors of the journey.
@@ -738,9 +771,6 @@ function ThreadPane({ auth, customer, onViewDetails }: { auth: InboxAuth; custom
                 );
               })}
             </div>
-            <button onClick={onViewDetails} className="flex items-center gap-2 rounded-[15px] border px-6 py-2.5 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]" style={{ borderColor: C.border, color: C.dark }}>
-              <IconInfo size={14} /> View Details
-            </button>
           </div>
         </div>
       </div>
@@ -1048,8 +1078,10 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
   const inbound = (cd.callType || "").toLowerCase().includes("inbound");
   const durSec = parseFloat(cd.callDuration || "0");
   const recording = cd.recordingUrl || null;
-  const noAnswer = /voicemail|no[-_ ]?answer|missed|not[-_ ]?connect|failed|before[-_ ]?warm/i.test(cd.endedReason || "");
-  const connected = !!recording && durSec > 3 && !noAnswer;
+  // Whether the call actually connected — driven by endedReason, NOT by recording presence. A connected
+  // call whose recording is still processing was wrongly shown as "didn't connect" before (INVAI-4961).
+  const noAnswer = /voicemail|no[-_ ]?answer|missed|busy|failed|declined|rejected|canceled|cancelled|not[-_ ]?connect|before[-_ ]?warm|did[-_ ]?not[-_ ]?answer/i.test(cd.endedReason || "");
+  const connected = !noAnswer && durSec > 3;
   const rating = fb.map[`${rec.conversationId}#0`];
   const name = (rec.customerDetails?.name || customerName || "the customer").trim();
   const custFirst = name.split(/\s+/)[0] || name;
@@ -1110,7 +1142,9 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
 
         {open && recording && (
           <div className="border-t px-4 py-3" style={{ borderColor: C.border }}>
-            <audio controls preload="metadata" src={recording} className="h-9 w-full"><track kind="captions" /></audio>
+            {/* autoPlay: expand is a user gesture (clicking the row/Play pill), so the recording starts
+                immediately instead of needing a second click (INVAI-4962). */}
+            <audio controls autoPlay preload="metadata" src={recording} className="h-9 w-full"><track kind="captions" /></audio>
             <div className="mt-3 flex items-center justify-between border-b" style={{ borderColor: C.border }}>
               <div className="flex items-center gap-4">
                 {(["transcript", "review"] as const).map((t) => (
@@ -1228,26 +1262,35 @@ function journeyMeta(ev: LeadJourneyEvent): { emoji: string; title: string; deta
 /* Build the journey timeline, MERGING each campaign_started with its matching campaign_ended (same
  * campaignName) into ONE entry so the linked pair reads as a single campaign with a start→end span,
  * instead of two far-apart rows. Other events pass through individually. */
-interface TimelineItem { emoji: string; title: string; detail: string; at: string; endAt?: string; campaign?: boolean; children?: TimelineItem[] }
+interface TimelineItem { emoji: string; title: string; detail: string; at: string; endAt?: string; campaign?: boolean; dateOnly?: boolean; children?: TimelineItem[] }
 function buildTimeline(journey: LeadJourneyEvent[]): TimelineItem[] {
   const sorted = [...journey].sort((a, b) => (+new Date(a.timestamp) || 0) - (+new Date(b.timestamp) || 0));
   const items: TimelineItem[] = [];
   const openByName: Record<string, TimelineItem> = {};
+  // Suppress a speed-to-lead that coincides with a CAMPAIGN sms — it's the campaign send, not a genuine
+  // speed-to-lead (INVAI-4967).
+  const campaignSmsTs = new Set(
+    journey.filter((e) => e.eventType === "outbound_task" && (e.source || "").toUpperCase() === "CAMPAIGN" && (e.channel || "").toLowerCase() === "sms")
+      .map((e) => +new Date(e.timestamp) || 0),
+  );
   // A speed-to-lead trigger fires an outbound touch — nest that resulting task UNDER the trigger as a
   // sub-layer, instead of showing the two connected events flat side-by-side.
   let trigger: TimelineItem | null = null;
   for (const ev of sorted) {
     if (ev.eventType === "campaign_started") {
       trigger = null;
-      const item: TimelineItem = { emoji: "📣", title: ev.campaignName || "Campaign", detail: "Campaign", at: ev.timestamp, campaign: true };
+      // Campaign start arrives date-only (00:00Z) — flag it so the timeline shows a DATE, not a time
+      // (all campaigns otherwise read as the same clock time — INVAI-4958), and can show a day span.
+      const item: TimelineItem = { emoji: "📣", title: ev.campaignName || "Campaign", detail: "Campaign", at: ev.timestamp, campaign: true, dateOnly: true };
       items.push(item);
       if (ev.campaignName) openByName[ev.campaignName] = item;
     } else if (ev.eventType === "campaign_ended") {
       trigger = null;
       const open = ev.campaignName ? openByName[ev.campaignName] : undefined;
       if (open) { open.endAt = ev.timestamp; if (ev.campaignName) delete openByName[ev.campaignName]; }
-      else items.push({ emoji: "🏁", title: ev.campaignName || "Campaign ended", detail: "Campaign ended", at: ev.timestamp, campaign: true });
+      else items.push({ emoji: "🏁", title: ev.campaignName || "Campaign ended", detail: "Campaign ended", at: ev.timestamp, campaign: true, dateOnly: true });
     } else if (ev.eventType === "stl_triggered") {
+      if (campaignSmsTs.has(+new Date(ev.timestamp) || 0)) continue;
       const m = journeyMeta(ev);
       const item: TimelineItem = { emoji: m.emoji, title: m.title, detail: m.detail, at: ev.timestamp, children: [] };
       items.push(item);
@@ -1280,7 +1323,9 @@ function LeadTimeline({ journey, nextScheduled }: { journey: LeadJourneyEvent[];
           <p className="text-[12px] font-semibold" style={{ color: C.dark }}>{it.emoji} {it.campaign ? `Campaign · ${it.title}` : it.title}</p>
           {!it.campaign && it.detail && <p className="text-[11px]" style={{ color: C.sub }}>{it.detail}</p>}
           <p className="text-[10px]" style={{ color: C.sub }}>
-            {it.endAt ? `Started ${fmtListStamp(it.at)} · Ended ${fmtListStamp(it.endAt)}` : it.campaign ? `Started ${fmtListStamp(it.at)} · Active` : fmtListStamp(it.at)}
+            {it.dateOnly
+              ? (it.endAt ? `${fmtDateOnly(it.at)} → ${fmtDateOnly(it.endAt)} · ${campaignDays(it.at, it.endAt)}` : `Started ${fmtDateOnly(it.at)} · Active`)
+              : it.endAt ? `Started ${fmtListStamp(it.at)} · Ended ${fmtListStamp(it.endAt)}` : fmtListStamp(it.at)}
           </p>
           {/* connected events (the resulting outbound touch) shown as an indented sub-layer */}
           {it.children && it.children.length > 0 && (
@@ -1614,6 +1659,8 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   const [persona, setPersona] = useState<Persona | null>(null);
   const [stoppedLocal, setStoppedLocal] = useState<boolean | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [stopErr, setStopErr] = useState(false);
   const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -1622,6 +1669,8 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
     setConv(null);
     setPersona(null);
     setStoppedLocal(null);
+    setConfirmStop(false);
+    setStopErr(false);
     setResolvedIds(new Set());
     fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((d) => { if (on) setConv(d); });
     fetchInboxPersona(auth, customer.customer_id).then((p) => { if (on) setPersona(p); });
@@ -1637,12 +1686,13 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
 
   async function handleStop() {
     if (stopped || busy || !lead?.lead_id) return;
-    if (typeof window !== "undefined" && !window.confirm("Stop AI engagement for this lead? Vini will stop all automated outreach.")) return;
+    // Two-step in-app confirm — native window.confirm is suppressed inside the embedded iframe (INVAI-4964).
+    if (!confirmStop) { setConfirmStop(true); setStopErr(false); return; }
+    setConfirmStop(false);
     setBusy(true);
     const ok = await stopInboxEngagement(auth, lead.lead_id);
     setBusy(false);
-    if (ok) setStoppedLocal(true);
-    else if (typeof window !== "undefined") window.alert("Couldn't stop engagement — please try again.");
+    if (ok) setStoppedLocal(true); else setStopErr(true);
   }
 
   return (
@@ -1661,21 +1711,29 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
           <div className="flex flex-wrap items-center gap-2">
             {lead?.temperature && <TempBadge temp={lead.temperature} />}
             {lead?.stage && <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold" style={{ background: C.primaryAccent, color: C.primary }}>{stageLabel(lead.stage)}</span>}
-            {lead?.service_type && <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: "#f1f5f9", color: "#64748b" }}>{lead.service_type}</span>}
+            {/* A customer can have BOTH a sales and a service lead — show every distinct type, not just
+                leads[0]'s (INVAI-4949/-4954, where a sales lead was mislabelled "service"). */}
+            {Array.from(new Set((conv?.leads ?? []).map((l) => l.service_type).filter(Boolean))).map((st) => (
+              <span key={st} className="rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: "#f1f5f9", color: "#64748b" }}>{st}</span>
+            ))}
           </div>
-          <button
-            onClick={handleStop}
-            disabled={stopped || busy || !lead?.lead_id}
-            title={stopped ? "AI engagement is stopped" : "Stop all automated outreach for this lead"}
-            className="flex items-center justify-between rounded-xl border px-3.5 py-2.5 text-left transition-colors enabled:hover:bg-[#fafafa] disabled:cursor-default"
-            style={{ borderColor: C.border, background: C.bg }}>
-            <span className="text-[12px] font-medium" style={{ color: stopped ? "#64748b" : C.dark }}>
-              {busy ? "Stopping…" : stopped ? "AI engagement stopped" : "Stop AI Engagement"}
-            </span>
-            <span className="flex h-[22px] w-[38px] items-center rounded-full px-0.5 transition-colors" style={{ background: stopped ? C.primary : "#d1d5db" }}>
-              <span className="size-[18px] rounded-full bg-white transition-transform" style={{ transform: stopped ? "translateX(16px)" : "translateX(0)" }} />
-            </span>
-          </button>
+          <div>
+            <button
+              onClick={handleStop}
+              onMouseLeave={() => confirmStop && setConfirmStop(false)}
+              disabled={stopped || busy || !lead?.lead_id}
+              title={stopped ? "AI engagement is stopped" : "Stop all automated outreach for this lead"}
+              className="flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-left transition-colors enabled:hover:bg-[#fafafa] disabled:cursor-default"
+              style={{ borderColor: confirmStop ? C.red : C.border, background: C.bg }}>
+              <span className="text-[12px] font-medium" style={{ color: stopped ? "#64748b" : confirmStop ? C.red : C.dark }}>
+                {busy ? "Stopping…" : stopped ? "AI engagement stopped" : confirmStop ? "Click again to confirm stop" : "Stop AI Engagement"}
+              </span>
+              <span className="flex h-[22px] w-[38px] items-center rounded-full px-0.5 transition-colors" style={{ background: stopped ? C.primary : "#d1d5db" }}>
+                <span className="size-[18px] rounded-full bg-white transition-transform" style={{ transform: stopped ? "translateX(16px)" : "translateX(0)" }} />
+              </span>
+            </button>
+            {stopErr && <p className="mt-1 text-[11px]" style={{ color: C.red }}>Couldn&apos;t stop engagement — please try again.</p>}
+          </div>
 
           {nextSched && <NextScheduledChip ns={nextSched} />}
 
@@ -1748,6 +1806,8 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   const [tab, setTab] = useState<DetailTab>("activity");
   const [stoppedLocal, setStoppedLocal] = useState<boolean | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [stopErr, setStopErr] = useState(false);
   const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -1756,6 +1816,8 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
     setPersona("loading");
     setConv(null);
     setStoppedLocal(null);
+    setConfirmStop(false);
+    setStopErr(false);
     setResolvedIds(new Set());
     fetchInboxPersona(auth, customer.customer_id).then((p) => { if (on) setPersona(p ?? "error"); });
     fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((d) => { if (on) setConv(d); });
@@ -1770,12 +1832,13 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
 
   async function handleStop() {
     if (stopped || busy || !lead?.lead_id) return;
-    if (typeof window !== "undefined" && !window.confirm("Stop AI engagement for this lead? Vini will stop all automated outreach.")) return;
+    // Two-step in-app confirm — native window.confirm is suppressed inside the embedded iframe (INVAI-4964).
+    if (!confirmStop) { setConfirmStop(true); setStopErr(false); return; }
+    setConfirmStop(false);
     setBusy(true);
     const ok = await stopInboxEngagement(auth, lead.lead_id);
     setBusy(false);
-    if (ok) setStoppedLocal(true);
-    else if (typeof window !== "undefined") window.alert("Couldn't stop engagement — please try again.");
+    if (ok) setStoppedLocal(true); else setStopErr(true);
   }
 
   const TABS: { id: DetailTab; label: string; count?: number }[] = [
@@ -1868,12 +1931,14 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
         <div className="shrink-0 border-t px-5 pb-5 pt-3" style={{ borderColor: C.border }}>
           <button
             onClick={handleStop}
+            onMouseLeave={() => confirmStop && setConfirmStop(false)}
             disabled={stopped || busy || !lead?.lead_id}
             title={stopped ? "AI engagement is stopped" : "Stop all automated outreach for this lead"}
             className="flex w-full items-center justify-center gap-2 rounded-[15px] border py-2.5 text-[14px] font-medium transition-colors enabled:hover:bg-[#fafafa] disabled:cursor-default"
-            style={{ borderColor: C.border, color: stopped ? "#64748b" : C.red }}>
-            🚫 {busy ? "Stopping…" : stopped ? "Engagement stopped" : "Stop Engagement"}
+            style={{ borderColor: confirmStop ? C.red : C.border, color: stopped ? "#64748b" : C.red }}>
+            🚫 {busy ? "Stopping…" : stopped ? "Engagement stopped" : confirmStop ? "Click again to confirm" : "Stop Engagement"}
           </button>
+          {stopErr && <p className="mt-1.5 text-center text-[11px]" style={{ color: C.red }}>Couldn&apos;t stop engagement — please try again.</p>}
         </div>
       </div>
     </div>
@@ -1953,32 +2018,21 @@ function dateRangeToIso(r: DateRange): { startDate?: string; endDate?: string } 
 }
 
 function FiltersPopover({
-  leadType, onLeadType, leadSource, onLeadSource, dateRange, onDateRange, dateBasis, onDateBasis, department, onDepartment, onClose,
+  leadType, onLeadType, leadSource, onLeadSource, dateRange, onDateRange, dateBasis, onDateBasis, onClose,
 }: {
   leadType: string[]; onLeadType: (v: string[]) => void;
   leadSource: string[]; onLeadSource: (v: string[]) => void;
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
-  department: "" | "sales" | "service"; onDepartment: (v: "" | "sales" | "service") => void;
   onClose: () => void;
 }) {
   const toggle = (arr: string[], set: (v: string[]) => void, t: string) =>
     set(arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t]);
-  const anyActive = leadType.length || leadSource.length || dateRange !== "all" || department;
+  const anyActive = leadType.length || leadSource.length || dateRange !== "all";
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div className="animate-dropdown-in absolute right-0 top-11 z-50 max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg" style={{ borderColor: C.border }}>
-        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Department</p>
-        <div className="mb-3 flex gap-1.5">
-          {(["", "sales", "service"] as const).map((d) => (
-            <button key={d || "all"} onClick={() => onDepartment(d)}
-              className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium capitalize transition-colors"
-              style={department === d ? { borderColor: C.primary, color: C.primary, background: C.primaryAccent } : { borderColor: C.border, color: C.sub }}>
-              {d || "All"}
-            </button>
-          ))}
-        </div>
         <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Date range</p>
         <div className="mb-2 flex flex-col gap-1">
           {DATE_RANGES.map((d) => (
@@ -2018,7 +2072,7 @@ function FiltersPopover({
           ))}
         </div>
         {anyActive ? (
-          <button onClick={() => { onLeadType([]); onLeadSource([]); onDateRange("all"); onDepartment(""); }}
+          <button onClick={() => { onLeadType([]); onLeadSource([]); onDateRange("all"); }}
             className="mt-3 w-full rounded-lg border py-1.5 text-[11px] font-medium" style={{ borderColor: C.border, color: C.sub }}>
             Clear all
           </button>

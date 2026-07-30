@@ -58,7 +58,6 @@ export interface LeadsQuery {
   endDate?: string;
   leadType?: string[];
   leadSource?: string[];
-  department?: "sales" | "service";
   // Which date field startDate/endDate filter on (and the sort): lead createdAt vs last_contacted_at.
   sortBy?: "lead" | "conversation";
 }
@@ -79,7 +78,6 @@ export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Pro
   if (q.endDate) p.set("endDate", q.endDate);
   for (const t of q.leadType ?? []) p.append("leadType", t);
   for (const s of q.leadSource ?? []) p.append("leadSource", s);
-  if (q.department) p.set("department", q.department);
   if (q.sortBy) p.set("sortBy", q.sortBy);
   withEnv(p, a);
   try {
@@ -178,7 +176,9 @@ export interface ActionItem {
   is_active?: boolean;
   is_completed?: boolean;
   service_type?: string;
-  meta?: { vehicle_details?: { make?: string; model?: string; year?: string; trim?: string } };
+  // meta carries the SOURCE conversation/call the item was created from — used to attribute it to an
+  // inbound vs outbound touch (there's no top-level direction field). INVAI-4952/-4960.
+  meta?: { conversationId?: string; callSid?: string; customer_id?: string; vehicle_details?: { make?: string; model?: string; year?: string; trim?: string } };
   [k: string]: unknown;
 }
 export interface ConversationsV2 {
