@@ -23,7 +23,7 @@ import type { AgentData, WarmLeadItem, NamedAppt } from "./data";
 import { fmtInt } from "./data";
 import type { ActionItem, ActionItemStats, Conversation } from "./liveData";
 import type { FleetLive } from "./liveData";
-import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, closerLabel, agentDisplayName, ConversationDrawer } from "./kitV3";
+import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, agentDisplayName, ConversationDrawer } from "./kitV3";
 import { UnlockPotentialBanner } from "./valueStory";
 import { CountUp, useInView } from "./anim";
 
@@ -98,7 +98,7 @@ function HeroTile({ icon, value, label, sub, missing, onUpsell }: { icon: string
   }
   return (
     <div className="flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-[#e5e7eb] bg-white p-[15px]">
-      <Image src={icon} alt="" width={28} height={28} />
+      {icon.startsWith("/") ? <Image src={icon} alt="" width={28} height={28} /> : <span className="text-[24px] leading-none">{icon}</span>}
       <div className="flex flex-col items-start gap-1">
         <p className="text-[16px] font-bold leading-[20px] text-[#030712]">{value}</p>
         <p className="text-[12px] font-semibold text-[#030712]">{label}</p>
@@ -108,14 +108,21 @@ function HeroTile({ icon, value, label, sub, missing, onUpsell }: { icon: string
   );
 }
 
-export function LiveHero({ fleet, actionStats, onUpsell, controls }: { fleet: FleetLive; actionStats: ActionItemStats | null; onUpsell?: () => void; controls?: React.ReactNode }) {
-  const tiles = [
-    { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: "avg first response", missing: fleet.responseTimeSec == null },
-    { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
-    { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…" },
-    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
-    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed" },
-  ];
+export function LiveHero({ fleet, actionStats, onUpsell, controls, serviceMode, hotLeads = 0 }: { fleet: FleetLive; actionStats: ActionItemStats | null; onUpsell?: () => void; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number }) {
+  const tiles = serviceMode
+    ? [
+        { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Leads", sub: "captured after-hours" },
+        { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items", sub: actionStats ? `${fmtInt(actionStats.open)} items still open` : "syncing…" },
+        { icon: "🔥", value: <CountUp value={hotLeads} />, label: "Hot Leads", sub: "warmed & in-market now" },
+        { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
+      ]
+    : [
+        { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: "avg first response", missing: fleet.responseTimeSec == null },
+        { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
+        { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…" },
+        { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
+        { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed" },
+      ];
   return (
     <section
       className="flex flex-col items-center justify-center gap-6 rounded-lg border border-[#e5e7eb] px-10 py-6"
@@ -124,7 +131,7 @@ export function LiveHero({ fleet, actionStats, onUpsell, controls }: { fleet: Fl
       <div className="flex flex-col items-center gap-1.5">
         <Image src="/live-overview/icon-sparkle.svg" alt="" width={18} height={18} />
         <p className="text-[14px] text-[#030712]">{greeting()}</p>
-        <p className="text-[22px] font-bold tracking-[-0.01em] text-[#030712]">Here&apos;s what your sales AI handled</p>
+        <p className="text-[22px] font-bold tracking-[-0.01em] text-[#030712]">{serviceMode ? "Here’s what your Service AI agents handled" : "Here’s what your sales AI handled"}</p>
       </div>
       {controls && <div className="no-print flex flex-wrap items-center justify-center gap-2.5">{controls}</div>}
       <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
@@ -168,28 +175,25 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
   ];
   return (
     <button onClick={onClick} className="lv-lift flex flex-1 basis-0 flex-col items-start gap-6 overflow-hidden rounded-[15px] border border-[#e5e7eb] bg-white p-5 text-left">
-      <div className="flex w-full items-center justify-between rounded-[15px] border border-[#e5e7eb] pl-5">
-        <div className="flex flex-col items-start gap-6">
-          <div className="flex flex-col items-start gap-2">
+      <div className="flex w-full items-start justify-between gap-4 rounded-[15px] border border-[#e5e7eb] p-5">
+        <div className="flex items-center gap-3">
+          <span className="relative h-12 w-12 flex-none overflow-hidden rounded-full border border-[#e5e7eb]">
+            <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top" />
+          </span>
+          <div className="flex flex-col items-start gap-1.5">
+            <p className="text-[20px] font-semibold leading-none text-[#030712]">{possessive(person)} Performance</p>
             <span
               className="flex items-center gap-1 rounded px-2.5 py-1 text-[12px] font-medium"
               style={inbound ? { background: C.blueBg, color: C.blue } : { background: C.greenBg, color: C.green }}
             >
-              {inbound ? "↙" : "↗"} {agent.dir}
+              {inbound ? "↙" : "↗"} {agent.dept} {agent.dir}
             </span>
-            <p className="text-[20px] font-semibold text-[#030712]">{possessive(person)} Performance</p>
-          </div>
-          <div className="flex w-[219px] flex-col items-start gap-3">
-            <p className="w-full text-[12px] font-medium text-[#626f81]">Close Rate</p>
-            <div className="flex w-full items-end justify-between">
-              <p className="text-[32px] font-semibold leading-none tracking-[-1px] text-[#030712]">{fmtRate(appts, qualified)}</p>
-              <p className="text-[12px] font-medium text-[#626f81]">{fmtInt(appts)} of {fmtInt(qualified)} Qualified</p>
-            </div>
-            <div className="h-px w-full bg-[#e5e7eb]" />
           </div>
         </div>
-        <div className="relative h-[220px] w-[195px] flex-none overflow-hidden">
-          <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover" />
+        <div className="flex flex-col items-end gap-1">
+          <p className="text-[32px] font-semibold leading-none tracking-[-1px] text-[#030712]">{fmtRate(appts, qualified)}</p>
+          <p className="text-[12px] font-medium text-[#626f81]">Close Rate</p>
+          <p className="text-[11px] font-medium text-[#9aa1ac]">{fmtInt(appts)} of {fmtInt(qualified)} Qualified</p>
         </div>
       </div>
 
@@ -251,7 +255,7 @@ function FunnelCell({ label, value, delta, last }: { label: string; value: numbe
     </div>
   );
 }
-export function LiveFunnelCard({ fleet }: { fleet: FleetLive }) {
+export function LiveFunnelCard({ fleet, serviceMode }: { fleet: FleetLive; serviceMode?: boolean }) {
   const [leads, conv, qual, appt] = fleet.funnel;
   const conv1 = leads.value > 0 ? Math.round((conv.value / leads.value) * 100) : null;
   const conv2 = conv.value > 0 ? Math.round((qual.value / conv.value) * 100) : null;
@@ -259,7 +263,7 @@ export function LiveFunnelCard({ fleet }: { fleet: FleetLive }) {
   return (
     <div className="flex w-full flex-col items-start overflow-hidden rounded-[10px] border border-[#e5e7eb] bg-white p-5">
       <div className="flex w-full flex-col items-start gap-[15px]">
-        <p className="text-[12px] font-semibold uppercase text-[#030712]">📊 Lead-to-sale funnel</p>
+        <p className="text-[12px] font-semibold uppercase text-[#030712]">📊 {serviceMode ? "Lead-to-service funnel" : "Lead-to-sale funnel"}</p>
         <div className="flex w-full items-start">
           <FunnelCell label="Leads touched" value={leads.value} delta={fleet.deltas.leads} />
           <FunnelCell label="Real Conversations" value={conv.value} delta={fleet.deltas.conversations} />
@@ -425,23 +429,56 @@ function overdueLabel(dueAt: string): { text: string; danger: boolean } {
   if (days === 0) return { text: "Due today", danger: false };
   return { text: `Due in ${-days} day${-days === 1 ? "" : "s"}`, danger: false };
 }
+function TableTabs({ tabs, active, onPick }: { tabs: { key: string; label: string; count?: number }[]; active: string; onPick: (k: string) => void }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {tabs.map((t) => {
+        const on = t.key === active;
+        return (
+          <button
+            key={t.key}
+            onClick={() => onPick(t.key)}
+            className="rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
+            style={on ? { background: C.primary, color: "#fff" } : { background: C.greyBg, color: C.sub }}
+          >
+            {t.label}{t.count != null ? ` (${t.count})` : ""}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 export function LiveActionItemsTable({ items, stats, onViewAll }: { items: ActionItem[]; stats: ActionItemStats | null; onViewAll: () => void }) {
-  const rows = items.slice(0, 5);
+  const [tab, setTab] = React.useState("created");
+  const filtered = items.filter((a) => {
+    if (tab === "overdue") return overdueLabel(a.dueAt).danger;
+    if (tab === "today") return overdueLabel(a.dueAt).text === "Due today";
+    return true; // created / open
+  });
+  const rows = filtered.slice(0, 5);
+  const tabs = [
+    { key: "created", label: "Created", count: stats?.created },
+    { key: "overdue", label: "Overdue", count: stats?.overdue },
+    { key: "today", label: "Due Today", count: stats?.dueToday },
+    { key: "open", label: "All Open", count: stats?.open },
+  ];
   return (
     <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
-      <div className="flex h-[60px] w-full items-center justify-between border-b border-[#e5e7eb] px-5 py-[15px]">
+      <div className="flex min-h-[60px] w-full flex-wrap items-center justify-between gap-3 border-b border-[#e5e7eb] px-5 py-[15px]">
         <p className="text-[14px] font-semibold uppercase text-[#030712]">📝 Action items</p>
+        <TableTabs tabs={tabs} active={tab} onPick={setTab} />
       </div>
       {rows.length === 0 ? (
-        <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">No open action items right now.</p>
+        <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">No action items in this view.</p>
       ) : (
         <div className="w-full overflow-x-auto px-[15px]">
-          <table className="w-full min-w-[760px] border-collapse text-[14px]">
+          <table className="w-full min-w-[820px] border-collapse text-[14px]">
             <thead>
               <tr className="text-left text-[#626f81]">
                 <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Customer</th>
+                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Contact</th>
                 <th className="border-b border-[#e5e7eb] p-[15px] font-medium">What to do?</th>
-                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Assigned</th>
+                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Due Date</th>
                 <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Status</th>
               </tr>
             </thead>
@@ -457,8 +494,9 @@ export function LiveActionItemsTable({ items, stats, onViewAll }: { items: Actio
                         <span className="whitespace-nowrap text-[#030712]">{name}</span>
                       </div>
                     </td>
-                    <td className="max-w-[360px] border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.description}</td>
-                    <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{closerLabel(a.assignedTo)}</td>
+                    <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.phone ?? "—"}</td>
+                    <td className="max-w-[320px] border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.description}</td>
+                    <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{fmtWhenShort(a.dueAt).split(" · ")[0]}</td>
                     <td className="border-b border-[#e5e7eb] p-[15px] text-center">
                       <span className="whitespace-nowrap rounded px-[15px] py-1 text-[12px] font-medium" style={st.danger ? { background: C.redBg, color: C.red } : { background: C.blueBg, color: C.blue }}>{st.text}</span>
                     </td>
@@ -491,29 +529,36 @@ export function LiveConversationsTable({
   onViewAll: () => void;
 }) {
   const [sel, setSel] = React.useState<Conversation | null>(null);
-  const rows = (items ?? []).slice(0, 6);
-  const unresolved = (items ?? []).filter((c) => !convStatus(c).ok).length;
+  const [tab, setTab] = React.useState("attention");
+  const all = items ?? [];
+  const unresolved = all.filter((c) => !convStatus(c).ok).length;
+  const rows = (tab === "attention" ? all.filter((c) => !convStatus(c).ok) : all).slice(0, 6);
+  const tabs = [
+    { key: "attention", label: "Needs Attention", count: unresolved },
+    { key: "all", label: "All", count: all.length },
+  ];
   return (
     <>
       <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
-        <div className="flex h-[60px] w-full items-center justify-between border-b border-[#e5e7eb] px-5 py-[15px]">
+        <div className="flex min-h-[60px] w-full flex-wrap items-center justify-between gap-3 border-b border-[#e5e7eb] px-5 py-[15px]">
           <p className="text-[14px] font-semibold uppercase text-[#030712]">💬 Recent conversations</p>
+          {items !== null && <TableTabs tabs={tabs} active={tab} onPick={setTab} />}
         </div>
         {items === null ? (
           <div className="w-full px-5 pb-5"><div className="h-[220px] w-full animate-pulse rounded-xl bg-[#f3f4f6]" /></div>
         ) : rows.length === 0 ? (
-          <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">No conversations synced yet.</p>
+          <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">{tab === "attention" ? "Nothing needs attention — all conversations resolved." : "No conversations synced yet."}</p>
         ) : (
           <div className="w-full overflow-x-auto px-[15px]">
-            <table className="w-full min-w-[820px] border-collapse text-[14px]">
+            <table className="w-full min-w-[860px] border-collapse text-[14px]">
               <thead>
                 <tr className="text-left text-[#626f81]">
                   <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Customer</th>
+                  <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Contact</th>
                   <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Intent</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Channel</th>
                   <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Date &amp; Time</th>
                   <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Duration</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Status</th>
+                  <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Outcome</th>
                 </tr>
               </thead>
               <tbody>
@@ -528,8 +573,8 @@ export function LiveConversationsTable({
                           <span className="whitespace-nowrap text-[#030712]">{name}</span>
                         </div>
                       </td>
-                      <td className="max-w-[280px] truncate border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.title || agentDisplayName(c, agentNames)}</td>
                       <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.channel === "sms" ? "💬" : "📞"} {c.phone ?? "—"}</td>
+                      <td className="max-w-[280px] truncate border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.title || agentDisplayName(c, agentNames)}</td>
                       <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-center text-[#030712]">{fmtWhenShort(c.at)}</td>
                       <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-center text-[#030712]">{c.channel === "call" ? (c.durationSec ? fmtSecs(c.durationSec) : "—") : `${c.msgs ?? 0} messages`}</td>
                       <td className="border-b border-[#e5e7eb] p-[15px] text-center">
@@ -577,17 +622,19 @@ export function LiveOverview({
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
+  const serviceMode = agents.length > 0 && agents.every((a) => a.dept === "Service");
+  const hotLeads = warmLeads.filter((w) => w.tier === "hot").length;
   return (
     <div className="flex flex-col gap-4">
       <LiveAnims />
-      <div className="lv-rise" style={{ animationDelay: "0ms" }}><LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} onUpsell={onBackToTraining} controls={headerControls} /></div>
+      <div className="lv-rise" style={{ animationDelay: "0ms" }}><LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} onUpsell={onBackToTraining} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} /></div>
       <div className="lv-rise flex flex-col gap-5 lg:flex-row" style={{ animationDelay: "70ms" }}>
         {inbound && <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} />}
         {outbound && <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} />}
       </div>
       <div className="lv-rise flex flex-col gap-3.5" style={{ animationDelay: "140ms" }}>
         <UnlockPotentialBanner liveCount={1} total={3} onBackToTraining={onBackToTraining} />
-        <LiveFunnelCard fleet={fleet} />
+        <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />
       </div>
       <div className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: "210ms" }}>
         <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />
