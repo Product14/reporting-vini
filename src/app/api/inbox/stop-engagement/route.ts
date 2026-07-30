@@ -33,6 +33,12 @@ export async function POST(request: Request): Promise<Response> {
     "DELETE",
     { leadId },
   );
-  if (!res.ok) return Response.json({ error: res.error }, { status: res.status });
+  // A 404 from delete-by-lead means the lead has NO active workflows/tasks/meetings to delete — so
+  // engagement is already in the desired (stopped) state. Treat that as idempotent SUCCESS instead of
+  // surfacing a "couldn't stop engagement" error for what is actually a no-op stop.
+  if (!res.ok) {
+    if (res.status === 404) return Response.json({ ok: true, alreadyStopped: true });
+    return Response.json({ error: res.error }, { status: res.status });
+  }
   return Response.json(res.data ?? { ok: true });
 }
