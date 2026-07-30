@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   BUCKET_LABELS,
@@ -203,7 +203,41 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // A degraded fetch (transient outage / cold-start timeout) is NOT "never live" — keep the UI in the
   // syncing state and let the re-arm effect below retry, rather than flip to the "coming soon" gate.
   const degraded = feed?.degraded === true;
-  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData);
+  // "Ever live" sticky: once a rooftop has returned real data in THIS browser, it can never legitimately
+  // become "never live" again. A later clean-but-empty read is therefore a transient blip, not a genuine
+  // coming-soon — so we suppress the gate and self-heal (below) instead of making the dealer reload.
+  const feedIsLive = feed !== null && (feed.everLive === true || feed.hasData === true || feed.agents.length > 0);
+  const [wasLive, setWasLive] = useState(false);
+  useEffect(() => {
+    let seen = false;
+    if (teamId) { try { seen = localStorage.getItem(`vini_live_${teamId}`) === "1"; } catch { /* storage blocked */ } }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWasLive(seen);
+  }, [teamId]);
+  useEffect(() => {
+    if (!teamId || !feedIsLive) return;
+    try { localStorage.setItem(`vini_live_${teamId}`, "1"); } catch { /* storage blocked */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWasLive(true);
+  }, [teamId, feedIsLive]);
+  // A clean-but-empty read for a rooftop we KNOW was live → treat it like a transient blip, not the gate.
+  const staleEmpty = hasTeam && wasLive && feed !== null && !degraded && !feedIsLive;
+  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData) && !staleEmpty;
+  // Self-heal a stale-empty read: quietly re-fetch (bounded, ~5 tries) until real data lands, so the
+  // report fills in on its own instead of stranding a known-live rooftop on the syncing state. Depends on
+  // `feed` so each re-fetch re-arms; the counter caps it so it can never poll forever.
+  const staleHealsRef = useRef(0);
+  useEffect(() => {
+    if (!staleEmpty) { staleHealsRef.current = 0; return; }
+    if (staleHealsRef.current >= 5) return;
+    let on = true;
+    const t = setTimeout(() => {
+      staleHealsRef.current += 1;
+      fetchAgents({ teamId, ...rangeOpts, force: true }).then((res) => { if (on) setFeed(res); }).catch(() => {});
+    }, 1500);
+    return () => { on = false; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, bucket, custom, staleEmpty, feed]);
   // Preview-only override for reviewing the "just went live" training design AND the exact-replica Live
   // design side by side, without waiting for a real comingSoon rooftop — e.g. ?state=training or
   // ?state=live, plus (training only) forcing one direction's status via ?ib=/?ob= (not_sold |
@@ -217,7 +251,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // production audience — they now get the new stepper/Live experience by default. ?classic=1 is the
   // safe rollback: it forces the legacy overview for this session without a redeploy.
   const classic = previewParams.get("classic") != null;
-  const liveTeam = showReport && hasTeam && feed !== null && !degraded && !comingSoon;
+  const liveTeam = showReport && hasTeam && feed !== null && !degraded && !comingSoon && !staleEmpty;
   // The new experience (Onboarding → Training → Live) drives previews (comingSoon / ?state= / ?sample=)
   // AND real live rooftops. ?classic=1 opts a real live team back to the old MetricTile overview — it
   // never disables an explicit preview/sample, only the live-team auto-enable.
@@ -503,7 +537,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           {scenario === "onboarding" && <OnboardingOverview view={view} />}
 
           {showReport && !hasTeam && <NoRooftop />}
-          {showReport && hasTeam && (feed === null || degraded) && <OverviewSkeleton />}
+          {showReport && hasTeam && (feed === null || degraded || staleEmpty) && <OverviewSkeleton />}
           {showReport && hasTeam && feed !== null && !degraded && showPreview && (
             <div className="flex flex-col gap-4">
               {stage === "onboarding" ? (
