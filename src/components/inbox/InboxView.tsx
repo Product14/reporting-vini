@@ -1053,7 +1053,7 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
   const [detail, setDetail] = useState<CallAnalysis | null | undefined>(undefined); // undefined=unfetched, null=none
   const cd = rec.callData || {};
   const inbound = (cd.callType || "").toLowerCase().includes("inbound");
-  const durSec = parseFloat(cd.callDuration || "0");
+  const durSec = callDurationSec(cd.callDuration); // normalized (callDuration is ms on prod, sec on uat)
   const recording = cd.recordingUrl || null;
   // Whether the call actually connected — driven by endedReason, NOT by recording presence. A connected
   // call whose recording is still processing was wrongly shown as "didn't connect" before (INVAI-4961).
@@ -2192,8 +2192,19 @@ function dirLabel(d: "in" | "out" | "unknown"): string {
 }
 
 // §02 — call duration mm:ss from a seconds string.
-function fmtDuration(sec?: string): string {
-  const n = Math.round(parseFloat(sec || "0"));
+// callDuration's unit is inconsistent across environments: UAT sends DECIMAL SECONDS ("153.679"),
+// prod sends INTEGER MILLISECONDS ("52264"). Treat a decimal string as seconds and a bare integer as
+// ms → seconds. Safety net: if the result is still implausibly long for a call (>4h), assume it was ms.
+// (Fixes the "810:36" pill on a 47-second call — INVAI call duration mismatch.)
+function callDurationSec(raw?: string): number {
+  const n = parseFloat(raw || "0");
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  let sec = (raw || "").includes(".") ? n : n / 1000;
+  if (sec > 14400) sec = sec / 1000; // guard against an integer-seconds value slipping through
+  return sec;
+}
+function fmtDuration(raw?: string): string {
+  const n = Math.round(callDurationSec(raw));
   if (!n) return "";
   return `${Math.floor(n / 60)}:${(n % 60).toString().padStart(2, "0")}`;
 }
