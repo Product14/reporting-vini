@@ -1854,7 +1854,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
       <div className="relative flex h-full w-[440px] flex-col border-l bg-white shadow-xl" style={{ borderColor: C.border }} onClick={(e) => e.stopPropagation()}>
         {/* header */}
         <div className="flex shrink-0 items-center justify-between px-5 pb-2 pt-5">
-          <h2 className="text-[16px] font-semibold" style={{ color: C.dark }}>{customer.customer_name || "Lead"} Lead Details</h2>
+          <h2 className="text-[16px] font-semibold" style={{ color: C.dark }}>{customer.customer_name ? `${customer.customer_name} · Lead Details` : "Lead Details"}</h2>
           <button onClick={onClose} className="text-[20px] leading-none" style={{ color: C.dark }}>×</button>
         </div>
         {/* tabs */}
