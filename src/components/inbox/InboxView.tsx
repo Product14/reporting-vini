@@ -238,11 +238,6 @@ function Inbox() {
   }, [auth, teamId]);
   const [selected, setSelected] = useState<InboxCustomer | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  // Per-row appointment + action-item indicators. leads/v2 doesn't include these, so we enrich each
-  // visible row with a light conversations/v2 call (concurrency-limited + cached by customer_id). They
-  // reflect real data, so they persist after a conversation is read (unlike the unread dot).
-  const [rowMeta, setRowMeta] = useState<Record<string, { appt: number; actions: number }>>({});
-  const rowMetaCache = useRef<Record<string, { appt: number; actions: number }>>({});
   // Customers opened this session — treated as read (INVAI-4968; no read-state write API exists).
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
   const openCustomer = useCallback((c: InboxCustomer) => {
@@ -317,28 +312,9 @@ function Inbox() {
   const readInSession = customers.filter((c) => readIds.has(c.customer_id) && (c.unreadCounts?.totalUnread ?? 0) > 0).length;
   const totalUnread = Math.max(0, (page?.pagination.unreadCount ?? 0) - readInSession);
 
-  // Enrich visible rows with appointment + open-action-item counts (cached by customer_id).
-  useEffect(() => {
-    const ids = customers.map((c) => c.customer_id).filter((id) => id && !(id in rowMetaCache.current));
-    if (!ids.length) { setRowMeta({ ...rowMetaCache.current }); return; }
-    let cancelled = false;
-    let i = 0;
-    const worker = async () => {
-      while (i < ids.length && !cancelled) {
-        const id = ids[i++];
-        const d = await fetchInboxConversations(auth, id, { limit: 1 });
-        rowMetaCache.current[id] = {
-          appt: d.nextAppointments.length,
-          actions: d.nextActionItems.filter((a) => a.is_active && !a.is_completed).length,
-        };
-        if (!cancelled) setRowMeta({ ...rowMetaCache.current });
-      }
-    };
-    // 6 concurrent fetches — enough to feel instant on a page without hammering the API.
-    void Promise.all(Array.from({ length: 6 }, worker));
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+  // NOTE: we deliberately do NOT enrich each row with its own conversations/v2 call — that fired one
+  // request PER visible customer (a 50-row list = ~50 background calls). The appt/action-item badges
+  // stay off until leads/v2 returns those counts on the list row itself (backend ask). One list call only.
 
   if (!teamId || !enterpriseId) return <NoScope hasTeam={!!teamId} />;
 
@@ -446,7 +422,6 @@ function Inbox() {
                 <ConversationRow
                   key={c.customer_id}
                   c={c}
-                  meta={rowMeta[c.customer_id]}
                   active={selected?.customer_id === c.customer_id}
                   read={readIds.has(c.customer_id)}
                   onClick={() => openCustomer(c)}
