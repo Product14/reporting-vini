@@ -36,7 +36,7 @@ import {
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { track } from "@/lib/analytics";
@@ -63,7 +63,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const router = useRouter();
   // Selected window comes from the URL so it persists across navigation to the By-agent tab (and back).
   const { bucket, custom, setPreset, setCustom } = useDateRange();
-  const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
+  const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId, serviceType } = useScenario();
 
   // ?sample=1 → fully self-contained SAMPLE mode: every fetch is skipped and the built-in service demo
   // data is fed in (no backend, no auth, no env). Declared up here so the fetch effects can short-circuit.
@@ -124,7 +124,11 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
   // Department switcher (All / Sales / Service) — scopes the WHOLE report: agents (fleet + IB/OB split),
   // named appointments, warm leads, action items and recent conversations. "all" → both departments.
-  const { dept, locked } = useDept(); // top-level scope (shared header, URL-persisted)
+  // Department is a HARD scope from the iframe URL (serviceType / service_type / department), exactly like
+  // the appointments + action-items consoles: no in-app "all"/switcher, defaults to sales when absent.
+  // The caller passes the scope on the URL and the view (and its sales/service skin) follows.
+  const dept = serviceType as Dept; // "sales" | "service" (never "all")
+  const locked = true;
   const svc = dept === "all" ? "both" : dept;
 
   // Action-item scoreboard (created/closed for the window + open/overdue/due-today now + who-closed-most).
