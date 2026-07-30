@@ -198,7 +198,7 @@ export default function InboxView() {
 type Tab = "all" | "unread";
 
 function Inbox() {
-  const { teamId, enterpriseId, spyneToken, spyneEnv, account } = useScenario();
+  const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType, account } = useScenario();
   const auth: InboxAuth = useMemo(
     () => ({ teamId, enterpriseId, spyneToken, spyneEnv }),
     [teamId, enterpriseId, spyneToken, spyneEnv],
@@ -351,6 +351,8 @@ function Inbox() {
             <IconList size={16} />
           </span>
           <h1 className="text-[16px] font-semibold" style={{ color: C.dark }}>Inbox</h1>
+          {/* Department SPACE from the ?serviceType= embed param — this iframe is scoped to Sales or Service. */}
+          <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: C.primaryAccent, color: C.primary }}>{serviceType}</span>
           {account?.name && <span className="ml-1 text-[12px]" style={{ color: C.sub }}>· {account.name}</span>}
           {tz && <span className="ml-1 text-[11px]" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
