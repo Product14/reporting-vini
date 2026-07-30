@@ -268,6 +268,42 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
   );
 }
 
+/* ══════════════════════════ 2b. Agent NOT available — upsell placeholder ══════════════════════════ */
+// Direction-specific value prop shown when a dept's Inbound/Outbound agent isn't live yet. Clicking the
+// card emails the dealer's Spyne team to switch that agent on.
+const UPSELL_COPY: Record<string, { headline: string; body: string }> = {
+  "Sales Inbound": { headline: "Never miss a buyer who calls in", body: "Emily answers every inbound sales lead instantly — day or night — and books the test drive before they call the next dealer." },
+  "Sales Outbound": { headline: "Turn old leads into tomorrow's deals", body: "Jenny works your aged and unsold leads, wins back the ones who slipped away, and books them back in." },
+  "Service Inbound": { headline: "Answer every service call, instantly", body: "Emily picks up every inbound service call, books the appointment, and frees your advisors for the drive lane." },
+  "Service Outbound": { headline: "Fill tomorrow's empty bays tonight", body: "Jenny wins back the customers who slipped away. You wake up to a booked schedule." },
+};
+function AgentUpsellCard({ dept, dir }: { dept: "Sales" | "Service"; dir: "Inbound" | "Outbound" }) {
+  const inbound = dir === "Inbound";
+  const copy = UPSELL_COPY[`${dept} ${dir}`] ?? { headline: `Get your ${dir} agent live`, body: "Switch it on to capture more leads, any hour." };
+  const subject = `Enable my ${dept} ${dir} AI agent`;
+  const body = `Hi Spyne team,\n\nI'd like to switch on the ${dept} ${dir} AI agent for my store. Can you help me enable it?\n\nThanks`;
+  const mailto = `mailto:support@spyne.ai?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  return (
+    <a
+      href={mailto}
+      className="lv-lift group flex flex-1 basis-0 flex-col items-center justify-center gap-3 rounded-[15px] border border-dashed border-[#d8caff] bg-[#faf8ff] p-8 text-center transition-colors hover:bg-[#f3eaff]"
+    >
+      <span
+        className="relative flex h-[72px] w-[72px] flex-none items-center justify-center rounded-full p-[2.5px]"
+        style={{ background: inbound ? "linear-gradient(135deg,#86efac,#93c5fd,#c4b5fd)" : "linear-gradient(135deg,#fdba74,#fca5a5,#f0abfc)" }}
+      >
+        <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white">
+          <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top opacity-90" />
+        </span>
+      </span>
+      <span className="bg-clip-text text-[11px] font-bold uppercase tracking-wider text-transparent" style={{ backgroundImage: "linear-gradient(90deg,#7c3aed,#ca1f34)" }}>{dept} {dir}</span>
+      <p className="text-[18px] font-bold leading-tight text-[#030712]">{copy.headline}</p>
+      <p className="max-w-[300px] text-[13px] leading-relaxed text-[#626f81]">{copy.body}</p>
+      <span className="mt-1 rounded-lg px-5 py-2.5 text-[13px] font-bold text-white transition-transform group-hover:scale-[1.02]" style={{ background: C.primary }}>Get {dept} {dir}</span>
+    </a>
+  );
+}
+
 /* ══════════════════════════ 3. Lead-to-sale funnel ══════════════════════════ */
 function FunnelCell({ label, value, delta, last }: { label: string; value: number; delta: number | null; last?: boolean }) {
   const up = (delta ?? 0) >= 0;
@@ -676,13 +712,16 @@ export function LiveOverview({
   const outbound = agents.find((a) => a.dir === "Outbound");
   const serviceMode = agents.length > 0 && agents.every((a) => a.dept === "Service");
   const hotLeads = warmLeads.filter((w) => w.tier === "hot").length;
+  // The department in play (from whichever agent IS live), so a missing direction shows the right
+  // "Get {dept} {dir}" upsell placeholder instead of an empty slot.
+  const deptLabel: "Sales" | "Service" = (inbound ?? outbound)?.dept ?? (serviceMode ? "Service" : "Sales");
   return (
     <div className="flex flex-col gap-4">
       <LiveAnims />
       <div className="lv-rise" style={{ animationDelay: "0ms" }}><LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} /></div>
-      <div className="lv-rise flex flex-col gap-5 lg:flex-row" style={{ animationDelay: "70ms" }}>
-        {inbound && <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} />}
-        {outbound && <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} />}
+      <div className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: "70ms" }}>
+        {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" />}
+        {outbound ? <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Outbound" />}
       </div>
       <div className="lv-rise flex flex-col gap-3.5" style={{ animationDelay: "140ms" }}>
         <UnlockPotentialBanner liveCount={1} total={3} />
