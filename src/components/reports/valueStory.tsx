@@ -211,17 +211,24 @@ function OffFlow({ bucket, delay, onBackToTraining, mode }: { bucket: BucketDef;
 
 /* The headline "unlock full potential" banner — shown in Live above the impact story. Names how many of
  * the three flows are live and drives the dealer back to Training to switch the rest on. */
-export function UnlockPotentialBanner({ liveCount = 1, total = 3, onBackToTraining }: { liveCount?: number; total?: number; onBackToTraining: () => void }) {
+// Value nudge on Live: how many flows are switched on, and that more can be. `onCta` is optional — when
+// provided it navigates (kept for internal review); when absent the CTA is an informational pill that
+// points the dealer to their Spyne team rather than a retired in-app destination.
+export function UnlockPotentialBanner({ liveCount = 1, total = 3, onCta }: { liveCount?: number; total?: number; onCta?: () => void }) {
   return (
     <div className="vs-rise flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#d8caff] px-5 py-4" style={{ background: "linear-gradient(100deg,#f6f1ff,#fdf1f6)" }}>
       <div className="flex items-start gap-3">
         <span className="mt-0.5 flex h-7 w-7 flex-none items-center justify-center rounded-full text-[14px]" style={{ background: "#efe9ff" }}>🔓</span>
         <div>
           <p className="text-[13.5px] font-bold text-[#030712]">You&apos;re running {liveCount} of {total} flows — your agent can do more.</p>
-          <p className="text-[11.5px] leading-snug text-[#626f81]">You&apos;re live on After-hours. Turn on Overflow and All-Leads to unlock your agent&apos;s full potential — no lead lost, any hour.</p>
+          <p className="text-[11.5px] leading-snug text-[#626f81]">You&apos;re live on After-hours. Overflow and All-Leads can capture every lead, any hour — ask your Spyne team to switch them on.</p>
         </div>
       </div>
-      <button onClick={onBackToTraining} className="flex-none rounded-lg px-4 py-2 text-[12.5px] font-bold text-white" style={{ background: C.primary }}>Back to Training to enable →</button>
+      {onCta ? (
+        <button onClick={onCta} className="flex-none rounded-lg px-4 py-2 text-[12.5px] font-bold text-white" style={{ background: C.primary }}>Enable more flows →</button>
+      ) : (
+        <span className="flex-none rounded-lg border border-[#d8caff] bg-white px-4 py-2 text-[12.5px] font-bold" style={{ color: C.primary }}>Talk to your Spyne team →</span>
+      )}
     </div>
   );
 }
@@ -253,5 +260,3 @@ export function BucketJourney({ activeIndex = 0, accent = "#813fed" }: { activeI
     </div>
   );
 }
-
-/* dev preview rebuild 7000835 — pick up Preview-scope data env vars */

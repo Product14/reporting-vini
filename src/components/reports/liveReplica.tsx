@@ -81,19 +81,21 @@ function greeting(): string {
 }
 
 /* ══════════════════════════ 1. Hero — greeting + value-prop strip ══════════════════════════ */
-function HeroTile({ icon, value, label, sub, missing, onUpsell }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; onUpsell?: () => void }) {
+function HeroTile({ icon, value, label, sub, missing }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean }) {
   // A metric with no data isn't a dead "—" — it's a feature that isn't switched on. Turn it into an
   // upsell that hands the dealer to Training to enable it.
   if (missing) {
+    // A metric with no data = a feature not switched on. Since Training is no longer an in-app
+    // destination, this is an informational nudge (points at the Spyne team), not a navigating button.
     return (
-      <button onClick={onUpsell} className="group flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-dashed border-[#d8caff] bg-[#faf8ff] p-[15px] text-left transition-colors hover:bg-[#f3eaff]">
+      <div className="flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-dashed border-[#d8caff] bg-[#faf8ff] p-[15px] text-left">
         <Image src={icon} alt="" width={28} height={28} className="opacity-40" />
         <div className="flex flex-col items-start gap-1">
           <p className="text-[12px] font-semibold text-[#030712]">{label}</p>
           <p className="text-[11.5px] text-[#9aa1ac]">Not switched on yet</p>
-          <span className="mt-0.5 inline-flex items-center gap-1 text-[11.5px] font-bold text-[#4600f2]">Turn on in Training <span className="transition-transform group-hover:translate-x-0.5">→</span></span>
+          <span className="mt-0.5 inline-flex items-center gap-1 text-[11.5px] font-bold text-[#4600f2]">Ask your Spyne team to enable</span>
         </div>
-      </button>
+      </div>
     );
   }
   return (
@@ -134,7 +136,7 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads }: { fleet: FleetLive; 
   );
 }
 
-export function LiveHero({ fleet, actionStats, onUpsell, controls, serviceMode, hotLeads = 0 }: { fleet: FleetLive; actionStats: ActionItemStats | null; onUpsell?: () => void; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number }) {
+export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0 }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number }) {
   const tiles = [
     { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: "avg first response", missing: fleet.responseTimeSec == null },
     { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
@@ -157,7 +159,7 @@ export function LiveHero({ fleet, actionStats, onUpsell, controls, serviceMode, 
         <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} />
       ) : (
         <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
-          {tiles.map((t) => <HeroTile key={t.label} {...t} onUpsell={onUpsell} />)}
+          {tiles.map((t) => <HeroTile key={t.label} {...t} />)}
         </div>
       )}
     </section>
@@ -663,12 +665,12 @@ export interface LiveOverviewProps {
   onOpenWarmModal: () => void;
   onViewActionItems: () => void;
   onViewConversations: () => void;
-  onBackToTraining: () => void; // "unlock full potential" — jump back to Training to switch on more flows
+  onBackToTraining?: () => void; // legacy hook; Training is no longer surfaced, so unused on Live
   headerControls?: React.ReactNode; // date filter + customize, rendered inside the hero (this IS the header)
 }
 export function LiveOverview({
   fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
-  onOpenAgent, onOpenApptModal, onOpenWarmModal, onViewActionItems, onViewConversations, onBackToTraining, headerControls,
+  onOpenAgent, onOpenApptModal, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
@@ -677,13 +679,13 @@ export function LiveOverview({
   return (
     <div className="flex flex-col gap-4">
       <LiveAnims />
-      <div className="lv-rise" style={{ animationDelay: "0ms" }}><LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} onUpsell={onBackToTraining} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} /></div>
+      <div className="lv-rise" style={{ animationDelay: "0ms" }}><LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} /></div>
       <div className="lv-rise flex flex-col gap-5 lg:flex-row" style={{ animationDelay: "70ms" }}>
         {inbound && <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} />}
         {outbound && <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} />}
       </div>
       <div className="lv-rise flex flex-col gap-3.5" style={{ animationDelay: "140ms" }}>
-        <UnlockPotentialBanner liveCount={1} total={3} onBackToTraining={onBackToTraining} />
+        <UnlockPotentialBanner liveCount={1} total={3} />
         <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />
       </div>
       <div className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: "210ms" }}>
