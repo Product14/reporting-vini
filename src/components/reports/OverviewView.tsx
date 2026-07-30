@@ -15,8 +15,7 @@ import {
 } from "@/components/reports/kit";
 import { TrainingOverview, type Direction, type DirectionStatus } from "@/components/reports/training";
 import { LiveOverview } from "@/components/reports/liveReplica";
-import { FirstTimeTour } from "@/components/reports/firstRun";
-import { StageStepper, OnboardingStub, type Stage } from "@/components/reports/stageFlow";
+import { OnboardingStub, type Stage } from "@/components/reports/stageFlow";
 import { SAMPLE_SERVICE_FEED, SAMPLE_AISTATS, SAMPLE_WORKITEMS, SAMPLE_CONVERSATIONS } from "@/components/reports/sampleData";
 import {
   ActionItemList,
@@ -125,7 +124,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
   // Department switcher (All / Sales / Service) — scopes the WHOLE report: agents (fleet + IB/OB split),
   // named appointments, warm leads, action items and recent conversations. "all" → both departments.
-  const { dept, setDept, locked } = useDept(); // top-level scope (shared header, URL-persisted)
+  const { dept, locked } = useDept(); // top-level scope (shared header, URL-persisted)
   const svc = dept === "all" ? "both" : dept;
 
   // Action-item scoreboard (created/closed for the window + open/overdue/due-today now + who-closed-most).
@@ -229,15 +228,12 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // stepper + in-view CTAs move between them (manualStage wins once the user navigates). comingSoon
   // (a genuine just-went-live rooftop with no data) enters at Training; ?sample= defaults to Live.
   const [manualStage, setManualStage] = useState<Stage | null>(null);
-  // Entry stage: an explicit ?state= wins; otherwise a real live rooftop lands on Live, a genuine
-  // just-went-live (comingSoon) rooftop enters at Training, and ?sample= defaults to Live. manualStage
-  // (the stepper / in-view CTAs) overrides once the user navigates.
+  // Entry stage: Live is the only surfaced experience — every real rooftop (live or just-went-live)
+  // lands on Live. Onboarding/Training remain reachable ONLY via an explicit ?state= for internal
+  // design review; there's no in-UI navigation to them anymore.
   const stage: Stage = manualStage ?? (
     previewState === "onboarding" ? "onboarding"
-    : previewState === "live" ? "live"
     : previewState === "training" ? "training"
-    : sampleMode ? "live"
-    : comingSoon ? "training"
     : "live"
   );
   // Onboarding & Training aren't reports — strip the report chrome (tabs, Sales/Service scope, date
@@ -257,25 +253,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // Legacy overview path: a real live rooftop that has explicitly opted out via ?classic=1.
   const liveReady = liveTeam && classic;
 
-  // First-time welcome tour — a once-per-rooftop greeting for a genuine just-went-live dealer (the real
-  // comingSoon gate). It's a full-screen modal, so it must NOT auto-open while someone is REVIEWING via
-  // ?state= (its backdrop would swallow every click). During review it's reachable via "Take a tour" or
-  // ?tour=1. Auto-opens once per team (localStorage); records dismissal so it never nags twice. SSR-safe.
-  const [tourOpen, setTourOpen] = useState(false);
-  useEffect(() => {
-    if (!hasTeam) return;
-    const forced = previewParams.get("tour") === "1";
-    const autoFirstTime = comingSoon && !previewActive; // real first-timer only, never during ?state= review
-    if (!forced && !autoFirstTime) return;
-    let seen = false;
-    try { seen = localStorage.getItem(`vini_tour_seen_${teamId}`) === "1"; } catch { /* storage blocked */ }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (forced || !seen) setTourOpen(true);
-  }, [comingSoon, previewActive, hasTeam, teamId, previewParams]);
-  const closeTour = () => {
-    setTourOpen(false);
-    try { localStorage.setItem(`vini_tour_seen_${teamId}`, "1"); } catch { /* storage blocked */ }
-  };
   // Live rooftop, but the selected window has no activity yet → gentle inline note above the report.
   const emptyWindow = liveReady && feed !== null && !feed.hasData;
 
@@ -466,22 +443,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // dropped entirely; on the production report they stay in the top bar.
   const liveControls = hasTeam ? (
     <div className="no-print flex items-center gap-3">
-      {/* Sales/Service scope — only when the rooftop runs BOTH departments and isn't host-locked. Lives
-          here (not the top bar) because the new Live experience drops the top bar entirely. */}
-      {!locked && hasBothDepts && showPreview && stage === "live" && (
-        <div className="inline-flex items-center rounded-lg border border-[#e5e7eb] bg-white p-0.5 text-[12px] font-semibold">
-          {(["all", "sales", "service"] as const).map((d) => (
-            <button
-              key={d}
-              onClick={() => { setDept(d); track("dept_scope_changed", { tab: "overview", dept: d, team_id: teamId }); }}
-              className="rounded-md px-2.5 py-1 capitalize transition-colors"
-              style={dept === d ? { background: "#4600f2", color: "#fff" } : { color: "#6b7280" }}
-            >
-              {d === "all" ? "All" : d}
-            </button>
-          ))}
-        </div>
-      )}
       {(liveReady || (showPreview && stage === "live")) && <CustomizeToggle ctrl={ctrl} />}
       <DateFilter
         bucket={bucket}
@@ -503,9 +464,10 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
       </button>
     </div>
   ) : null;
-  // The whole preview flow (Onboarding/Training/Live) owns its own header — the stage stepper plus each
-  // stage's hero. The report top bar would only clash/duplicate, so drop it across all three stages.
-  const hideTopBar = showPreview;
+  // Live is a real report and shows the standard "Overview" top bar (title + date filter + Sales/Service
+  // scope). Only the internal-review Onboarding/Training preview stages own their own header, so the top
+  // bar is dropped just for those.
+  const hideTopBar = showPreview && stage !== "live";
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -523,8 +485,8 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           teamId={teamId}
           query={navQuery}
           hideTabs={showPreview}
-          hideDept={showPreview}
-          hideTitle={showPreview && stage === "live"}
+          hideDept={showPreview && !hasBothDepts}
+          hideTitle={false}
           right={
             setupChrome ? null : hasTeam ? (
               liveControls
@@ -543,18 +505,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           {showReport && hasTeam && (feed === null || degraded) && <OverviewSkeleton />}
           {showReport && hasTeam && feed !== null && !degraded && showPreview && (
             <div className="flex flex-col gap-4">
-              <FirstTimeTour open={tourOpen} accountName={account.name} onClose={closeTour} />
-              <div className="flex items-center justify-between gap-3">
-                <StageStepper stage={stage} onJump={(s) => { setManualStage(s); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
-                {stage !== "onboarding" && (
-                  <button
-                    onClick={() => setTourOpen(true)}
-                    className="no-print inline-flex items-center gap-1.5 rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed]"
-                  >
-                    <span aria-hidden>✨</span> Take a tour
-                  </button>
-                )}
-              </div>
               {stage === "onboarding" ? (
                 <OnboardingStub onGoLive={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
               ) : stage === "training" ? (
@@ -576,7 +526,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   onViewActionItems={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)}
                   onViewConversations={() => goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`)}
                   onBackToTraining={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-                  headerControls={liveControls}
                 />
               )}
             </div>
