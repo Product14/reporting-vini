@@ -59,6 +59,8 @@ export interface LeadsQuery {
   leadType?: string[];
   leadSource?: string[];
   department?: "sales" | "service";
+  // Which date field startDate/endDate filter on (and the sort): lead createdAt vs last_contacted_at.
+  sortBy?: "lead" | "conversation";
 }
 
 const EMPTY_PAGE: LeadsPage = {
@@ -78,6 +80,7 @@ export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Pro
   for (const t of q.leadType ?? []) p.append("leadType", t);
   for (const s of q.leadSource ?? []) p.append("leadSource", s);
   if (q.department) p.set("department", q.department);
+  if (q.sortBy) p.set("sortBy", q.sortBy);
   withEnv(p, a);
   try {
     const r = await fetch(`/api/inbox/customers?${p}`, { cache: "no-store", headers: authHeaders(a) });

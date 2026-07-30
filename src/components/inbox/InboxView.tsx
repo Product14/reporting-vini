@@ -209,6 +209,9 @@ function Inbox() {
   const [leadType, setLeadType] = useState<string[]>([]);
   const [leadSource, setLeadSource] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>("all");
+  // Which date the range/sort applies to (API sortBy). "conversation" = most-recently-active first,
+  // the natural inbox ordering; "lead" = newest lead first (filters on lead createdAt).
+  const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
   const [department, setDepartment] = useState<"" | "sales" | "service">("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const activeFilterCount = leadType.length + leadSource.length + (dateRange !== "all" ? 1 : 0) + (department ? 1 : 0);
@@ -253,6 +256,7 @@ function Inbox() {
       leadType: leadType.length ? leadType : undefined,
       leadSource: leadSource.length ? leadSource : undefined,
       department: department || undefined,
+      sortBy: dateBasis,
       startDate: range.startDate,
       endDate: range.endDate,
     }).then((p) => {
@@ -272,7 +276,7 @@ function Inbox() {
     });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, leadSource, dateRange, department]);
+  }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, leadSource, dateRange, dateBasis, department]);
 
   const customers = useMemo(() => page?.customers ?? [], [page]);
 
@@ -353,6 +357,7 @@ function Inbox() {
               leadType={leadType} onLeadType={setLeadType}
               leadSource={leadSource} onLeadSource={setLeadSource}
               dateRange={dateRange} onDateRange={setDateRange}
+              dateBasis={dateBasis} onDateBasis={setDateBasis}
               department={department} onDepartment={setDepartment}
               onClose={() => setFiltersOpen(false)}
             />
@@ -1948,11 +1953,12 @@ function dateRangeToIso(r: DateRange): { startDate?: string; endDate?: string } 
 }
 
 function FiltersPopover({
-  leadType, onLeadType, leadSource, onLeadSource, dateRange, onDateRange, department, onDepartment, onClose,
+  leadType, onLeadType, leadSource, onLeadSource, dateRange, onDateRange, dateBasis, onDateBasis, department, onDepartment, onClose,
 }: {
   leadType: string[]; onLeadType: (v: string[]) => void;
   leadSource: string[]; onLeadSource: (v: string[]) => void;
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
+  dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
   department: "" | "sales" | "service"; onDepartment: (v: "" | "sales" | "service") => void;
   onClose: () => void;
 }) {
@@ -1974,12 +1980,23 @@ function FiltersPopover({
           ))}
         </div>
         <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Date range</p>
-        <div className="mb-3 flex flex-col gap-1">
+        <div className="mb-2 flex flex-col gap-1">
           {DATE_RANGES.map((d) => (
             <label key={d.v} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] hover:bg-[#fafafa]" style={{ color: C.dark }}>
               <input type="radio" name="daterange" checked={dateRange === d.v} onChange={() => onDateRange(d.v)} className="accent-[#4600f2]" />
               {d.label}
             </label>
+          ))}
+        </div>
+        {/* Which date the range (and sort) applies to — lead createdAt vs last_contacted_at (API sortBy). */}
+        <p className="mb-1.5 text-[10px] font-medium" style={{ color: C.sub }}>Apply to</p>
+        <div className="mb-3 flex gap-1.5">
+          {([["conversation", "Last conversation"], ["lead", "Lead created"]] as const).map(([v, label]) => (
+            <button key={v} onClick={() => onDateBasis(v)}
+              className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
+              style={dateBasis === v ? { borderColor: C.primary, color: C.primary, background: C.primaryAccent } : { borderColor: C.border, color: C.sub }}>
+              {label}
+            </button>
           ))}
         </div>
         <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Lead temperature</p>

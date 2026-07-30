@@ -41,6 +41,9 @@ export async function GET(request: Request): Promise<Response> {
   for (const s of searchParams.getAll("leadSource")) if (s.trim()) up.append("leadSource", s.trim());
   const dept = (searchParams.get("department") || "").toLowerCase();
   if (dept === "sales" || dept === "service") up.set("department", dept);
+  // sortBy switches which date field startDate/endDate filter on: lead createdAt vs last_contacted_at.
+  const sortBy = (searchParams.get("sortBy") || "").toLowerCase();
+  if (sortBy === "lead" || sortBy === "conversation") up.set("sortBy", sortBy);
 
   const res = await spyneServiceGet<unknown>(
     `/conversation/leads/v2/get-customers-list?${up.toString()}`,
