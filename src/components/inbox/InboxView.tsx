@@ -240,6 +240,49 @@ function Inbox() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   // Customers opened this session — treated as read (INVAI-4968; no read-state write API exists).
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
+
+  // Per-row appt/action-item icons. leads/v2 doesn't return these, so each needs a conversations/v2
+  // call — but LAZILY, only for rows scrolled into view (a row reports visibility via onVisible), with a
+  // concurrency cap + cache. This restores the icons without the old "fetch for every row on load" flood.
+  const [rowMeta, setRowMeta] = useState<Record<string, { appt: number; actions: number }>>({});
+  const rowMetaCache = useRef<Record<string, { appt: number; actions: number }>>({});
+  const enrichQueue = useRef<string[]>([]);
+  const enrichActive = useRef(0);
+  const authRef = useRef(auth);
+  const drainRef = useRef<() => void>(() => {});
+  useEffect(() => { authRef.current = auth; }, [auth]);
+  // The drain loop lives in a ref (defined once) so the recursive re-pump after each fetch doesn't need
+  // to reference a memoized callback by name. Concurrency-capped at 5.
+  useEffect(() => {
+    const drain = () => {
+      while (enrichActive.current < 5 && enrichQueue.current.length) {
+        const id = enrichQueue.current.shift()!;
+        enrichActive.current++;
+        fetchInboxConversations(authRef.current, id, { limit: 1 })
+          .then((d) => {
+            rowMetaCache.current[id] = {
+              appt: d.nextAppointments.length,
+              actions: d.nextActionItems.filter((a) => a.is_active && !a.is_completed).length,
+            };
+            setRowMeta((m) => ({ ...m, [id]: rowMetaCache.current[id] }));
+          })
+          .catch(() => {})
+          .finally(() => { enrichActive.current--; drain(); });
+      }
+    };
+    drainRef.current = drain;
+  }, []);
+  const requestEnrich = useCallback((id: string) => {
+    if (!id || id in rowMetaCache.current || enrichQueue.current.includes(id)) return;
+    enrichQueue.current.push(id);
+    drainRef.current();
+  }, []);
+  // Reset the cache/queue when the rooftop (scope) changes — a different team's customers.
+  useEffect(() => {
+    rowMetaCache.current = {}; enrichQueue.current = []; enrichActive.current = 0;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clear stale icons on scope change
+    setRowMeta({});
+  }, [teamId, enterpriseId, spyneEnv]);
   const openCustomer = useCallback((c: InboxCustomer) => {
     setSelected(c);
     setDetailsOpen(false);
@@ -311,10 +354,6 @@ function Inbox() {
   // Unread count + the row dot update on open instead of staying stale (INVAI-4968).
   const readInSession = customers.filter((c) => readIds.has(c.customer_id) && (c.unreadCounts?.totalUnread ?? 0) > 0).length;
   const totalUnread = Math.max(0, (page?.pagination.unreadCount ?? 0) - readInSession);
-
-  // NOTE: we deliberately do NOT enrich each row with its own conversations/v2 call — that fired one
-  // request PER visible customer (a 50-row list = ~50 background calls). The appt/action-item badges
-  // stay off until leads/v2 returns those counts on the list row itself (backend ask). One list call only.
 
   if (!teamId || !enterpriseId) return <NoScope hasTeam={!!teamId} />;
 
@@ -422,9 +461,11 @@ function Inbox() {
                 <ConversationRow
                   key={c.customer_id}
                   c={c}
+                  meta={rowMeta[c.customer_id]}
                   active={selected?.customer_id === c.customer_id}
                   read={readIds.has(c.customer_id)}
                   onClick={() => openCustomer(c)}
+                  onVisible={requestEnrich}
                 />
               ))
             )}
@@ -478,12 +519,25 @@ function TabBtn({ active, onClick, label }: { active: boolean; onClick: () => vo
   );
 }
 
-function ConversationRow({ c, meta, active, read, onClick }: { c: InboxCustomer; meta?: { appt: number; actions: number }; active: boolean; read?: boolean; onClick: () => void }) {
+function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: InboxCustomer; meta?: { appt: number; actions: number }; active: boolean; read?: boolean; onClick: () => void; onVisible?: (customerId: string) => void }) {
   const unread = read ? 0 : c.unreadCounts?.totalUnread ?? 0;
   const callUnread = c.unreadCounts?.callUnread ?? 0;
   const name = c.customer_name || c.mobile_number || "Unknown";
+  // Report visibility ONCE (then disconnect) so the parent enriches this row's appt/action icons only
+  // when it's actually scrolled into view — not for the whole list up front.
+  const rowRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    const el = rowRef.current;
+    if (!el || !onVisible) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) { onVisible(c.customer_id); io.disconnect(); }
+    }, { rootMargin: "150px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [c.customer_id, onVisible]);
   return (
     <button
+      ref={rowRef}
       onClick={onClick}
       className="flex w-full flex-col gap-2.5 border-b px-5 py-2.5 text-left transition-colors hover:bg-[#fafafa]"
       style={{
