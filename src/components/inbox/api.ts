@@ -445,6 +445,21 @@ export async function fetchInboxCall(a: InboxAuth, callId: string): Promise<Call
   }
 }
 
+/* The rooftop's IANA timezone (e.g. "America/Los_Angeles") so the UI renders every timestamp in the
+ * dealer's local day — same source the reports use. null when unresolved (UI falls back to local tz). */
+export async function fetchInboxTimezone(a: InboxAuth): Promise<string | null> {
+  if (!a.teamId) return null;
+  const p = new URLSearchParams({ team_id: a.teamId });
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/timezone?${p}`, { cache: "no-store", headers: authHeaders(a) });
+    const j = (await r.json().catch(() => null)) as { timezone?: string | null } | null;
+    return r.ok && j ? j.timezone ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
 /* Stop AI engagement for a lead — deletes its sequence workflows (Vini stops outreach). */
 export async function stopInboxEngagement(a: InboxAuth, leadId: string): Promise<boolean> {
   if (!a.teamId || !leadId) return false;

@@ -18,6 +18,7 @@ import { useScenario } from "@/components/reports/scenario";
 import {
   fetchInboxCustomers,
   fetchInboxConversations,
+  fetchInboxTimezone,
   fetchInboxPersona,
   fetchInboxFeedback,
   postInboxFeedback,
@@ -74,30 +75,65 @@ function parseDate(iso: string | null | undefined): Date | null {
   const d = new Date(iso);
   return Number.isFinite(d.getTime()) ? d : null;
 }
+
+/* Dealer-local timezone — resolved once per team from the working-hours API (fetchInboxTimezone),
+ * the SAME source the reports/overview use. Every stamp, day label, due-date and the "Today" date
+ * filter below render in THIS zone so they line up with the dealer, their CRM and Mongo — not the
+ * viewer's browser tz. Kept as module state (the page shows one team at a time) so the many
+ * top-level formatters don't each need the tz threaded through. Undefined ⇒ fall back to local tz. */
+let ACTIVE_TZ: string | undefined;
+export function setInboxTz(tz: string | null | undefined) { ACTIVE_TZ = tz || undefined; }
+// YYYY-MM-DD calendar day of `d` in the active tz (en-CA renders as YYYY-MM-DD). Local tz on failure.
+function dayKeyTz(d: Date): string {
+  try { return new Intl.DateTimeFormat("en-CA", { timeZone: ACTIVE_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d); }
+  catch { return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(d); }
+}
+const withTz = <T extends Intl.DateTimeFormatOptions>(o: T): T => (ACTIVE_TZ ? { ...o, timeZone: ACTIVE_TZ } : o);
+function timeTz(d: Date): string { return d.toLocaleTimeString([], withTz({ hour: "numeric", minute: "2-digit" })); }
+// Short label for an IANA tz (e.g. "America/Los_Angeles" → "PDT"), for the header hint. "" if unknown.
+function tzShort(tz: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "short" }).formatToParts(new Date());
+    return parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+  } catch { return ""; }
+}
+// Whole dealer-local calendar days between two instants (target − ref), by comparing their day keys.
+function daysBetweenTzDays(target: Date, ref: Date): number {
+  const ms = (k: string) => Date.parse(`${k}T00:00:00Z`);
+  return Math.round((ms(dayKeyTz(target)) - ms(dayKeyTz(ref))) / 86400000);
+}
+// UTC instant at the start of the dealer-tz calendar day that contains `ref` (local midnight otherwise).
+function startOfTzDay(ref: Date): Date {
+  if (!ACTIVE_TZ) { const s = new Date(ref); s.setHours(0, 0, 0, 0); return s; }
+  const guess = new Date(`${dayKeyTz(ref)}T00:00:00Z`);
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone: ACTIVE_TZ, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
+      .formatToParts(guess).map((x) => [x.type, x.value]),
+  );
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return new Date(guess.getTime() - (asUTC - guess.getTime())); // subtract the tz offset at that instant
+}
+
 function fmtTime(iso: string | null | undefined): string {
   const d = parseDate(iso);
-  return d ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+  return d ? timeTz(d) : "";
 }
 function fmtListStamp(iso: string | null | undefined): string {
   const d = parseDate(iso);
   if (!d) return "";
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  const today = dayKeyTz(new Date());
+  const dk = dayKeyTz(d);
+  if (dk === today) return timeTz(d);
+  if (dk === dayKeyTz(new Date(Date.now() - 86400000))) return "Yesterday";
+  return d.toLocaleDateString([], withTz({ month: "short", day: "numeric" }));
 }
 function dayLabel(iso: string | null | undefined): string {
   const d = parseDate(iso);
   if (!d) return "";
-  const now = new Date();
-  if (d.toDateString() === now.toDateString()) return "TODAY";
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString()) return "YESTERDAY";
-  return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }).toUpperCase();
+  const dk = dayKeyTz(d);
+  if (dk === dayKeyTz(new Date())) return "TODAY";
+  if (dk === dayKeyTz(new Date(Date.now() - 86400000))) return "YESTERDAY";
+  return d.toLocaleDateString([], withTz({ weekday: "short", month: "short", day: "numeric" })).toUpperCase();
 }
 
 /* ── inline icons (repo uses inline SVG, not an icon lib) ───────────────────── */
@@ -162,8 +198,18 @@ function Inbox() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const activeFilterCount = leadType.length + leadSource.length + (dateRange !== "all" ? 1 : 0) + (department ? 1 : 0);
 
+  const [tz, setTz] = useState<string | null>(null);
   const [page, setPage] = useState<LeadsPage | null>(null);
   const [loadingList, setLoadingList] = useState(true);
+
+  // Resolve the rooftop timezone once per team (same working-hours source the reports use) and publish
+  // it to the module-level formatters so every stamp / due-date / "Today" filter renders dealer-local.
+  useEffect(() => {
+    if (!teamId) { setInboxTz(null); return; }
+    let on = true;
+    fetchInboxTimezone(auth).then((z) => { if (on) { setInboxTz(z); setTz(z); } });
+    return () => { on = false; };
+  }, [auth, teamId]);
   const [selected, setSelected] = useState<InboxCustomer | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   // Per-row appointment + action-item indicators. leads/v2 doesn't include these, so we enrich each
@@ -252,6 +298,7 @@ function Inbox() {
           </span>
           <h1 className="text-[16px] font-semibold" style={{ color: C.dark }}>Inbox</h1>
           {account?.name && <span className="ml-1 text-[12px]" style={{ color: C.sub }}>· {account.name}</span>}
+          {tz && <span className="ml-1 text-[11px]" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
         <div className="relative flex items-center gap-3.5">
           <button
@@ -1265,17 +1312,15 @@ function actionItemId(a: ActionItem): string {
 
 // One action item with a Resolve (✓) control — PUT /conversation/action-items/mark-completed. On success
 // it removes itself optimistically. `compact` is the tighter drawer styling.
-function ActionItemRow({ a, auth, compact }: { a: ActionItem; auth: InboxAuth; compact?: boolean }) {
+function ActionItemRow({ a, auth, compact, onResolved }: { a: ActionItem; auth: InboxAuth; compact?: boolean; onResolved?: (id: string) => void }) {
   const id = actionItemId(a);
-  const [done, setDone] = useState(false);
   const [busy, setBusy] = useState(false);
-  if (done) return null;
   async function resolve() {
     if (!id || busy) return;
     setBusy(true);
     const ok = await resolveInboxActionItem(auth, id, true);
     setBusy(false);
-    if (ok) setDone(true);
+    if (ok) onResolved?.(id); // parent drops it from the list AND updates the "(n)" count
     else if (typeof window !== "undefined") window.alert("Couldn't resolve this action item — please try again.");
   }
   return (
@@ -1297,18 +1342,16 @@ function ActionItemRow({ a, auth, compact }: { a: ActionItem; auth: InboxAuth; c
 }
 
 // Drawer variant of an action item (due badge + assignee) with the same Resolve control.
-function DrawerActionItemRow({ a, auth }: { a: ActionItem; auth: InboxAuth }) {
+function DrawerActionItemRow({ a, auth, onResolved }: { a: ActionItem; auth: InboxAuth; onResolved?: (id: string) => void }) {
   const id = actionItemId(a);
   const due = dueLabel(a.due_date);
-  const [done, setDone] = useState(false);
   const [busy, setBusy] = useState(false);
-  if (done) return null;
   async function resolve() {
     if (!id || busy) return;
     setBusy(true);
     const ok = await resolveInboxActionItem(auth, id, true);
     setBusy(false);
-    if (ok) setDone(true);
+    if (ok) onResolved?.(id);
     else if (typeof window !== "undefined") window.alert("Couldn't resolve this action item — please try again.");
   }
   return (
@@ -1333,6 +1376,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   const [persona, setPersona] = useState<Persona | null>(null);
   const [stoppedLocal, setStoppedLocal] = useState<boolean | null>(null);
+  const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let on = true;
@@ -1340,6 +1384,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
     setConv(null);
     setPersona(null);
     setStoppedLocal(null);
+    setResolvedIds(new Set());
     fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((d) => { if (on) setConv(d); });
     fetchInboxPersona(auth, customer.customer_id).then((p) => { if (on) setPersona(p); });
     return () => { on = false; };
@@ -1347,7 +1392,8 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
 
   const lead = conv?.leads?.[0];
   const appts = conv?.nextAppointments ?? [];
-  const actions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed);
+  // Resolved-in-session ids drop out here so the "Action items (n)" count and the list both update.
+  const actions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const nextSched = normalizeNextScheduled(conv?.nextScheduledTasks?.[0]);
   const stopped = stoppedLocal ?? !!lead?.stopAiEngagement;
 
@@ -1429,7 +1475,8 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
           {actions.length > 0 && (
             <RightSection title={`Action items (${actions.length})`}>
               {actions.slice(0, 8).map((a, i) => (
-                <ActionItemRow key={actionItemId(a) || i} a={a} auth={auth} />
+                <ActionItemRow key={actionItemId(a) || i} a={a} auth={auth}
+                  onResolved={(id) => setResolvedIds((prev) => new Set(prev).add(id))} />
               ))}
             </RightSection>
           )}
@@ -1501,6 +1548,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   const [tab, setTab] = useState<DetailTab>("activity");
   const [stoppedLocal, setStoppedLocal] = useState<boolean | null>(null);
+  const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let on = true;
@@ -1508,6 +1556,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
     setPersona("loading");
     setConv(null);
     setStoppedLocal(null);
+    setResolvedIds(new Set());
     fetchInboxPersona(auth, customer.customer_id).then((p) => { if (on) setPersona(p ?? "error"); });
     fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((d) => { if (on) setConv(d); });
     return () => { on = false; };
@@ -1515,7 +1564,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
 
   const P = persona && typeof persona === "object" ? persona : undefined;
   const lead = conv?.leads?.[0];
-  const openActions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed);
+  const openActions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const appt = conv?.nextAppointments?.[0];
   const stopped = stoppedLocal ?? !!lead?.stopAiEngagement;
 
@@ -1603,7 +1652,8 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
                   {openActions.length === 0 ? (
                     <p className="text-[12px]" style={{ color: C.sub }}>No open action items.</p>
                   ) : openActions.map((a, i) => (
-                    <DrawerActionItemRow key={actionItemId(a) || i} a={a} auth={auth} />
+                    <DrawerActionItemRow key={actionItemId(a) || i} a={a} auth={auth}
+                      onResolved={(id) => setResolvedIds((prev) => new Set(prev).add(id))} />
                   ))}
                 </div>
               </div>
@@ -1685,8 +1735,7 @@ function dueLabel(due?: string): { text: string; style: React.CSSProperties } {
   if (!due) return { text: "", style: {} };
   const d = new Date(due);
   if (!Number.isFinite(d.getTime())) return { text: "", style: {} };
-  const startOfDay = (x: Date) => { const y = new Date(x); y.setHours(0, 0, 0, 0); return y.getTime(); };
-  const days = Math.round((startOfDay(d) - startOfDay(new Date())) / 86400000);
+  const days = daysBetweenTzDays(d, new Date()); // dealer-local day diff — matches the CRM/Mongo date
   if (days < 0) return { text: "Overdue", style: { background: "#fdecee", color: C.red } };
   if (days === 0) return { text: "Due Today", style: { background: C.orangeAccent, color: C.orange } };
   if (days === 1) return { text: "Due Tomorrow", style: { background: C.blueAccent, color: "#2f7bff" } };
@@ -1718,8 +1767,8 @@ function dateRangeToIso(r: DateRange): { startDate?: string; endDate?: string } 
   const now = new Date();
   const end = now.toISOString();
   if (r === "today") {
-    const s = new Date(now); s.setHours(0, 0, 0, 0);
-    return { startDate: s.toISOString(), endDate: end };
+    // Start of the DEALER's calendar day (not the viewer's) so "Today" matches the dealer's clock.
+    return { startDate: startOfTzDay(now).toISOString(), endDate: end };
   }
   const days = r === "7d" ? 7 : 30;
   const s = new Date(now.getTime() - days * 86400000);
