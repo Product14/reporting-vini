@@ -127,6 +127,20 @@ function fmtListStamp(iso: string | null | undefined): string {
   if (dk === dayKeyTz(new Date(Date.now() - 86400000))) return "Yesterday";
   return d.toLocaleDateString([], withTz({ month: "short", day: "numeric" }));
 }
+// Render `text` with the first case-insensitive occurrence of `q` tinted (search typeahead highlight).
+function Highlight({ text, q }: { text: string; q: string }) {
+  const query = q.trim();
+  if (!query) return <>{text}</>;
+  const i = text.toLowerCase().indexOf(query.toLowerCase());
+  if (i < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, i)}
+      <span style={{ background: C.primaryAccent, color: C.primary, borderRadius: 2 }}>{text.slice(i, i + query.length)}</span>
+      {text.slice(i + query.length)}
+    </>
+  );
+}
 function dayLabel(iso: string | null | undefined): string {
   const d = parseDate(iso);
   if (!d) return "";
@@ -159,6 +173,7 @@ const IconThumbUp = (p: IconProps) => <Svg {...p}><path d="M7 10v11H3V10zM7 10l5
 const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 14l-5 7a2 2 0 0 1-2-2v-3H5a2 2 0 0 1-2-2.3l1.3-7A2 2 0 0 1 7.3 3H17" /></Svg>;
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
 const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Svg>;
+const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Root
@@ -259,7 +274,25 @@ function Inbox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, leadSource, dateRange, department]);
 
-  const customers = page?.customers ?? [];
+  const customers = useMemo(() => page?.customers ?? [], [page]);
+
+  // Typeahead: a floating dropdown of matching customers (name + phone, query highlighted) while the
+  // search box has focus. Suggestions are client-filtered from the already-loaded page for instant
+  // feedback; picking one opens that conversation directly.
+  const [searchFocused, setSearchFocused] = useState(false);
+  const suggestions = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+    const digits = q.replace(/\D/g, "");
+    return customers
+      .filter((c) => {
+        const name = (c.customer_name || "").toLowerCase();
+        const phone = (c.mobile_number || "").replace(/\D/g, "");
+        return name.includes(q) || (!!digits && phone.includes(digits));
+      })
+      .slice(0, 6);
+  }, [search, customers]);
+  const showSuggest = searchFocused && search.trim().length >= 1 && suggestions.length > 0;
   const totalAll = page?.pagination.totalCustomers ?? customers.length;
   const totalUnread = page?.pagination.unreadCount ?? 0;
 
@@ -331,17 +364,47 @@ function Inbox() {
       <div className="flex min-h-0 flex-1">
         {/* LEFT — list */}
         <aside className="flex w-[360px] shrink-0 flex-col border-r bg-white" style={{ borderColor: C.border }}>
-          <div className="flex h-[68px] shrink-0 items-center px-4">
-            <div className="flex flex-1 items-center gap-2.5 rounded-[5px] border px-4 py-2.5" style={{ borderColor: C.border }}>
+          <div className="relative flex h-[68px] shrink-0 items-center px-4">
+            <div className="flex flex-1 items-center gap-2.5 rounded-[5px] border px-4 py-2.5"
+              style={{ borderColor: showSuggest ? C.primary : C.border }}>
               <IconSearch size={14} className="text-[#626f81]" />
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => setSearchFocused(false)}
                 placeholder="Search Conversation"
                 className="w-full bg-transparent text-[12px] outline-none placeholder:text-[#626f81]"
                 style={{ color: C.dark }}
               />
+              {search && (
+                <button onMouseDown={(e) => { e.preventDefault(); setSearch(""); }} title="Clear" className="shrink-0" style={{ color: C.sub }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                </button>
+              )}
             </div>
+            {showSuggest && (
+              <div className="absolute left-4 right-4 top-[58px] z-40 overflow-hidden rounded-xl border bg-white py-1 shadow-[0_8px_28px_rgba(3,7,18,0.12)]" style={{ borderColor: C.border }}>
+                <p className="px-4 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Customers</p>
+                <ul>
+                  {suggestions.map((c) => (
+                    <li key={c.customer_id}>
+                      <button
+                        onMouseDown={(e) => { e.preventDefault(); setSelected(c); setDetailsOpen(false); setSearchFocused(false); }}
+                        className="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-[#f7f4ff]">
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-full" style={{ background: C.primaryAccent, color: C.primary }}><IconUser size={13} /></span>
+                        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" style={{ color: C.dark }}>
+                          <Highlight text={c.customer_name || "Unknown"} q={search} />
+                        </span>
+                        {c.mobile_number && (
+                          <span className="shrink-0 text-[12px]" style={{ color: C.sub }}><Highlight text={c.mobile_number} q={search} /></span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
           <div className="flex shrink-0" style={{ borderColor: C.border }}>
             <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={`All(${totalAll})`} />
