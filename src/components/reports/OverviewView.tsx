@@ -181,12 +181,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
   const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
-  // A rooftop running BOTH Sales and Service agents can't be auto-skinned from the fleet — the Live view
-  // needs an explicit Sales/Service scope so the right department (and its service/sales skin) shows.
-  const hasBothDepts = useMemo(() => {
-    const s = new Set(allAgents.map((a) => a.dept));
-    return s.has("Sales") && s.has("Service");
-  }, [allAgents]);
 
   const hasTeam = teamId !== "" || sampleMode;
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
@@ -485,7 +479,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           teamId={teamId}
           query={navQuery}
           hideTabs={showPreview}
-          hideDept={showPreview && !hasBothDepts}
+          hideDept
           hideTitle={false}
           right={
             setupChrome ? null : hasTeam ? (
