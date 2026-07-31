@@ -381,6 +381,7 @@ function Inbox() {
             <IconDownload size={13} /> CSV
           </button>
           <button
+            data-filters-toggle
             onClick={() => setFiltersOpen((v) => !v)}
             className="flex items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
             style={{ borderColor: filtersOpen ? C.primary : C.border, color: filtersOpen ? C.primary : C.dark }}
@@ -2062,10 +2063,23 @@ function FiltersPopover({
   const toggle = (arr: string[], set: (v: string[]) => void, t: string) =>
     set(arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t]);
   const anyActive = leadType.length || dateRange !== "all";
+  // Close on outside-click via a listener instead of a full-screen backdrop — the old `fixed inset-0`
+  // overlay sat on top of the list and swallowed scroll while the popover stayed open (multi-select),
+  // so the list "stopped scrolling" after adding a filter. Ignore clicks on the Filters toggle so it
+  // doesn't immediately reopen.
+  const popRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (popRef.current?.contains(t) || t.closest?.("[data-filters-toggle]")) return;
+      onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [onClose]);
   return (
     <>
-      <div className="fixed inset-0 z-40" onClick={onClose} />
-      <div className="animate-dropdown-in absolute right-0 top-11 z-50 max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg" style={{ borderColor: C.border }}>
+      <div ref={popRef} className="animate-dropdown-in absolute right-0 top-11 z-50 max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg" style={{ borderColor: C.border }}>
         <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Date range</p>
         <div className="mb-2 flex flex-col gap-1">
           {DATE_RANGES.map((d) => (
