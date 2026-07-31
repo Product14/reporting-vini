@@ -65,6 +65,7 @@ interface Ctx {
   spyneToken: string; // host-forwarded Spyne API token from the URL (prod); "" locally → server uses env
   enterpriseId: string; // host-forwarded ?enterprise_id= (scopes the live meetings API); "" → decode from token
   spyneEnv: string; // host-forwarded ?env=uat|stag|prod — which Spyne backend our API routes should call; "" → prod
+  serviceType: "sales" | "service"; // host-forwarded ?serviceType= — the department SPACE this iframe is scoped to
 }
 const ScenarioCtx = createContext<Ctx | null>(null);
 
@@ -92,27 +93,32 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
   const [spyneToken, setSpyneToken] = useState("");
   const [enterpriseId, setEnterpriseId] = useState("");
   const [spyneEnv, setSpyneEnv] = useState("");
+  const [serviceType, setServiceType] = useState<"sales" | "service">("sales");
   useEffect(() => {
     // intentional: read the browser-only URL after mount, then render children for the first time
     const sp = new URLSearchParams(window.location.search);
-    // The host forwards the Spyne API token on the iframe URL (prod) as `auth_key` (value may include a
-    // "Bearer " prefix); `spyne_token`/`token` are accepted as fallbacks. Strip "Bearer " to the raw token
-    // (fetchAgents re-adds it as the Authorization header). Empty → no token, server falls back to env.
-    const rawToken = sp.get("auth_key") || sp.get("spyne_token") || sp.get("token") || "";
+    // The host forwards the Spyne API token on the iframe URL. It's sent as `auth_key`, `token`, or
+    // `bearerToken` (value may include a "Bearer " prefix); `spyne_token` is a legacy alias. This matches
+    // the shared console embed contract (action-items-console / console-vini-appointments). Strip "Bearer ".
+    const rawToken = sp.get("auth_key") || sp.get("spyne_token") || sp.get("token") || sp.get("bearerToken") || "";
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSpyneToken(rawToken.replace(/^Bearer\s+/i, "").trim());
-    // The host also scopes the rooftop's enterprise via ?enterprise_id= — used by the live meetings API
-    // (the count drill-down + upcoming card). Empty → the server decodes it from the token.
-    setEnterpriseId((sp.get("enterprise_id") || "").trim());
-    // The host also scopes which Spyne backend to call via ?env=uat|stag|prod (the Sales/Service split —
-    // a UAT-embedded rooftop's token is only valid against the UAT API, not prod). Empty → server default.
-    const rawEnv = (sp.get("env") || "").trim().toLowerCase();
-    setSpyneEnv(rawEnv === "uat" || rawEnv === "stag" || rawEnv === "prod" ? rawEnv : "");
-    setAccount(resolveAccount(sp.get("team_id")));
+    // enterprise/team accept both snake_case (what the console sends today) and camelCase aliases.
+    setEnterpriseId((sp.get("enterprise_id") || sp.get("enterpriseId") || "").trim());
+    // The host also scopes which Spyne backend to call via ?env=uat|stag|prod (also accepts staging/production).
+    const rawEnv = (sp.get("env") || sp.get("environment") || "").trim().toLowerCase();
+    const env = rawEnv === "staging" ? "stag" : rawEnv === "production" ? "prod" : rawEnv;
+    setSpyneEnv(env === "uat" || env === "stag" || env === "prod" ? env : "");
+    // Department SPACE this iframe is scoped to (sales|service). Sales and Service are separate console
+    // spaces passed via ?serviceType= (snake_case service_type / legacy department also accepted), NOT an
+    // in-app toggle. Defaults to sales when absent/invalid — same contract as the sibling consoles.
+    const rawDept = (sp.get("serviceType") || sp.get("service_type") || sp.get("department") || "").trim().toLowerCase();
+    setServiceType(rawDept === "service" ? "service" : "sales");
+    setAccount(resolveAccount(sp.get("team_id") || sp.get("teamId")));
   }, []);
 
   if (account === null) return <ScenarioResolving />;
-  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId, spyneEnv }}>{children}</ScenarioCtx.Provider>;
+  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId, spyneEnv, serviceType }}>{children}</ScenarioCtx.Provider>;
 }
 
 export function useScenario(): {
@@ -122,6 +128,7 @@ export function useScenario(): {
   spyneToken: string;
   enterpriseId: string;
   spyneEnv: string;
+  serviceType: "sales" | "service";
   view: ScenarioView;
 } {
   const c = useContext(ScenarioCtx);
@@ -134,6 +141,7 @@ export function useScenario(): {
     spyneToken: c?.spyneToken ?? "",
     enterpriseId: c?.enterpriseId ?? "",
     spyneEnv: c?.spyneEnv ?? "",
+    serviceType: c?.serviceType ?? "sales",
     view: scenarioView(scenario),
   };
 }

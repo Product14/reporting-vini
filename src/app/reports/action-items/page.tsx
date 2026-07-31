@@ -84,6 +84,8 @@ function ActionItemsView() {
           active="actions"
           teamId={teamId}
           query={navQuery}
+          hideTabs
+          hideDept
           right={
             teamId ? (
               <DateFilter

@@ -2,12 +2,26 @@
 
 import Link from "next/link";
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
 import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
 import { useDept, type Dept } from "./dateRange";
 import { track } from "@/lib/analytics";
 
 export * from "./data";
+
+/* Render overlays (modals, drawers, the tour) into <body> via a portal. Critical for correctness: our
+ * entrance animations leave a lingering `transform` (animation-fill-mode: both), and ANY transformed
+ * ancestor becomes the containing block for `position: fixed` — so a fixed drawer nested under an
+ * animated card would size/position against that card instead of the viewport and visually "break the
+ * screen." Portaling to <body> escapes every such ancestor. SSR-safe: renders nothing until mounted. */
+export function Portal({ children }: { children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(false);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setMounted(true); }, []);
+  if (!mounted || typeof document === "undefined") return null;
+  return createPortal(children, document.body);
+}
 
 /* ── tabs ── */
 export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting";
@@ -68,6 +82,9 @@ export function ReportTopBar({
   back,
   teamId,
   query,
+  hideTabs,
+  hideDept,
+  hideTitle,
 }: {
   title: string;
   subtitle: string;
@@ -76,6 +93,9 @@ export function ReportTopBar({
   back?: string; // when set, render a back arrow linking here (e.g. the overview)
   teamId?: string; // preserved across tab + back navigation
   query?: string; // full ?team_id=…&<date> for tab links (carries the selected window across tabs)
+  hideTabs?: boolean; // Onboarding/Training aren't reports — suppress the report tab nav
+  hideDept?: boolean; // …and the Sales/Service scope, which has nothing to scope pre-live
+  hideTitle?: boolean; // Live in the embedded flow wants only the controls — drop the title/subtitle block
 }) {
   // Sticky header that condenses once the page is scrolled. Uses two different thresholds (enter at 40,
   // exit below 16) rather than one — the header's own height changes when it condenses (padding, subtitle,
@@ -101,7 +121,8 @@ export function ReportTopBar({
         scrolled ? "py-2.5 shadow-[0_4px_16px_rgba(16,24,40,0.06)]" : "py-5"
       }`}
     >
-      <div className="mx-auto max-w-[1400px] flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
+      <div className={`mx-auto max-w-[1400px] flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-4 ${hideTitle ? "sm:justify-end" : "sm:justify-between"}`}>
+        {!hideTitle && (
         <div className="flex items-start gap-3">
           {back && (
             <Link
@@ -121,15 +142,18 @@ export function ReportTopBar({
             <p className={`overflow-hidden text-[12.5px] text-[#6b7280] transition-all duration-200 ${scrolled ? "max-h-0 opacity-0" : "mt-1 max-h-10 opacity-100"}`}>{subtitle}</p>
           </div>
         </div>
+        )}
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          {teamId && !locked && <DeptSwitcher dept={dept} setDept={setDept} />}
+          {teamId && !locked && !hideDept && <DeptSwitcher dept={dept} setDept={setDept} />}
           {right}
         </div>
       </div>
       {/* nav tabs collapse away once the page is scrolled (scroll back to the top to reveal them) */}
-      <div className={`overflow-hidden transition-[max-height,opacity] duration-200 ${scrolled ? "max-h-0 opacity-0" : "max-h-40 opacity-100"}`}>
-        <ReportTabs active={active} teamId={teamId} query={query} />
-      </div>
+      {!hideTabs && (
+        <div className={`overflow-hidden transition-[max-height,opacity] duration-200 ${scrolled ? "max-h-0 opacity-0" : "max-h-40 opacity-100"}`}>
+          <ReportTabs active={active} teamId={teamId} query={query} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1577,6 +1601,7 @@ export function MeetingsModal({
 
   if (!open) return null;
   return (
+    <Portal>
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={onClose} aria-hidden />
       <div className="relative flex max-h-[80vh] w-full max-w-[520px] flex-col overflow-hidden rounded-3xl border border-[#ece6fb] bg-white shadow-[0_24px_70px_rgba(16,24,40,0.3)]">
@@ -1624,5 +1649,6 @@ export function MeetingsModal({
         )}
       </div>
     </div>
+    </Portal>
   );
 }

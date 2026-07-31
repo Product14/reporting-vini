@@ -73,6 +73,8 @@ function AppointmentsView() {
           active="appointments"
           teamId={teamId}
           query={navQuery}
+          hideTabs
+          hideDept
           right={
             teamId ? (
               <DateFilter
