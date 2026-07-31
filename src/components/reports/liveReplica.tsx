@@ -83,7 +83,9 @@ function greeting(): string {
 }
 
 /* ══════════════════════════ 1. Hero — greeting + value-prop strip ══════════════════════════ */
-function HeroTile({ icon, value, label, sub, missing }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean }) {
+// Where each hero metric tile navigates on click — to the matching parent console tab (or a drill modal).
+interface HeroNav { onAppointments?: () => void; onActionItems?: () => void; onConversations?: () => void; onHotLeads?: () => void }
+function HeroTile({ icon, value, label, sub, missing, onClick }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; onClick?: () => void }) {
   // A metric with no data isn't a dead "—" — it's a feature that isn't switched on. Turn it into an
   // upsell that hands the dealer to Training to enable it.
   if (missing) {
@@ -100,51 +102,61 @@ function HeroTile({ icon, value, label, sub, missing }: { icon: string; value: R
       </div>
     );
   }
-  return (
-    <div className="flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-[#e5e7eb] bg-white p-[15px]">
+  const inner = (
+    <>
       {icon.startsWith("/") ? <Image src={icon} alt="" width={28} height={28} /> : <span className="text-[24px] leading-none">{icon}</span>}
       <div className="flex flex-col items-start gap-1">
         <p className="text-[16px] font-bold leading-[20px] text-[#030712]">{value}</p>
-        <p className="text-[12px] font-semibold text-[#030712]">{label}</p>
+        <p className="flex items-center gap-1 text-[12px] font-semibold text-[#030712]">{label}{onClick && <span className="text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
         <p className="text-[12px] text-[#626f81]">{sub}</p>
       </div>
-    </div>
+    </>
   );
+  const base = "flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-[#e5e7eb] bg-white p-[15px]";
+  return onClick
+    ? <button onClick={onClick} className={`group ${base} text-left transition-colors hover:border-[#d8caff] hover:bg-[#faf8ff]`}>{inner}</button>
+    : <div className={base}>{inner}</div>;
 }
 
 // Service hero: 4 metric tiles in ONE divided container, each an icon-chip + "N Noun" headline + sub
 // (matches the Figma service overview — not the sales tile grid).
-function ServiceHeroTiles({ fleet, actionStats, hotLeads }: { fleet: FleetLive; actionStats: ActionItemStats | null; hotLeads: number }) {
+function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; hotLeads: number; nav?: HeroNav }) {
   const tiles = [
-    { icon: "/live-overview/icon-afterhours.svg", chipBg: "#ede9fe", headline: <><CountUp value={fleet.afterHours} /> Leads</>, sub: "Captured after-hours" },
-    { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <>{actionStats ? <CountUp value={actionStats.created} /> : "—"} Action Items</>, sub: actionStats ? `${fmtInt(actionStats.open)} items are still open` : "syncing…" },
-    { icon: "🔥", chipBg: "#fde9ec", headline: <><CountUp value={hotLeads} /> Hot Leads</>, sub: "warmed & in-market now" },
-    { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={fleet.appointments} /> Appointments</>, sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
+    { icon: "/live-overview/icon-afterhours.svg", chipBg: "#ede9fe", headline: <><CountUp value={fleet.afterHours} /> Leads</>, sub: "Captured after-hours", onClick: nav?.onConversations },
+    { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <>{actionStats ? <CountUp value={actionStats.created} /> : "—"} Action Items</>, sub: actionStats ? `${fmtInt(actionStats.open)} items are still open` : "syncing…", onClick: nav?.onActionItems },
+    { icon: "🔥", chipBg: "#fde9ec", headline: <><CountUp value={hotLeads} /> Hot Leads</>, sub: "warmed & in-market now", onClick: nav?.onHotLeads },
+    { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={fleet.appointments} /> Appointments</>, sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings", onClick: nav?.onAppointments },
   ];
   return (
     <div className="flex w-full flex-wrap items-stretch overflow-hidden rounded-xl border border-[#e5e7eb] bg-white">
-      {tiles.map((t, i) => (
-        <div key={i} className={`flex flex-1 basis-[210px] items-start gap-3 px-6 py-5 ${i > 0 ? "border-l border-[#e5e7eb]" : ""}`}>
-          <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg" style={{ background: t.chipBg }}>
-            {t.icon.startsWith("/") ? <Image src={t.icon} alt="" width={18} height={18} /> : <span className="text-[16px] leading-none">{t.icon}</span>}
-          </span>
-          <div className="flex flex-col gap-1">
-            <p className="text-[18px] font-bold leading-[22px] text-[#030712]">{t.headline}</p>
-            <p className="text-[12px] text-[#626f81]">{t.sub}</p>
-          </div>
-        </div>
-      ))}
+      {tiles.map((t, i) => {
+        const cell = (
+          <>
+            <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg" style={{ background: t.chipBg }}>
+              {t.icon.startsWith("/") ? <Image src={t.icon} alt="" width={18} height={18} /> : <span className="text-[16px] leading-none">{t.icon}</span>}
+            </span>
+            <div className="flex flex-col gap-1">
+              <p className="flex items-center gap-1 text-[18px] font-bold leading-[22px] text-[#030712]">{t.headline}{t.onClick && <span className="text-[14px] text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
+              <p className="text-[12px] text-[#626f81]">{t.sub}</p>
+            </div>
+          </>
+        );
+        const base = `flex flex-1 basis-[210px] items-start gap-3 px-6 py-5 ${i > 0 ? "border-l border-[#e5e7eb]" : ""}`;
+        return t.onClick
+          ? <button key={i} onClick={t.onClick} className={`group ${base} text-left transition-colors hover:bg-[#faf8ff]`}>{cell}</button>
+          : <div key={i} className={base}>{cell}</div>;
+      })}
     </div>
   );
 }
 
-export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0 }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number }) {
+export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; nav?: HeroNav }) {
   const tiles = [
     { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled },
-    { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
-    { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…" },
-    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
-    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed" },
+    { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created, onClick: nav?.onActionItems },
+    { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…", onClick: nav?.onActionItems },
+    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings", onClick: nav?.onAppointments },
+    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed", onClick: nav?.onConversations },
   ];
   return (
     <section
@@ -158,7 +170,7 @@ export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads =
       </div>
       {controls && <div className="no-print flex flex-wrap items-center justify-center gap-2.5">{controls}</div>}
       {serviceMode ? (
-        <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} />
+        <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} nav={nav} />
       ) : (
         <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
           {tiles.map((t) => <HeroTile key={t.label} {...t} />)}
@@ -753,7 +765,7 @@ export function LiveOverview({
   const deptLabel: "Sales" | "Service" = (inbound ?? outbound)?.dept ?? (serviceMode ? "Service" : "Sales");
 
   const nodes: Record<string, React.ReactNode> = {
-    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} />,
+    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
     "live.agents": (
       <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
         {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" teamId={account.teamId} accountName={account.name} />}
