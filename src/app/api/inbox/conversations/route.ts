@@ -12,6 +12,8 @@ import { spyneServiceGet, svcIdOk } from "@/lib/spyne/conversationApi";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // big teams: conversations/v2 can take ~14s upstream — don't let the function time out
+
 
 export async function GET(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
