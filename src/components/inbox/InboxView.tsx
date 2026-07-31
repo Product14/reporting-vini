@@ -107,6 +107,11 @@ export function setInboxAgents(agents: OnboardedAgent[], serviceType: "sales" | 
 function aiAgentImage(name?: string): string | null {
   return (name && AI_AGENT.imageByName[name.trim()]) || AI_AGENT.imageUrl;
 }
+
+// Leads whose engagement was stopped THIS session. Module-level so the "stopped" state survives
+// navigating away and back (both the panel and the drawer read it). It resets on a full reload — until
+// the backend persists stopAiEngagement on delete-by-lead, that's the furthest the client can carry it.
+const STOPPED_LEADS = new Set<string>();
 // YYYY-MM-DD calendar day of `d` in the active tz (en-CA renders as YYYY-MM-DD). Local tz on failure.
 function dayKeyTz(d: Date): string {
   try { return new Intl.DateTimeFormat("en-CA", { timeZone: ACTIVE_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d); }
@@ -1773,7 +1778,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   // Resolved-in-session ids drop out here so the "Action items (n)" count and the list both update.
   const actions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const nextSched = normalizeNextScheduled(conv?.nextScheduledTasks?.[0]);
-  const stopped = stoppedLocal ?? (conv?.stopAiEngagement || !!lead?.stopAiEngagement);
+  const stopped = stoppedLocal ?? (conv?.stopAiEngagement || !!lead?.stopAiEngagement || (!!lead?.lead_id && STOPPED_LEADS.has(lead.lead_id)));
 
   async function handleStop() {
     if (stopped || busy || !lead?.lead_id) return;
@@ -1783,7 +1788,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
     setBusy(true);
     const ok = await stopInboxEngagement(auth, lead.lead_id);
     setBusy(false);
-    if (ok) setStoppedLocal(true); else setStopErr(true);
+    if (ok) { setStoppedLocal(true); if (lead?.lead_id) STOPPED_LEADS.add(lead.lead_id); } else setStopErr(true);
   }
 
   return (
@@ -1919,7 +1924,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
   const lead = conv?.leads?.[0];
   const openActions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const appt = conv?.nextAppointments?.[0];
-  const stopped = stoppedLocal ?? (conv?.stopAiEngagement || !!lead?.stopAiEngagement);
+  const stopped = stoppedLocal ?? (conv?.stopAiEngagement || !!lead?.stopAiEngagement || (!!lead?.lead_id && STOPPED_LEADS.has(lead.lead_id)));
 
   async function handleStop() {
     if (stopped || busy || !lead?.lead_id) return;
@@ -1929,7 +1934,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
     setBusy(true);
     const ok = await stopInboxEngagement(auth, lead.lead_id);
     setBusy(false);
-    if (ok) setStoppedLocal(true); else setStopErr(true);
+    if (ok) { setStoppedLocal(true); if (lead?.lead_id) STOPPED_LEADS.add(lead.lead_id); } else setStopErr(true);
   }
 
   const TABS: { id: DetailTab; label: string; count?: number }[] = [
