@@ -207,8 +207,11 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
             className="relative flex h-[60px] w-[60px] flex-none items-center justify-center rounded-full p-[2.5px]"
             style={{ background: inbound ? "linear-gradient(135deg,#86efac,#93c5fd,#c4b5fd)" : "linear-gradient(135deg,#fdba74,#fca5a5,#f0abfc)" }}
           >
-            <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white">
-              <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top" />
+            <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white bg-white">
+              {/* Real agent avatar from the onboarded-agents API (imageUrl); mock art only as a fallback.
+                  Plain <img> — the photo is an external Spyne-S3 URL whose host varies by env. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={agent.photoUrl || (inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png")} alt="" className="h-full w-full object-cover object-top" />
             </span>
           </span>
           <div className="flex flex-col items-start gap-2">
