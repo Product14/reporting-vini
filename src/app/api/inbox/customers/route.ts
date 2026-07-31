@@ -32,7 +32,13 @@ export async function GET(request: Request): Promise<Response> {
   up.set("page", String(Math.max(1, Number(searchParams.get("page")) || 1)));
   up.set("limit", String(Math.max(1, Math.min(100, Number(searchParams.get("limit")) || 25))));
   if (["1", "true"].includes((searchParams.get("unreadOnly") || "").toLowerCase())) up.set("unreadOnly", "true");
-  const search = (searchParams.get("searchTerm") || "").trim();
+  // Phone-like searchTerm ("+1 (952) 261-4576") is normalized to "+19522614576" so any format matches
+  // the stored number (leads/v2 searches the raw string). Names / IDs / call-IDs (contain letters) pass
+  // through. Done here too (not just client-side) so the fix holds for every caller.
+  let search = (searchParams.get("searchTerm") || "").trim();
+  if (search && /^[+\d\s().\-]+$/.test(search) && search.replace(/\D/g, "").length >= 4) {
+    search = search.replace(/[\s().\-]/g, "");
+  }
   if (search) up.set("searchTerm", search.slice(0, 120));
   const startDate = (searchParams.get("startDate") || "").trim();
   const endDate = (searchParams.get("endDate") || "").trim();
