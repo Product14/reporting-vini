@@ -81,13 +81,24 @@ const EMPTY_PAGE: LeadsPage = {
   pagination: { currentPage: 1, totalPages: 1, totalCustomers: 0, hasNext: false, hasPrevious: false, limit: 25, unreadCount: 0 },
 };
 
+// A formatted phone ("+1 (952) 261-4576") never matches the stored "+19522614576", because the API
+// searches the raw string. When the query is PHONE-LIKE (only digits + phone punctuation), strip the
+// separators — keeping a leading "+" and the digits — so any format resolves. Names/IDs pass through
+// untouched. Verified: "+1 (314) 688-1478" → "+13146881478" → matches; raw → 0 results.
+function normalizeSearchTerm(raw: string): string {
+  const t = raw.trim();
+  const digits = t.replace(/\D/g, "");
+  const phoneLike = digits.length >= 4 && /^[+\d\s().\-]+$/.test(t);
+  return phoneLike ? t.replace(/[\s().\-]/g, "") : t;
+}
+
 export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Promise<LeadsPage> {
   if (!a.teamId || !a.enterpriseId) return EMPTY_PAGE;
   const p = new URLSearchParams({ team_id: a.teamId, enterprise_id: a.enterpriseId });
   p.set("page", String(q.page ?? 1));
   p.set("limit", String(q.limit ?? 25));
   if (q.unreadOnly) p.set("unreadOnly", "1");
-  if (q.searchTerm) p.set("searchTerm", q.searchTerm);
+  if (q.searchTerm) p.set("searchTerm", normalizeSearchTerm(q.searchTerm));
   if (q.startDate) p.set("startDate", q.startDate);
   if (q.endDate) p.set("endDate", q.endDate);
   for (const t of q.leadType ?? []) p.append("leadType", t);
