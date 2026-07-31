@@ -256,7 +256,13 @@ function Inbox() {
   const activeFilterCount = leadType.length + (dateRange !== "all" ? 1 : 0);
 
   const [tz, setTz] = useState<string | null>(null);
-  const [page, setPage] = useState<LeadsPage | null>(null);
+  // Customer list is PAGINATED (limit 50/page) and accumulated via infinite scroll — big teams have
+  // thousands of customers, so we append the next page as the user scrolls near the bottom.
+  const [customers, setCustomers] = useState<InboxCustomer[]>([]);
+  const [pageInfo, setPageInfo] = useState<LeadsPage["pagination"] | null>(null);
+  const pageRef = useRef(1);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const listBottomRef = useRef<HTMLDivElement | null>(null);
   const [loadingList, setLoadingList] = useState(true);
 
   // Resolve the rooftop timezone once per team (same working-hours source the reports use) and publish
@@ -342,14 +348,10 @@ function Inbox() {
     return () => clearTimeout(t);
   }, [search]);
 
-  // Load the customer list whenever scope / tab / search / filters change.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset when scope/filters change
-    if (!teamId || !enterpriseId) { setPage(null); setLoadingList(false); return; }
-    let on = true;
-    setLoadingList(true);
+  // The query for the current tab/search/filters (page added per-call). Shared by page-1 load + load-more.
+  const listQuery = useMemo(() => {
     const range = dateRangeToIso(dateRange);
-    fetchInboxCustomers(auth, {
+    return {
       limit: 50,
       unreadOnly: tab === "unread",
       searchTerm: debounced || undefined,
@@ -357,9 +359,20 @@ function Inbox() {
       sortBy: dateBasis,
       startDate: range.startDate,
       endDate: range.endDate,
-    }).then((p) => {
+    } as const;
+  }, [tab, debounced, leadType, dateBasis, dateRange]);
+
+  // Load page 1 (reset) whenever scope / tab / search / filters change.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset when scope/filters change
+    if (!teamId || !enterpriseId) { setCustomers([]); setPageInfo(null); setLoadingList(false); return; }
+    let on = true;
+    setLoadingList(true);
+    pageRef.current = 1;
+    fetchInboxCustomers(auth, { ...listQuery, page: 1 }).then((p) => {
       if (!on) return;
-      setPage(p);
+      setCustomers(p.customers);
+      setPageInfo(p.pagination);
       setLoadingList(false);
       // Auto-select: the deep-linked customer if any (synthesize a stub row if it's not on this page so
       // the thread still loads), else the first conversation. Only when nothing is selected yet.
@@ -374,9 +387,33 @@ function Inbox() {
     });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, dateRange, dateBasis]);
+  }, [teamId, enterpriseId, spyneToken, spyneEnv, listQuery]);
 
-  const customers = useMemo(() => page?.customers ?? [], [page]);
+  // Append the next page (infinite scroll). Deduped by customer_id (page boundaries can repeat a row).
+  const loadMore = useCallback(() => {
+    if (loadingMore || !pageInfo?.hasNext) return;
+    setLoadingMore(true);
+    const next = pageRef.current + 1;
+    fetchInboxCustomers(auth, { ...listQuery, page: next })
+      .then((p) => {
+        pageRef.current = next;
+        setCustomers((prev) => {
+          const seen = new Set(prev.map((c) => c.customer_id));
+          return [...prev, ...p.customers.filter((c) => !seen.has(c.customer_id))];
+        });
+        setPageInfo(p.pagination);
+      })
+      .finally(() => setLoadingMore(false));
+  }, [auth, loadingMore, pageInfo, listQuery]);
+
+  // Fire loadMore when the bottom sentinel scrolls into view.
+  useEffect(() => {
+    const el = listBottomRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) loadMore(); }, { rootMargin: "400px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loadMore]);
 
   // Typeahead: a floating dropdown of matching customers (name + phone, query highlighted) while the
   // search box has focus. Suggestions are client-filtered from the already-loaded page for instant
@@ -395,11 +432,11 @@ function Inbox() {
       .slice(0, 6);
   }, [search, customers]);
   const showSuggest = searchFocused && search.trim().length >= 1 && suggestions.length > 0;
-  const totalAll = page?.pagination.totalCustomers ?? customers.length;
+  const totalAll = pageInfo?.totalCustomers ?? customers.length;
   // Customers opened this session count as read immediately (there's no read-state write API), so the
   // Unread count + the row dot update on open instead of staying stale (INVAI-4968).
   const readInSession = customers.filter((c) => readIds.has(c.customer_id) && (c.unreadCounts?.totalUnread ?? 0) > 0).length;
-  const totalUnread = Math.max(0, (page?.pagination.unreadCount ?? 0) - readInSession);
+  const totalUnread = Math.max(0, (pageInfo?.unreadCount ?? 0) - readInSession);
   // On the Unread tab, drop conversations read this session so they leave the list on open (there's no
   // read-state write API, so the server still returns them until a refetch — filter them out here).
   const displayCustomers = tab === "unread" ? customers.filter((c) => !readIds.has(c.customer_id)) : customers;
@@ -506,17 +543,25 @@ function Inbox() {
                 No conversations {tab === "unread" ? "unread" : "found"}.
               </div>
             ) : (
-              displayCustomers.map((c) => (
-                <ConversationRow
-                  key={c.customer_id}
-                  c={c}
-                  meta={rowMeta[c.customer_id]}
-                  active={selected?.customer_id === c.customer_id}
-                  read={readIds.has(c.customer_id)}
-                  onClick={() => openCustomer(c)}
-                  onVisible={requestEnrich}
-                />
-              ))
+              <>
+                {displayCustomers.map((c) => (
+                  <ConversationRow
+                    key={c.customer_id}
+                    c={c}
+                    meta={rowMeta[c.customer_id]}
+                    active={selected?.customer_id === c.customer_id}
+                    read={readIds.has(c.customer_id)}
+                    onClick={() => openCustomer(c)}
+                    onVisible={requestEnrich}
+                  />
+                ))}
+                {/* infinite-scroll sentinel: loads the next page when it nears the viewport */}
+                {pageInfo?.hasNext && (
+                  <div ref={listBottomRef} className="flex items-center justify-center py-4 text-[11px]" style={{ color: C.sub }}>
+                    {loadingMore ? "Loading more…" : ""}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </aside>
