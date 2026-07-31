@@ -701,7 +701,7 @@ export interface LiveOverviewProps {
   conversations: Conversation[] | null;
   agentNames: Record<string, string>;
   onOpenAgent: (id: string) => void;
-  onOpenApptModal: () => void;
+  onViewAppointments: () => void; // "View All →" on the appointments card — navigates to the Appointments tab
   onOpenWarmModal: () => void;
   onViewActionItems: () => void;
   onViewConversations: () => void;
@@ -727,7 +727,7 @@ const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
 
 export function LiveOverview({
   account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
-  onOpenAgent, onOpenApptModal, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl,
+  onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
@@ -752,7 +752,7 @@ export function LiveOverview({
       </div>
     ),
     "live.hotleads": <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />,
-    "live.appts": <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onOpenApptModal} />,
+    "live.appts": <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
     "live.actions": <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,
     "live.conversations": <LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} />,
   };

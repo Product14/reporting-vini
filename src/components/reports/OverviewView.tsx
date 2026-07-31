@@ -564,7 +564,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   conversations={conversations}
                   agentNames={agentNames}
                   onOpenAgent={openAgent}
-                  onOpenApptModal={openApptModal}
+                  onViewAppointments={() => goCrossPage("appointments", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/appointments${navQuery}`)}
                   onOpenWarmModal={() => setWarmModalOpen(true)}
                   onViewActionItems={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)}
                   onViewConversations={() => goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`)}
