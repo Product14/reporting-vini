@@ -874,7 +874,7 @@ function ThreadPane({ auth, customer }: { auth: InboxAuth; customer: InboxCustom
           </div>
         ) : (
           <div className="mx-auto flex w-full max-w-[760px] flex-col gap-6">
-            {renderWithDividers(nodes, fbCtx, auth, customer.customer_name || "")}
+            {renderWithDividers(nodes, fbCtx, auth, customer.customer_name || "", customer.customer_id || customer.customer_name || "")}
             <div ref={bottomRef} />
           </div>
         )}
@@ -960,7 +960,7 @@ interface FbCtx {
 }
 
 /* Insert TODAY/date dividers between nodes on day boundaries (§13). */
-function renderWithDividers(nodes: ThreadNode[], fb: FbCtx, auth: InboxAuth, customerName: string): React.ReactNode[] {
+function renderWithDividers(nodes: ThreadNode[], fb: FbCtx, auth: InboxAuth, customerName: string, customerSeed: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let lastDay = "";
   nodes.forEach((n, i) => {
@@ -970,12 +970,12 @@ function renderWithDividers(nodes: ThreadNode[], fb: FbCtx, auth: InboxAuth, cus
       out.push(<DayDivider key={`d${i}`} label={dl} />);
       lastDay = dl;
     }
-    out.push(<ThreadNodeView key={`n${i}`} node={n} fb={fb} auth={auth} customerName={customerName} />);
+    out.push(<ThreadNodeView key={`n${i}`} node={n} fb={fb} auth={auth} customerName={customerName} customerSeed={customerSeed} />);
   });
   return out;
 }
 
-function ThreadNodeView({ node, fb, auth, customerName }: { node: ThreadNode; fb: FbCtx; auth: InboxAuth; customerName: string }) {
+function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: ThreadNode; fb: FbCtx; auth: InboxAuth; customerName: string; customerSeed: string }) {
   if (node.kind === "call") {
     // Place calls on the correct side, like messages: incoming (customer) left, outgoing (AI) right.
     const inbound = (node.rec.callData?.callType || "").toLowerCase().includes("inbound");
@@ -1023,7 +1023,7 @@ function ThreadNodeView({ node, fb, auth, customerName }: { node: ThreadNode; fb
       </div>
     );
   }
-  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} fbNode={node.fb} fb={fb} />;
+  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
 }
 
 /* §03 — a tool-use "behind the scenes" step: action + query params + result, expandable. Modeled on
@@ -1082,9 +1082,10 @@ function DayDivider({ label }: { label: string }) {
 
 /* §02 — one SMS entry. AI (out) = right/blue; customer (in) = left/white. AI messages carry a
  * thumbs-up / report feedback control; tool activity renders as its own ToolStepCard. */
-function MessageBubble({ side, sender, text, at, fbNode, fb }: {
+function MessageBubble({ side, sender, text, at, fbNode, fb, custName, custSeed }: {
   side: "in" | "out"; sender: string; text: string; at: string;
   fbNode?: { conversationId: string; messageIndex: number }; fb?: FbCtx;
+  custName?: string; custSeed?: string; // full customer name + seed → customer avatar matches the header
 }) {
   const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)}</span>;
   if (side === "out") {
@@ -1115,7 +1116,7 @@ function MessageBubble({ side, sender, text, at, fbNode, fb }: {
   }
   return (
     <div className="flex justify-start gap-2">
-      <Avatar kind="customer" name={sender} />
+      <Avatar kind="customer" name={custName || sender} seed={custSeed} />
       <div className="flex max-w-[70%] flex-col items-start gap-1.5">
         <div className="rounded-[15px] rounded-bl-none border px-5 py-3.5 text-[12px] leading-[18px]" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
           {text}
@@ -1127,7 +1128,9 @@ function MessageBubble({ side, sender, text, at, fbNode, fb }: {
 }
 
 // Message avatar — agent (flat headset glyph) vs customer (colored initials).
-function Avatar({ kind, name }: { kind: "agent" | "customer"; name: string }) {
+// `name` drives the initials; optional `seed` drives the color (defaults to name). The customer bubble
+// passes the FULL name + the customer_id seed so its icon matches the thread-header avatar exactly.
+function Avatar({ kind, name, seed }: { kind: "agent" | "customer"; name: string; seed?: string }) {
   if (kind === "agent") {
     const photo = aiAgentImage(name);
     if (photo) {
@@ -1141,7 +1144,7 @@ function Avatar({ kind, name }: { kind: "agent" | "customer"; name: string }) {
     );
   }
   return (
-    <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(name || "?") }} title={name}>
+    <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(seed || name || "?") }} title={name}>
       {initials(name)}
     </span>
   );
