@@ -127,6 +127,9 @@ function fmtListStamp(iso: string | null | undefined): string {
   if (dk === dayKeyTz(new Date(Date.now() - 86400000))) return "Yesterday";
   return d.toLocaleDateString([], withTz({ month: "short", day: "numeric" }));
 }
+// True when an ISO stamp is exactly midnight UTC — i.e. a date-only value with no real time-of-day
+// (how campaign start/end currently arrive). A real timestamp makes this false → we show the time.
+const isDateOnlyTs = (iso?: string | null) => /T00:00:00(\.0+)?Z$/.test(iso || "");
 // Dealer-local date without a time (for campaign spans — their start is a date-only 00:00Z stamp).
 function fmtDateOnly(iso: string | null | undefined): string {
   const d = parseDate(iso);
@@ -758,9 +761,11 @@ function ThreadPane({ auth, customer }: { auth: InboxAuth; customer: InboxCustom
         // Per-touch "side tasks" (campaign/follow-up sends) are routine — render them subtly so the
         // milestones (lead created, speed-to-lead, appointment) stay the visual anchors of the journey.
         const subtle = /task/i.test(ev.eventType || "") || /task$/i.test(m.title);
-        // Campaign start/end arrive as date-only (00:00Z) stamps → flag so the chip shows a DATE, not a
-        // misleading identical midnight time for every campaign (INVAI campaign-time-same).
-        const dateOnly = ev.eventType === "campaign_started" || ev.eventType === "campaign_ended";
+        // Campaign start/end currently arrive as date-only (00:00Z) stamps → show a DATE, not a
+        // misleading identical midnight time for every campaign (INVAI campaign-time-same). Forward-
+        // compatible: the moment the backend emits a REAL createdAt (non-midnight), this shows the time.
+        const isCampaign = ev.eventType === "campaign_started" || ev.eventType === "campaign_ended";
+        const dateOnly = isCampaign && isDateOnlyTs(ev.timestamp);
         out.push({ t: +new Date(ev.timestamp) || 0, kind: "event", emoji: m.emoji, title: m.title, detail: m.detail, subtle, dateOnly });
       }
     }
@@ -1324,16 +1329,17 @@ function buildTimeline(journey: LeadJourneyEvent[]): TimelineItem[] {
   for (const ev of sorted) {
     if (ev.eventType === "campaign_started") {
       trigger = null;
-      // Campaign start arrives date-only (00:00Z) — flag it so the timeline shows a DATE, not a time
-      // (all campaigns otherwise read as the same clock time — INVAI-4958), and can show a day span.
-      const item: TimelineItem = { emoji: "📣", title: ev.campaignName || "Campaign", detail: "Campaign", at: ev.timestamp, campaign: true, dateOnly: true };
+      // Campaign start currently arrives date-only (00:00Z) → show a DATE + day span, not an identical
+      // midnight time for every campaign (INVAI-4958). Forward-compatible: a real (non-midnight) createdAt
+      // from the backend flips this to a time automatically.
+      const item: TimelineItem = { emoji: "📣", title: ev.campaignName || "Campaign", detail: "Campaign", at: ev.timestamp, campaign: true, dateOnly: isDateOnlyTs(ev.timestamp) };
       items.push(item);
       if (ev.campaignName) openByName[ev.campaignName] = item;
     } else if (ev.eventType === "campaign_ended") {
       trigger = null;
       const open = ev.campaignName ? openByName[ev.campaignName] : undefined;
       if (open) { open.endAt = ev.timestamp; if (ev.campaignName) delete openByName[ev.campaignName]; }
-      else items.push({ emoji: "🏁", title: ev.campaignName || "Campaign ended", detail: "Campaign ended", at: ev.timestamp, campaign: true, dateOnly: true });
+      else items.push({ emoji: "🏁", title: ev.campaignName || "Campaign ended", detail: "Campaign ended", at: ev.timestamp, campaign: true, dateOnly: isDateOnlyTs(ev.timestamp) });
     } else if (ev.eventType === "stl_triggered") {
       if (campaignSmsTs.has(+new Date(ev.timestamp) || 0)) continue;
       const m = journeyMeta(ev);
