@@ -206,7 +206,10 @@ export async function fetchInboxConversations(
   if (opts.type) p.set("type", opts.type);
   p.set("page", String(opts.page ?? 1));
   p.set("limit", String(opts.limit ?? 30));
-  if (a.serviceType) p.set("serviceType", a.serviceType); // scope the thread/leads/actions to this department
+  // NOTE: deliberately NOT scoping the per-customer thread by serviceType. The department split lives on
+  // the LIST (leads/v2). conversations/v2 serviceType is unreliable across envs (prod returns 200 with an
+  // EMPTY result rather than 400, so a fallback can't catch it) → it blanked real threads ("No conversation
+  // history"). Once a customer is open, show their full history regardless of department.
   withEnv(p, a);
   try {
     const r = await fetch(`/api/inbox/conversations?${p}`, { cache: "no-store", headers: authHeaders(a) });
