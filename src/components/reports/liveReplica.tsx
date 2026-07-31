@@ -140,7 +140,7 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads }: { fleet: FleetLive; 
 
 export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0 }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number }) {
   const tiles = [
-    { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: "avg first response", missing: fleet.responseTimeSec == null },
+    { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled },
     { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
     { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…" },
     { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
