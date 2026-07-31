@@ -22,6 +22,7 @@
 
 import React from "react";
 import { fmtSecs, Modal } from "./kitV3";
+import { InterestForm } from "./upsell";
 import { CountUp } from "./anim";
 import type { FleetLive, ActionItemStats } from "./liveData";
 
@@ -211,21 +212,13 @@ function OffFlow({ bucket, delay, onBackToTraining, mode }: { bucket: BucketDef;
 
 /* The headline "unlock full potential" banner — shown in Live above the impact story. Names how many of
  * the three flows are live and drives the dealer back to Training to switch the rest on. */
-// Email CTA target — the dealer's point of contact at Spyne. Prefilled subject + body so the ask is
-// one click. (Confirm the alias with the team; support@spyne.ai is the safe default.)
-const SPYNE_CONTACT = "support@spyne.ai";
-const flowMailto = () => {
-  const subject = "Turn on more Vini flows for my store";
-  const body =
-    "Hi Spyne team,\n\n" +
-    "My AI agent is live on the After-hours flow. I'd like to turn on the Overflow and All-Leads flows so no lead is ever missed, any hour.\n\n" +
-    "Can you help me enable them?\n\nThanks";
-  return `mailto:${SPYNE_CONTACT}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-};
-
-// Explains the three flows (what each covers, which are on) and hands the dealer an email CTA to their
-// Spyne team. Portal-backed Modal, so it never traps the page (see the drawer/portal fix).
-function FlowsModal({ open, onClose, liveCount, total }: { open: boolean; onClose: () => void; liveCount: number; total: number }) {
+// Explains the three flows (what each covers, which are on) and captures the enable request via the SAME
+// in-app path as the agent upsell (POST /api/agent-interest → logs + emails the Spyne team), so nothing
+// depends on the dealer's own mail client. Portal-backed Modal, so it never traps the page.
+function FlowsModal({ open, onClose, liveCount, total, teamId, accountName }: {
+  open: boolean; onClose: () => void; liveCount: number; total: number; teamId: string; accountName: string;
+}) {
+  const [showForm, setShowForm] = React.useState(false);
   return (
     <Modal open={open} onClose={onClose} title="Your AI can cover more of your leads" sub={`${liveCount} of ${total} flows live — here's what turning on the rest means`}>
       <div className="flex flex-col gap-4">
@@ -249,22 +242,35 @@ function FlowsModal({ open, onClose, liveCount, total }: { open: boolean; onClos
             </div>
           );
         })}
-        <a
-          href={flowMailto()}
-          className="mt-1 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-[13px] font-bold text-white"
-          style={{ background: C.primary }}
-        >
-          ✉ Email my Spyne team to enable these →
-        </a>
-        <p className="text-center text-[11px] text-[#9aa1ac]">Opens your email to {SPYNE_CONTACT} with the request ready to send.</p>
+        {showForm ? (
+          <div className="rounded-xl border border-[#ece6fb] bg-[#faf8ff] p-4">
+            <InterestForm
+              agentId="flows-overflow-allleads"
+              agentName="Overflow + All-Leads flows"
+              accountName={accountName}
+              teamId={teamId}
+              onCancel={() => setShowForm(false)}
+              ctaLabel="Send to my Spyne team"
+              blurb={<>Tell us where to reach you and the Spyne team will switch on <b className="text-[#111]">Overflow</b> and <b className="text-[#111]">All-Leads</b> for <b className="text-[#111]">{accountName || "your store"}</b>.</>}
+            />
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowForm(true)}
+            className="mt-1 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-[13px] font-bold text-white"
+            style={{ background: C.primary }}
+          >
+            ✉ Email my Spyne team to enable these →
+          </button>
+        )}
       </div>
     </Modal>
   );
 }
 
 // Value nudge on Live: how many flows are switched on, and that more can be. The CTA opens an explainer
-// modal (what the flows mean) with an email CTA to the dealer's Spyne team — no retired in-app path.
-export function UnlockPotentialBanner({ liveCount = 1, total = 3 }: { liveCount?: number; total?: number }) {
+// modal (what the flows mean) that captures the enable request in-app (same path as the agent upsell).
+export function UnlockPotentialBanner({ liveCount = 1, total = 3, teamId = "", accountName = "" }: { liveCount?: number; total?: number; teamId?: string; accountName?: string }) {
   const [open, setOpen] = React.useState(false);
   return (
     <>
@@ -278,7 +284,7 @@ export function UnlockPotentialBanner({ liveCount = 1, total = 3 }: { liveCount?
         </div>
         <button onClick={() => setOpen(true)} className="flex-none rounded-lg border border-[#d8caff] bg-white px-4 py-2 text-[12.5px] font-bold transition-colors hover:bg-[#f6f1ff]" style={{ color: C.primary }}>Talk to your Spyne team →</button>
       </div>
-      <FlowsModal open={open} onClose={() => setOpen(false)} liveCount={liveCount} total={total} />
+      <FlowsModal open={open} onClose={() => setOpen(false)} liveCount={liveCount} total={total} teamId={teamId} accountName={accountName} />
     </>
   );
 }

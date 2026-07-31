@@ -723,7 +723,7 @@ export const LIVE_SECTIONS: { id: string; label: string }[] = [
 const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
 
 export function LiveOverview({
-  fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
+  account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
   onOpenAgent, onOpenApptModal, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
@@ -744,7 +744,7 @@ export function LiveOverview({
     ),
     "live.funnel": (
       <div className="flex flex-col gap-3.5">
-        <UnlockPotentialBanner liveCount={1} total={3} />
+        <UnlockPotentialBanner liveCount={1} total={3} teamId={account.teamId} accountName={account.name} />
         <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />
       </div>
     ),
