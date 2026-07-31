@@ -227,8 +227,8 @@ type Tab = "all" | "unread";
 function Inbox() {
   const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType, account } = useScenario();
   const auth: InboxAuth = useMemo(
-    () => ({ teamId, enterpriseId, spyneToken, spyneEnv }),
-    [teamId, enterpriseId, spyneToken, spyneEnv],
+    () => ({ teamId, enterpriseId, spyneToken, spyneEnv, serviceType }),
+    [teamId, enterpriseId, spyneToken, spyneEnv, serviceType],
   );
 
   // Optional deep-link: ?c=<customer_id> opens straight into that conversation (the console can link
@@ -1770,7 +1770,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   // Resolved-in-session ids drop out here so the "Action items (n)" count and the list both update.
   const actions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const nextSched = normalizeNextScheduled(conv?.nextScheduledTasks?.[0]);
-  const stopped = stoppedLocal ?? !!lead?.stopAiEngagement;
+  const stopped = stoppedLocal ?? (conv?.stopAiEngagement || !!lead?.stopAiEngagement);
 
   async function handleStop() {
     if (stopped || busy || !lead?.lead_id) return;
@@ -1916,7 +1916,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
   const lead = conv?.leads?.[0];
   const openActions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const appt = conv?.nextAppointments?.[0];
-  const stopped = stoppedLocal ?? !!lead?.stopAiEngagement;
+  const stopped = stoppedLocal ?? (conv?.stopAiEngagement || !!lead?.stopAiEngagement);
 
   async function handleStop() {
     if (stopped || busy || !lead?.lead_id) return;

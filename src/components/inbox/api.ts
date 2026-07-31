@@ -7,6 +7,7 @@ export interface InboxAuth {
   enterpriseId: string;
   spyneToken?: string;
   spyneEnv?: string;
+  serviceType?: "sales" | "service"; // department space this iframe is scoped to (?serviceType=)
 }
 
 function authHeaders(a: InboxAuth): HeadersInit | undefined {
@@ -77,8 +78,8 @@ export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Pro
   if (q.startDate) p.set("startDate", q.startDate);
   if (q.endDate) p.set("endDate", q.endDate);
   for (const t of q.leadType ?? []) p.append("leadType", t);
-  for (const s of q.leadSource ?? []) p.append("leadSource", s);
   if (q.sortBy) p.set("sortBy", q.sortBy);
+  if (a.serviceType) p.set("serviceType", a.serviceType); // department scope (sales|service)
   withEnv(p, a);
   try {
     const r = await fetch(`/api/inbox/customers?${p}`, { cache: "no-store", headers: authHeaders(a) });
@@ -188,10 +189,11 @@ export interface ConversationsV2 {
   nextScheduledTasks: unknown[];
   leadJourney: LeadJourneyEvent[];
   leads: LeadSummary[];
+  stopAiEngagement?: boolean; // aggregate engagement-stopped flag from conversations/v2 (persisted state)
 }
 
 const EMPTY_CONV: ConversationsV2 = {
-  conversations: [], nextActionItems: [], nextAppointments: [], nextScheduledTasks: [], leadJourney: [], leads: [],
+  conversations: [], nextActionItems: [], nextAppointments: [], nextScheduledTasks: [], leadJourney: [], leads: [], stopAiEngagement: false,
 };
 
 export async function fetchInboxConversations(
@@ -204,6 +206,7 @@ export async function fetchInboxConversations(
   if (opts.type) p.set("type", opts.type);
   p.set("page", String(opts.page ?? 1));
   p.set("limit", String(opts.limit ?? 30));
+  if (a.serviceType) p.set("serviceType", a.serviceType); // scope the thread/leads/actions to this department
   withEnv(p, a);
   try {
     const r = await fetch(`/api/inbox/conversations?${p}`, { cache: "no-store", headers: authHeaders(a) });
@@ -218,6 +221,7 @@ export async function fetchInboxConversations(
       nextScheduledTasks: Array.isArray(d.nextScheduledTasks) ? d.nextScheduledTasks : [],
       leadJourney: Array.isArray(d.leadJourney) ? d.leadJourney : [],
       leads: Array.isArray(d.leads) ? d.leads : [],
+      stopAiEngagement: d.stopAiEngagement === true, // aggregate flag (true if any matched lead is stopped)
     };
   } catch {
     return EMPTY_CONV;

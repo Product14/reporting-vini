@@ -33,12 +33,18 @@ export async function GET(request: Request): Promise<Response> {
   up.set("limit", String(Math.max(1, Math.min(100, Number(searchParams.get("limit")) || 20))));
   const type = (searchParams.get("type") || "").toLowerCase();
   if (type === "call" || type === "sms") up.set("type", type);
+  // Department scope (sales|service) — conversations/v2 gained serviceType support. GRACEFUL: older
+  // backends 400 on it, so retry without it rather than showing an empty thread.
+  const dept = (searchParams.get("serviceType") || "").toLowerCase();
+  if (dept === "sales" || dept === "service") up.set("serviceType", dept);
 
-  const res = await spyneServiceGet<unknown>(
-    `/conversation/customers/conversations/v2?${up.toString()}`,
-    spyneTokenFrom(request),
-    spyneEnvFrom(request),
-  );
+  const token = spyneTokenFrom(request);
+  const env = spyneEnvFrom(request);
+  let res = await spyneServiceGet<unknown>(`/conversation/customers/conversations/v2?${up.toString()}`, token, env);
+  if (!res.ok && res.status === 400 && up.has("serviceType")) {
+    up.delete("serviceType");
+    res = await spyneServiceGet<unknown>(`/conversation/customers/conversations/v2?${up.toString()}`, token, env);
+  }
   if (!res.ok) return Response.json({ error: res.error, degraded: true }, { status: res.status });
   return Response.json(res.data, { headers: { "Cache-Control": "s-maxage=10, stale-while-revalidate=30" } });
 }

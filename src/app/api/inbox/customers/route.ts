@@ -39,17 +39,22 @@ export async function GET(request: Request): Promise<Response> {
   // Repeated params: leadType / leadSource (the upstream reads them case-insensitively).
   for (const t of searchParams.getAll("leadType")) if (t.trim()) up.append("leadType", t.trim());
   for (const s of searchParams.getAll("leadSource")) if (s.trim()) up.append("leadSource", s.trim());
-  // NOTE: leads/v2 does NOT support a department/service_type filter (passing it 400s the whole list —
-  // INVAI-4957), so it's intentionally not forwarded. Re-add here only once the API accepts it.
   // sortBy switches which date field startDate/endDate filter on: lead createdAt vs last_contacted_at.
   const sortBy = (searchParams.get("sortBy") || "").toLowerCase();
   if (sortBy === "lead" || sortBy === "conversation") up.set("sortBy", sortBy);
+  // Department scope (sales|service) — leads/v2 gained serviceType support. GRACEFUL: older backends
+  // (e.g. prod before this deploys) 400 on it, so if the scoped call fails we retry WITHOUT serviceType
+  // rather than showing an empty list. Once every env has it, the retry never fires.
+  const dept = (searchParams.get("serviceType") || "").toLowerCase();
+  if (dept === "sales" || dept === "service") up.set("serviceType", dept);
 
-  const res = await spyneServiceGet<unknown>(
-    `/conversation/leads/v2/get-customers-list?${up.toString()}`,
-    spyneTokenFrom(request),
-    spyneEnvFrom(request),
-  );
+  const token = spyneTokenFrom(request);
+  const env = spyneEnvFrom(request);
+  let res = await spyneServiceGet<unknown>(`/conversation/leads/v2/get-customers-list?${up.toString()}`, token, env);
+  if (!res.ok && res.status === 400 && up.has("serviceType")) {
+    up.delete("serviceType");
+    res = await spyneServiceGet<unknown>(`/conversation/leads/v2/get-customers-list?${up.toString()}`, token, env);
+  }
   if (!res.ok) return Response.json({ error: res.error, degraded: true }, { status: res.status });
   return Response.json(res.data, { headers: { "Cache-Control": "s-maxage=15, stale-while-revalidate=45" } });
 }
