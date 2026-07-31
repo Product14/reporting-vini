@@ -738,6 +738,9 @@ export interface LiveOverviewProps {
   onBackToTraining?: () => void; // legacy hook; Training is no longer surfaced, so unused on Live
   headerControls?: React.ReactNode; // date filter + customize, rendered inside the hero (this IS the header)
   ctrl?: CustomizeCtrl; // Customize: hide + reorder the sections below (omit → default order, all shown)
+  serviceMode: boolean; // department SKIN, from the URL serviceType scope — NOT inferred from the agent
+                        // list (which is empty when the dept has no live agents), so a service rooftop
+                        // with no service agents still shows the Service skin + "Get Service …" upsell.
 }
 
 // The customizable sections of the Live overview, in default order. Exposed so OverviewView can build
@@ -757,15 +760,14 @@ const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
 
 export function LiveOverview({
   account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
-  onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl,
+  onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl, serviceMode,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
-  const serviceMode = agents.length > 0 && agents.every((a) => a.dept === "Service");
   const hotLeads = warmLeads.filter((w) => w.tier === "hot").length;
-  // The department in play (from whichever agent IS live), so a missing direction shows the right
-  // "Get {dept} {dir}" upsell placeholder instead of an empty slot.
-  const deptLabel: "Sales" | "Service" = (inbound ?? outbound)?.dept ?? (serviceMode ? "Service" : "Sales");
+  // Department skin follows the URL scope (serviceMode), so a scope with no live agents still shows the
+  // right "Get {dept} {dir}" upsell — not a Sales fallback.
+  const deptLabel: "Sales" | "Service" = serviceMode ? "Service" : "Sales";
 
   const nodes: Record<string, React.ReactNode> = {
     "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,

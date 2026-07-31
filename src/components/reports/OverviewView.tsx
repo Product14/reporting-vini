@@ -576,6 +576,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   account={account}
                   fleet={fleet}
                   agents={ranked}
+                  serviceMode={dept === "service"}
                   warmLeads={warmLeads}
                   namedAppts={namedAppts}
                   aiStats={aiStats}
