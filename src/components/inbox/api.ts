@@ -81,15 +81,17 @@ const EMPTY_PAGE: LeadsPage = {
   pagination: { currentPage: 1, totalPages: 1, totalCustomers: 0, hasNext: false, hasPrevious: false, limit: 25, unreadCount: 0 },
 };
 
-// A formatted phone ("+1 (952) 261-4576") never matches the stored "+19522614576", because the API
-// searches the raw string. When the query is PHONE-LIKE (only digits + phone punctuation), strip the
-// separators — keeping a leading "+" and the digits — so any format resolves. Names/IDs pass through
-// untouched. Verified: "+1 (314) 688-1478" → "+13146881478" → matches; raw → 0 results.
+// A formatted phone ("+1 (952) 261-4576") never matches the stored "+19522614576" because the API
+// searches the raw string. When the query is PHONE-LIKE (only digits + phone punctuation), reduce it to
+// DIGITS ONLY — the backend substring-matches, so 9522614576 / 19522614576 / +19522614576 all resolve
+// regardless of +1, 1, +, or no prefix. Names / customer-IDs / call-IDs / conversation-IDs contain
+// letters, so they fail the phone-like test and pass through untouched. (Verified: raw "+3146881478" and
+// "+1 3146881478" → 0 results; digits-only → 1.)
 function normalizeSearchTerm(raw: string): string {
   const t = raw.trim();
   const digits = t.replace(/\D/g, "");
-  const phoneLike = digits.length >= 4 && /^[+\d\s().\-]+$/.test(t);
-  return phoneLike ? t.replace(/[\s().\-]/g, "") : t;
+  const phoneLike = digits.length >= 4 && digits.length <= 15 && /^[+\d\s().\-]+$/.test(t);
+  return phoneLike ? digits : t;
 }
 
 export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Promise<LeadsPage> {
