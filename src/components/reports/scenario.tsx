@@ -111,8 +111,17 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
     setSpyneEnv(env === "uat" || env === "stag" || env === "prod" ? env : "");
     // Department SPACE this iframe is scoped to (sales|service). Sales and Service are separate console
     // spaces passed via ?serviceType= (snake_case service_type / legacy department also accepted), NOT an
-    // in-app toggle. Defaults to sales when absent/invalid — same contract as the sibling consoles.
-    const rawDept = (sp.get("serviceType") || sp.get("service_type") || sp.get("department") || "").trim().toLowerCase();
+    // in-app toggle. FALLBACK: the console scopes some spaces only on the PARENT url
+    // (console.spyne.ai/converse-ai?…&serviceType=service) and does NOT forward serviceType into this
+    // iframe's src — so read it from document.referrer (the parent url) too, exactly like the sibling
+    // consoles (action-items-console). Without this, the Service space renders as Sales. Defaults to
+    // sales only when it's absent everywhere.
+    let refDept = "";
+    try {
+      const rp = new URL(document.referrer).searchParams;
+      refDept = (rp.get("serviceType") || rp.get("service_type") || rp.get("department") || "").trim().toLowerCase();
+    } catch { /* no / cross-origin-stripped referrer → ignore */ }
+    const rawDept = (sp.get("serviceType") || sp.get("service_type") || sp.get("department") || refDept || "").trim().toLowerCase();
     setServiceType(rawDept === "service" ? "service" : "sales");
     setAccount(resolveAccount(sp.get("team_id") || sp.get("teamId")));
   }, []);
