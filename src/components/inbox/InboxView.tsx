@@ -216,13 +216,12 @@ function Inbox() {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [leadType, setLeadType] = useState<string[]>([]);
-  const [leadSource, setLeadSource] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>("all");
   // Which date the range/sort applies to (API sortBy). "conversation" = most-recently-active first,
   // the natural inbox ordering; "lead" = newest lead first (filters on lead createdAt).
   const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const activeFilterCount = leadType.length + leadSource.length + (dateRange !== "all" ? 1 : 0);
+  const activeFilterCount = leadType.length + (dateRange !== "all" ? 1 : 0);
 
   const [tz, setTz] = useState<string | null>(null);
   const [page, setPage] = useState<LeadsPage | null>(null);
@@ -307,7 +306,6 @@ function Inbox() {
       unreadOnly: tab === "unread",
       searchTerm: debounced || undefined,
       leadType: leadType.length ? leadType : undefined,
-      leadSource: leadSource.length ? leadSource : undefined,
       sortBy: dateBasis,
       startDate: range.startDate,
       endDate: range.endDate,
@@ -328,7 +326,7 @@ function Inbox() {
     });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, leadSource, dateRange, dateBasis]);
+  }, [teamId, enterpriseId, spyneToken, spyneEnv, tab, debounced, leadType, dateRange, dateBasis]);
 
   const customers = useMemo(() => page?.customers ?? [], [page]);
 
@@ -354,6 +352,9 @@ function Inbox() {
   // Unread count + the row dot update on open instead of staying stale (INVAI-4968).
   const readInSession = customers.filter((c) => readIds.has(c.customer_id) && (c.unreadCounts?.totalUnread ?? 0) > 0).length;
   const totalUnread = Math.max(0, (page?.pagination.unreadCount ?? 0) - readInSession);
+  // On the Unread tab, drop conversations read this session so they leave the list on open (there's no
+  // read-state write API, so the server still returns them until a refetch — filter them out here).
+  const displayCustomers = tab === "unread" ? customers.filter((c) => !readIds.has(c.customer_id)) : customers;
 
   if (!teamId || !enterpriseId) return <NoScope hasTeam={!!teamId} />;
 
@@ -389,7 +390,6 @@ function Inbox() {
           {filtersOpen && (
             <FiltersPopover
               leadType={leadType} onLeadType={setLeadType}
-              leadSource={leadSource} onLeadSource={setLeadSource}
               dateRange={dateRange} onDateRange={setDateRange}
               dateBasis={dateBasis} onDateBasis={setDateBasis}
               onClose={() => setFiltersOpen(false)}
@@ -452,12 +452,12 @@ function Inbox() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {loadingList ? (
               <ListSkeleton />
-            ) : customers.length === 0 ? (
+            ) : displayCustomers.length === 0 ? (
               <div className="px-5 py-10 text-center text-[12px]" style={{ color: C.sub }}>
                 No conversations {tab === "unread" ? "unread" : "found"}.
               </div>
             ) : (
-              customers.map((c) => (
+              displayCustomers.map((c) => (
                 <ConversationRow
                   key={c.customer_id}
                   c={c}
@@ -600,7 +600,7 @@ type ThreadNode =
   | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
-  | { t: number; kind: "event"; emoji: string; title: string; detail: string; subtle?: boolean } // lead-journey milestone, interleaved in the chat
+  | { t: number; kind: "event"; emoji: string; title: string; detail: string; subtle?: boolean; dateOnly?: boolean } // lead-journey milestone, interleaved in the chat
   | { t: number; kind: "call"; rec: ConvRecord };
 
 const EVENT_GRADIENT =
@@ -747,13 +747,21 @@ function ThreadPane({ auth, customer }: { auth: InboxAuth; customer: InboxCustom
         .map((e) => +new Date(e.timestamp) || 0),
     );
     // Lead-journey milestones interleaved chronologically in the chat (also shown in the right panel).
-    for (const ev of conv.leadJourney ?? []) {
-      if (ev.eventType === "stl_triggered" && campaignSmsTs.has(+new Date(ev.timestamp) || 0)) continue;
-      const m = journeyMeta(ev);
-      // Per-touch "side tasks" (campaign/follow-up sends) are routine — render them subtly so the
-      // milestones (lead created, speed-to-lead, appointment) stay the visual anchors of the journey.
-      const subtle = /task/i.test(ev.eventType || "") || /task$/i.test(m.title);
-      out.push({ t: +new Date(ev.timestamp) || 0, kind: "event", emoji: m.emoji, title: m.title, detail: m.detail, subtle });
+    // These are lead-level (campaigns, tasks, speed-to-lead) and NOT tied to an inbound/outbound
+    // conversation, so they only belong in the "All" view — showing them under the Inbound/Outbound
+    // filter is what put campaign data in the Inbound tab (INVAI campaign-in-inbound). Skip when filtered.
+    if (dir === "all") {
+      for (const ev of conv.leadJourney ?? []) {
+        if (ev.eventType === "stl_triggered" && campaignSmsTs.has(+new Date(ev.timestamp) || 0)) continue;
+        const m = journeyMeta(ev);
+        // Per-touch "side tasks" (campaign/follow-up sends) are routine — render them subtly so the
+        // milestones (lead created, speed-to-lead, appointment) stay the visual anchors of the journey.
+        const subtle = /task/i.test(ev.eventType || "") || /task$/i.test(m.title);
+        // Campaign start/end arrive as date-only (00:00Z) stamps → flag so the chip shows a DATE, not a
+        // misleading identical midnight time for every campaign (INVAI campaign-time-same).
+        const dateOnly = ev.eventType === "campaign_started" || ev.eventType === "campaign_ended";
+        out.push({ t: +new Date(ev.timestamp) || 0, kind: "event", emoji: m.emoji, title: m.title, detail: m.detail, subtle, dateOnly });
+      }
     }
     return out.sort((a, b) => a.t - b.t);
   }, [conv, dir, aiAgentName, custFirst]);
@@ -960,7 +968,7 @@ function ThreadNodeView({ node, fb, auth, customerName }: { node: ThreadNode; fb
             <span className="opacity-60">{node.emoji}</span>
             <span className="font-medium">{node.title}</span>
             {node.detail && <span className="opacity-80">· {node.detail}</span>}
-            <span className="opacity-70">· {fmtTime(new Date(node.t).toISOString())}</span>
+            <span className="opacity-70">· {node.dateOnly ? fmtDateOnly(new Date(node.t).toISOString()) : fmtTime(new Date(node.t).toISOString())}</span>
           </span>
         </div>
       );
@@ -1175,7 +1183,12 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
           <div className="border-t px-4 py-3" style={{ borderColor: C.border }}>
             {/* autoPlay: expand is a user gesture (clicking the row/Play pill), so the recording starts
                 immediately instead of needing a second click (INVAI-4962). */}
-            <audio controls autoPlay preload="metadata" src={recording} className="h-9 w-full"><track kind="captions" /></audio>
+            {/* onPlay pauses every OTHER audio on the page, so expanding several calls never plays
+                overlapping recordings — only the one you just started plays (INVAI autoplay overlap). */}
+            <audio controls autoPlay preload="metadata" src={recording} className="h-9 w-full"
+              onPlay={(e) => { document.querySelectorAll("audio").forEach((a) => { if (a !== e.currentTarget) a.pause(); }); }}>
+              <track kind="captions" />
+            </audio>
             <div className="mt-3 flex items-center justify-between border-b" style={{ borderColor: C.border }}>
               <div className="flex items-center gap-4">
                 {(["transcript", "review"] as const).map((t) => (
@@ -2017,18 +2030,8 @@ function dueLabel(due?: string): { text: string; style: React.CSSProperties } {
 
 /* ── filters popover (§11) — every option maps to a real leads/v2 query param ─── */
 const LEAD_TYPES = ["HOT", "WARM", "COLD", "DEAD"];
-// §01 lead sources. Display label → the value leads/v2 expects (docs show short lowercase keys like
-// "internet"/"phone"). NOTE: the demo team has no source data, so this couldn't be validated end-to-end;
-// confirm the exact accepted enum with the dev.
-const LEAD_SOURCES: { label: string; value: string }[] = [
-  { label: "Internet Lead", value: "internet" },
-  { label: "Phone Lead", value: "phone" },
-  { label: "Email Lead", value: "email" },
-  { label: "Walk-in", value: "walk-in" },
-  { label: "Referral", value: "referral" },
-  { label: "Online Scheduler", value: "online_scheduler" },
-  { label: "Service Campaign", value: "service_campaign" },
-];
+// NOTE: the Lead-source filter was removed — leads/v2 rejects `leadSource` for every value (verified on
+// prod, returns 0 regardless of casing), so it only ever emptied the list. Re-add once the API supports it.
 type DateRange = "all" | "today" | "7d" | "30d";
 const DATE_RANGES: { v: DateRange; label: string }[] = [
   { v: "all", label: "All time" }, { v: "today", label: "Today" }, { v: "7d", label: "Last 7 days" }, { v: "30d", label: "Last 30 days" },
@@ -2049,17 +2052,16 @@ function dateRangeToIso(r: DateRange): { startDate?: string; endDate?: string } 
 }
 
 function FiltersPopover({
-  leadType, onLeadType, leadSource, onLeadSource, dateRange, onDateRange, dateBasis, onDateBasis, onClose,
+  leadType, onLeadType, dateRange, onDateRange, dateBasis, onDateBasis, onClose,
 }: {
   leadType: string[]; onLeadType: (v: string[]) => void;
-  leadSource: string[]; onLeadSource: (v: string[]) => void;
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
   onClose: () => void;
 }) {
   const toggle = (arr: string[], set: (v: string[]) => void, t: string) =>
     set(arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t]);
-  const anyActive = leadType.length || leadSource.length || dateRange !== "all";
+  const anyActive = leadType.length || dateRange !== "all";
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
@@ -2093,17 +2095,8 @@ function FiltersPopover({
             </label>
           ))}
         </div>
-        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Lead source</p>
-        <div className="flex flex-col gap-1">
-          {LEAD_SOURCES.map((s) => (
-            <label key={s.value} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] hover:bg-[#fafafa]" style={{ color: C.dark }}>
-              <input type="checkbox" checked={leadSource.includes(s.value)} onChange={() => toggle(leadSource, onLeadSource, s.value)} className="accent-[#4600f2]" />
-              {s.label}
-            </label>
-          ))}
-        </div>
         {anyActive ? (
-          <button onClick={() => { onLeadType([]); onLeadSource([]); onDateRange("all"); }}
+          <button onClick={() => { onLeadType([]); onDateRange("all"); }}
             className="mt-3 w-full rounded-lg border py-1.5 text-[11px] font-medium" style={{ borderColor: C.border, color: C.sub }}>
             Clear all
           </button>
