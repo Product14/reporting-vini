@@ -35,9 +35,10 @@ export async function GET(request: Request): Promise<Response> {
   up.set("limit", String(Math.max(1, Math.min(100, Number(searchParams.get("limit")) || 20))));
   const type = (searchParams.get("type") || "").toLowerCase();
   if (type === "call" || type === "sms") up.set("type", type);
-  // NOTE: serviceType is intentionally NOT forwarded here — the department split is applied on the LIST
-  // (leads/v2). conversations/v2's serviceType is unreliable in prod (returns 200 + EMPTY instead of 400),
-  // which blanked real customer threads. Show the full thread once a customer is open.
+  // Forward serviceType: conversations/v2 DEFAULTS to sales when it's absent, so Service customers come
+  // back empty ("No conversation history") without it. Sales space → sales thread, Service → service.
+  const dept = (searchParams.get("serviceType") || "").toLowerCase();
+  if (dept === "sales" || dept === "service") up.set("serviceType", dept);
 
   const res = await spyneServiceGet<unknown>(
     `/conversation/customers/conversations/v2?${up.toString()}`,

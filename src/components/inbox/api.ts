@@ -219,10 +219,10 @@ export async function fetchInboxConversations(
   if (opts.type) p.set("type", opts.type);
   p.set("page", String(opts.page ?? 1));
   p.set("limit", String(opts.limit ?? 30));
-  // NOTE: deliberately NOT scoping the per-customer thread by serviceType. The department split lives on
-  // the LIST (leads/v2). conversations/v2 serviceType is unreliable across envs (prod returns 200 with an
-  // EMPTY result rather than 400, so a fallback can't catch it) → it blanked real threads ("No conversation
-  // history"). Once a customer is open, show their full history regardless of department.
+  // MUST send serviceType matching the space: conversations/v2 DEFAULTS to sales when it's absent, so a
+  // Service customer (no sales data) comes back empty ("No conversation history") without it. Sales space
+  // → sales thread, Service space → service thread. (The backend now handles this correctly post-deploy.)
+  if (a.serviceType) p.set("serviceType", a.serviceType);
   withEnv(p, a);
   const key = `conv:${p.toString()}`;
   return coalesce(key, async () => {
