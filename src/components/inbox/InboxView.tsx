@@ -288,14 +288,21 @@ function Inbox() {
   const rowMetaCache = useRef<Record<string, { appt: number; actions: number }>>({});
   const enrichQueue = useRef<string[]>([]);
   const enrichActive = useRef(0);
+  const enrichReady = useRef(false); // gate: enrichment waits until primary content has had a head start
   const authRef = useRef(auth);
   const drainRef = useRef<() => void>(() => {});
   useEffect(() => { authRef.current = auth; }, [auth]);
-  // The drain loop lives in a ref (defined once) so the recursive re-pump after each fetch doesn't need
-  // to reference a memoized callback by name. Concurrency-capped at 5.
+  // Row-badge enrichment is LOW priority: it must not compete with the customer list, the opened
+  // conversation, or the persona for the browser's ~6 connections (that starved the opened thread —
+  // 14s to load). So (a) it doesn't start until ~1.2s after mount, and (b) it runs only 2 at a time.
+  useEffect(() => {
+    const t = setTimeout(() => { enrichReady.current = true; drainRef.current(); }, 1200);
+    return () => clearTimeout(t);
+  }, []);
   useEffect(() => {
     const drain = () => {
-      while (enrichActive.current < 5 && enrichQueue.current.length) {
+      if (!enrichReady.current) return; // hold the queue until primary content loads
+      while (enrichActive.current < 2 && enrichQueue.current.length) {
         const id = enrichQueue.current.shift()!;
         enrichActive.current++;
         fetchInboxConversations(authRef.current, id, { limit: 1 })

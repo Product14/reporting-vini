@@ -13,6 +13,19 @@ export interface InboxAuth {
 function authHeaders(a: InboxAuth): HeadersInit | undefined {
   return a.spyneToken ? { Authorization: `Bearer ${a.spyneToken}` } : undefined;
 }
+
+// In-flight request coalescing: when the same resource is requested again while the first request is
+// still running (e.g. the thread pane AND the right panel both load a customer's conversations/persona
+// at the same instant), they share ONE network call instead of firing duplicates. No caching once it
+// resolves — the next request re-fetches fresh — so there's no staleness, only de-duplication.
+const _inflight = new Map<string, Promise<unknown>>();
+function coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = _inflight.get(key);
+  if (existing) return existing as Promise<T>;
+  const p = fn().finally(() => { _inflight.delete(key); });
+  _inflight.set(key, p);
+  return p as Promise<T>;
+}
 function withEnv(q: URLSearchParams, a: InboxAuth): void {
   if (a.spyneEnv) q.set("env", a.spyneEnv);
 }
@@ -211,24 +224,27 @@ export async function fetchInboxConversations(
   // EMPTY result rather than 400, so a fallback can't catch it) → it blanked real threads ("No conversation
   // history"). Once a customer is open, show their full history regardless of department.
   withEnv(p, a);
-  try {
-    const r = await fetch(`/api/inbox/conversations?${p}`, { cache: "no-store", headers: authHeaders(a) });
-    const j = (await r.json().catch(() => null)) as { data?: ConversationsV2 } & Partial<ConversationsV2> | null;
-    if (!r.ok || !j) return EMPTY_CONV;
-    // The upstream wraps the payload in { status, message, data }; our proxy forwards it verbatim.
-    const d = (j.data ?? j) as Partial<ConversationsV2>;
-    return {
-      conversations: Array.isArray(d.conversations) ? d.conversations : [],
-      nextActionItems: Array.isArray(d.nextActionItems) ? d.nextActionItems : [],
-      nextAppointments: Array.isArray(d.nextAppointments) ? d.nextAppointments : [],
-      nextScheduledTasks: Array.isArray(d.nextScheduledTasks) ? d.nextScheduledTasks : [],
-      leadJourney: Array.isArray(d.leadJourney) ? d.leadJourney : [],
-      leads: Array.isArray(d.leads) ? d.leads : [],
-      stopAiEngagement: d.stopAiEngagement === true, // aggregate flag (true if any matched lead is stopped)
-    };
-  } catch {
-    return EMPTY_CONV;
-  }
+  const key = `conv:${p.toString()}`;
+  return coalesce(key, async () => {
+    try {
+      const r = await fetch(`/api/inbox/conversations?${p}`, { cache: "no-store", headers: authHeaders(a) });
+      const j = (await r.json().catch(() => null)) as { data?: ConversationsV2 } & Partial<ConversationsV2> | null;
+      if (!r.ok || !j) return EMPTY_CONV;
+      // The upstream wraps the payload in { status, message, data }; our proxy forwards it verbatim.
+      const d = (j.data ?? j) as Partial<ConversationsV2>;
+      return {
+        conversations: Array.isArray(d.conversations) ? d.conversations : [],
+        nextActionItems: Array.isArray(d.nextActionItems) ? d.nextActionItems : [],
+        nextAppointments: Array.isArray(d.nextAppointments) ? d.nextAppointments : [],
+        nextScheduledTasks: Array.isArray(d.nextScheduledTasks) ? d.nextScheduledTasks : [],
+        leadJourney: Array.isArray(d.leadJourney) ? d.leadJourney : [],
+        leads: Array.isArray(d.leads) ? d.leads : [],
+        stopAiEngagement: d.stopAiEngagement === true, // aggregate flag (true if any matched lead is stopped)
+      };
+    } catch {
+      return EMPTY_CONV;
+    }
+  });
 }
 
 /* ── Call transcript ────────────────────────────────────────────────────────── */
@@ -538,12 +554,15 @@ export async function fetchInboxPersona(a: InboxAuth, customerId: string): Promi
   if (!a.teamId || !customerId) return null;
   const p = new URLSearchParams({ team_id: a.teamId, customerId });
   withEnv(p, a);
-  try {
-    const r = await fetch(`/api/inbox/persona?${p}`, { cache: "no-store", headers: authHeaders(a) });
-    const j = (await r.json().catch(() => null)) as { data?: Persona } | Persona | null;
-    if (!r.ok || !j) return null;
-    return ((j as { data?: Persona }).data ?? (j as Persona)) || null;
-  } catch {
-    return null;
-  }
+  // Coalesced: the thread pane (summary) and both detail panels request the same persona at once.
+  return coalesce(`persona:${p.toString()}`, async () => {
+    try {
+      const r = await fetch(`/api/inbox/persona?${p}`, { cache: "no-store", headers: authHeaders(a) });
+      const j = (await r.json().catch(() => null)) as { data?: Persona } | Persona | null;
+      if (!r.ok || !j) return null;
+      return ((j as { data?: Persona }).data ?? (j as Persona)) || null;
+    } catch {
+      return null;
+    }
+  });
 }
