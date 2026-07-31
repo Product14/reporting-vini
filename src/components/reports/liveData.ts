@@ -202,6 +202,9 @@ export interface FleetLive {
   // The honest rooftop "Response time" figure; null when no measurable new-lead touches. SMS reply
   // latency is shown on the Recent-calls detail page, not folded into this headline.
   responseTimeSec: number | null;
+  // Speed-to-Lead runs on this rooftop (Sales Inbound is live). Window-independent — gates the STL
+  // "not switched on" upsell so an empty window (e.g. "Today") shows "—" instead of a false upsell.
+  stlEnabled: boolean;
   // % of real conversations the AI handled end-to-end (no transfer) — the workload-offload headline.
   // null when there are no conversations.
   handledEndToEndPct: number | null;
@@ -277,6 +280,10 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const leads = hasLeadFunnel ? lf((f) => f.contacted) : sum((a) => a.report?.leadsAttempted ?? 0);
   // Response time = the Sales-Inbound speed-to-lead avg (only slot with a new-lead first-response funnel).
   const responseTimeSec = agents.find((a) => a.id === "sales_ib")?.report.speedToLead?.avgSec ?? null;
+  // Speed-to-Lead is a Sales-Inbound capability: it's ENABLED whenever the rooftop runs Sales Inbound.
+  // This is window-INDEPENDENT — so a short window (e.g. "Today") with no new-lead sample shows "—",
+  // NOT the "not switched on" upsell. The upsell only shows for rooftops that don't run Sales Inbound.
+  const stlEnabled = agents.some((a) => a.id === "sales_ib");
 
   // Per-direction split for the hero tri-rows.
   const splitFor = (dir: "Inbound" | "Outbound"): FleetSplit => {
@@ -335,6 +342,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     queryConversations,
     queryResolutionRate,
     responseTimeSec,
+    stlEnabled,
     handledEndToEndPct: conversations > 0 ? Math.max(0, Math.round(((conversations - transfers) / conversations) * 100)) : null,
     afterHours,
     talkMinutes,
