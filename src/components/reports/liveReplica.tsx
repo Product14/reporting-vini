@@ -23,8 +23,9 @@ import type { AgentData, WarmLeadItem, NamedAppt } from "./data";
 import { fmtInt } from "./data";
 import type { ActionItem, ActionItemStats, Conversation } from "./liveData";
 import type { FleetLive } from "./liveData";
-import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, agentDisplayName, ConversationDrawer } from "./kitV3";
+import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, agentDisplayName, ConversationDrawer, Modal } from "./kitV3";
 import { UnlockPotentialBanner } from "./valueStory";
+import { InterestForm } from "./upsell";
 import { CountUp, useInView } from "./anim";
 import type { CustomizeCtrl } from "./customize";
 
@@ -273,38 +274,52 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
 }
 
 /* ══════════════════════════ 2b. Agent NOT available — upsell placeholder ══════════════════════════ */
-// Direction-specific value prop shown when a dept's Inbound/Outbound agent isn't live yet. Clicking the
-// card emails the dealer's Spyne team to switch that agent on.
+// Direction-specific value prop shown when a dept's Inbound/Outbound agent isn't live yet. The CTA opens
+// the SAME in-app enable-request form used by the flows modal + agent upsell (POST /api/agent-interest →
+// logs + emails the Spyne team) — no dependency on the dealer's mail client.
 const UPSELL_COPY: Record<string, { headline: string; body: string }> = {
   "Sales Inbound": { headline: "Never miss a buyer who calls in", body: "Emily answers every inbound sales lead instantly — day or night — and books the test drive before they call the next dealer." },
   "Sales Outbound": { headline: "Turn old leads into tomorrow's deals", body: "Jenny works your aged and unsold leads, wins back the ones who slipped away, and books them back in." },
   "Service Inbound": { headline: "Answer every service call, instantly", body: "Emily picks up every inbound service call, books the appointment, and frees your advisors for the drive lane." },
   "Service Outbound": { headline: "Fill tomorrow's empty bays tonight", body: "Jenny wins back the customers who slipped away. You wake up to a booked schedule." },
 };
-function AgentUpsellCard({ dept, dir }: { dept: "Sales" | "Service"; dir: "Inbound" | "Outbound" }) {
+function AgentUpsellCard({ dept, dir, teamId, accountName }: { dept: "Sales" | "Service"; dir: "Inbound" | "Outbound"; teamId: string; accountName: string }) {
   const inbound = dir === "Inbound";
   const copy = UPSELL_COPY[`${dept} ${dir}`] ?? { headline: `Get your ${dir} agent live`, body: "Switch it on to capture more leads, any hour." };
-  const subject = `Enable my ${dept} ${dir} AI agent`;
-  const body = `Hi Spyne team,\n\nI'd like to switch on the ${dept} ${dir} AI agent for my store. Can you help me enable it?\n\nThanks`;
-  const mailto = `mailto:support@spyne.ai?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const [open, setOpen] = React.useState(false);
   return (
-    <a
-      href={mailto}
-      className="lv-lift group flex flex-1 basis-0 flex-col items-center justify-center gap-3 rounded-[15px] border border-dashed border-[#d8caff] bg-[#faf8ff] p-8 text-center transition-colors hover:bg-[#f3eaff]"
-    >
-      <span
-        className="relative flex h-[72px] w-[72px] flex-none items-center justify-center rounded-full p-[2.5px]"
-        style={{ background: inbound ? "linear-gradient(135deg,#86efac,#93c5fd,#c4b5fd)" : "linear-gradient(135deg,#fdba74,#fca5a5,#f0abfc)" }}
-      >
-        <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white">
-          <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top opacity-90" />
+    <>
+      <div className="lv-lift flex flex-1 basis-0 flex-col items-center justify-center gap-3 rounded-[15px] border border-dashed border-[#d8caff] bg-[#faf8ff] p-8 text-center">
+        <span
+          className="relative flex h-[72px] w-[72px] flex-none items-center justify-center rounded-full p-[2.5px]"
+          style={{ background: inbound ? "linear-gradient(135deg,#86efac,#93c5fd,#c4b5fd)" : "linear-gradient(135deg,#fdba74,#fca5a5,#f0abfc)" }}
+        >
+          <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white">
+            <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top opacity-90" />
+          </span>
         </span>
-      </span>
-      <span className="bg-clip-text text-[11px] font-bold uppercase tracking-wider text-transparent" style={{ backgroundImage: "linear-gradient(90deg,#7c3aed,#ca1f34)" }}>{dept} {dir}</span>
-      <p className="text-[18px] font-bold leading-tight text-[#030712]">{copy.headline}</p>
-      <p className="max-w-[300px] text-[13px] leading-relaxed text-[#626f81]">{copy.body}</p>
-      <span className="mt-1 rounded-lg px-5 py-2.5 text-[13px] font-bold text-white transition-transform group-hover:scale-[1.02]" style={{ background: C.primary }}>Get {dept} {dir}</span>
-    </a>
+        <span className="bg-clip-text text-[11px] font-bold uppercase tracking-wider text-transparent" style={{ backgroundImage: "linear-gradient(90deg,#7c3aed,#ca1f34)" }}>{dept} {dir}</span>
+        <p className="text-[18px] font-bold leading-tight text-[#030712]">{copy.headline}</p>
+        <p className="max-w-[300px] text-[13px] leading-relaxed text-[#626f81]">{copy.body}</p>
+        <button onClick={() => setOpen(true)} className="mt-1 rounded-lg px-5 py-2.5 text-[13px] font-bold text-white transition-transform hover:scale-[1.02]" style={{ background: C.primary }}>Get {dept} {dir}</button>
+      </div>
+      <Modal open={open} onClose={() => setOpen(false)} title={`Get your ${dept} ${dir} agent live`} sub={copy.headline}>
+        <div className="flex flex-col gap-4">
+          <p className="text-[13px] leading-relaxed text-[#626f81]">{copy.body}</p>
+          <div className="rounded-xl border border-[#ece6fb] bg-[#faf8ff] p-4">
+            <InterestForm
+              agentId={`${dept.toLowerCase()}-${dir.toLowerCase()}`}
+              agentName={`${dept} ${dir}`}
+              accountName={accountName}
+              teamId={teamId}
+              onCancel={() => setOpen(false)}
+              ctaLabel="Send to my Spyne team"
+              blurb={<>Tell us where to reach you and the Spyne team will switch on your <b className="text-[#111]">{dept} {dir}</b> agent for <b className="text-[#111]">{accountName || "your store"}</b>.</>}
+            />
+          </div>
+        </div>
+      </Modal>
+    </>
   );
 }
 
@@ -741,8 +756,8 @@ export function LiveOverview({
     "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} />,
     "live.agents": (
       <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
-        {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" />}
-        {outbound ? <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Outbound" />}
+        {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" teamId={account.teamId} accountName={account.name} />}
+        {outbound ? <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Outbound" teamId={account.teamId} accountName={account.name} />}
       </div>
     ),
     "live.funnel": (
