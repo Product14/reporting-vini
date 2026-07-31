@@ -162,6 +162,25 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     () => openItems.filter((i) => i.dueAt).sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime()),
     [openItems],
   );
+  // CREATED items in the window (incl. completed) — backs the new Overview action-items table so its
+  // "Created (N)" tab actually shows rows (the open-only list above is empty when a rooftop has drained
+  // its open items to zero, which made "Created" read a count with no rows). Its Open/Overdue/Due-Today
+  // tabs filter this list client-side via the `completed` flag.
+  const [createdItems, setCreatedItems] = useState<ActionItem[]>([]);
+  useEffect(() => {
+    if (sampleMode || !teamId || !feed?.start || !feed?.end) return;
+    let on = true;
+    fetchActionItems(teamId, { scope: "created", start: feed.start, end: feed.end, service: svc, limit: 50, spyneToken })
+      .then((r) => { if (on) setCreatedItems(r); })
+      .catch(() => {});
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, feed?.start, feed?.end, svc, spyneToken]);
+  // recent-created first for the table preview
+  const createdWork = useMemo(
+    () => [...createdItems].sort((a, b) => new Date(b.at || b.dueAt || 0).getTime() - new Date(a.at || a.dueAt || 0).getTime()),
+    [createdItems],
+  );
 
   // Recent conversations (calls + SMS) for the Overview preview list + drawer, scoped to dept + window.
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
@@ -181,7 +200,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   useEffect(() => {
     if (!sampleMode) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setFeed(SAMPLE_SERVICE_FEED); setAiStats(SAMPLE_AISTATS); setOpenItems(SAMPLE_WORKITEMS); setConversations(SAMPLE_CONVERSATIONS);
+    setFeed(SAMPLE_SERVICE_FEED); setAiStats(SAMPLE_AISTATS); setOpenItems(SAMPLE_WORKITEMS); setCreatedItems(SAMPLE_WORKITEMS); setConversations(SAMPLE_CONVERSATIONS);
   }, [sampleMode]);
 
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
@@ -560,7 +579,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   warmLeads={warmLeads}
                   namedAppts={namedAppts}
                   aiStats={aiStats}
-                  workItems={workItems}
+                  workItems={createdWork}
                   conversations={conversations}
                   agentNames={agentNames}
                   onOpenAgent={openAgent}

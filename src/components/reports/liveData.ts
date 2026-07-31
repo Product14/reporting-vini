@@ -543,7 +543,7 @@ export async function fetchActionItemStats(
 
 export async function fetchActionItems(
   teamId: string,
-  opts: { scope?: "open" | "overdue" | "recent"; service?: "sales" | "service" | "both"; limit?: number; spyneToken?: string } = {},
+  opts: { scope?: "open" | "overdue" | "recent" | "created"; service?: "sales" | "service" | "both"; limit?: number; start?: string; end?: string; spyneToken?: string } = {},
 ): Promise<ActionItem[]> {
   if (!teamId) return [];
   const query: Record<string, string> = {
@@ -552,6 +552,8 @@ export async function fetchActionItems(
     serviceType: opts.service ?? "both",
     limit: String(opts.limit ?? 100),
   };
+  // scope=created is windowed — pass the report's store-local window so it matches the stats/hero counts.
+  if (opts.start && opts.end) { query.start = opts.start; query.end = opts.end; }
   try {
     const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
     const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });

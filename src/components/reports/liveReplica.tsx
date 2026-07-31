@@ -399,7 +399,7 @@ export function LiveHotLeadsCard({ items, onViewAll }: { items: WarmLeadItem[]; 
   const hot = items.filter((w) => w.tier === "hot");
   const shown = hot.slice(0, 3);
   return (
-    <div className="flex flex-1 basis-0 flex-col items-start gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
+    <div className="flex min-h-[460px] flex-1 basis-0 flex-col items-start gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
       <div className="flex h-[60px] w-full items-center justify-between border-b border-[#e5e7eb] px-5 py-[15px]">
         <div className="flex items-center gap-2">
           <span>🔥</span>
@@ -460,7 +460,7 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
   const dayAppts = (byDay.get(activeKey) ?? []).sort((a, b) => (a.when ?? "").localeCompare(b.when ?? ""));
 
   return (
-    <div className="flex flex-1 basis-0 flex-col items-start justify-between gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
+    <div className="flex min-h-[460px] flex-1 basis-0 flex-col items-start justify-between gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
       <div className="flex w-full flex-col items-start gap-[30px]">
         <div className="flex w-full flex-col items-start gap-6 border-b border-[#e5e7eb] px-5 py-[15px]">
           <div className="flex w-full items-center justify-between">
@@ -550,10 +550,13 @@ function TableTabs({ tabs, active, onPick }: { tabs: { key: string; label: strin
 }
 export function LiveActionItemsTable({ items, stats, onViewAll }: { items: ActionItem[]; stats: ActionItemStats | null; onViewAll: () => void }) {
   const [tab, setTab] = React.useState("created");
+  // `items` are the CREATED items in the window (incl. completed). Open/Overdue/Due-Today filter to the
+  // still-open ones (via the `completed` flag) so their rows match the open-based counts; Created = all.
   const filtered = items.filter((a) => {
-    if (tab === "overdue") return overdueLabel(a.dueAt).danger;
-    if (tab === "today") return overdueLabel(a.dueAt).text === "Due today";
-    return true; // created / open
+    if (tab === "open") return !a.completed;
+    if (tab === "overdue") return !a.completed && overdueLabel(a.dueAt).danger;
+    if (tab === "today") return !a.completed && overdueLabel(a.dueAt).text === "Due today";
+    return true; // created
   });
   const rows = filtered.slice(0, 5);
   const tabs = [
