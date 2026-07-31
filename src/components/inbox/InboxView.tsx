@@ -19,6 +19,8 @@ import {
   fetchInboxCustomers,
   fetchInboxConversations,
   fetchInboxTimezone,
+  fetchInboxAgents,
+  type OnboardedAgent,
   fetchInboxPersona,
   fetchInboxFeedback,
   postInboxFeedback,
@@ -83,6 +85,28 @@ function parseDate(iso: string | null | undefined): Date | null {
  * top-level formatters don't each need the tz threaded through. Undefined ⇒ fall back to local tz. */
 let ACTIVE_TZ: string | undefined;
 export function setInboxTz(tz: string | null | undefined) { ACTIVE_TZ = tz || undefined; }
+
+/* The team's onboarded AI agent identity (name + photo), resolved once per team from the onboarded-agents
+ * API and published to the deep formatters/avatars — so the AI side shows e.g. "Emily Carter" + her photo
+ * instead of a generic "Vini" + icon. Module state (page shows one team at a time), like ACTIVE_TZ. */
+let AI_AGENT: { name: string | null; imageUrl: string | null; imageByName: Record<string, string> } = { name: null, imageUrl: null, imageByName: {} };
+export function setInboxAgents(agents: OnboardedAgent[], serviceType: "sales" | "service"): void {
+  const onboarded = agents.filter((a) => a.isOnboarded !== false);
+  const byName: Record<string, string> = {};
+  for (const a of onboarded) if (a.name && a.imageUrl) byName[a.name.trim()] = a.imageUrl;
+  // Primary = an agent for this department (prefer inbound), else any department agent, else first with a photo.
+  const dept = (a: OnboardedAgent) => (a.agentType || "").toLowerCase() === serviceType;
+  const primary =
+    onboarded.find((a) => dept(a) && (a.agentCallType || "").toLowerCase() === "inbound") ||
+    onboarded.find(dept) ||
+    onboarded.find((a) => a.imageUrl) ||
+    onboarded[0];
+  AI_AGENT = { name: primary?.name?.trim() || null, imageUrl: primary?.imageUrl || null, imageByName: byName };
+}
+// The avatar photo for a given AI name (exact onboarded agent match, else the primary agent's photo).
+function aiAgentImage(name?: string): string | null {
+  return (name && AI_AGENT.imageByName[name.trim()]) || AI_AGENT.imageUrl;
+}
 // YYYY-MM-DD calendar day of `d` in the active tz (en-CA renders as YYYY-MM-DD). Local tz on failure.
 function dayKeyTz(d: Date): string {
   try { return new Intl.DateTimeFormat("en-CA", { timeZone: ACTIVE_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d); }
@@ -238,6 +262,15 @@ function Inbox() {
     fetchInboxTimezone(auth).then((z) => { if (on) { setInboxTz(z); setTz(z); } });
     return () => { on = false; };
   }, [auth, teamId]);
+
+  // Resolve the team's onboarded AI agent(s) once per team → real name + photo for the AI side.
+  const [, setAgentsLoaded] = useState(0); // bump to re-render once names/photos are known
+  useEffect(() => {
+    if (!teamId) { setInboxAgents([], serviceType); return; }
+    let on = true;
+    fetchInboxAgents(auth).then((list) => { if (on) { setInboxAgents(list, serviceType); setAgentsLoaded((n) => n + 1); } });
+    return () => { on = false; };
+  }, [auth, teamId, serviceType]);
   const [selected, setSelected] = useState<InboxCustomer | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   // Customers opened this session — treated as read (INVAI-4968; no read-state write API exists).
@@ -673,11 +706,10 @@ function ThreadPane({ auth, customer }: { auth: InboxAuth; customer: InboxCustom
     return c;
   }, [conv]);
 
-  // The AI agent's display name (from any call's agentName; else the rooftop's AI, "Vini").
-  const aiAgentName = useMemo(
-    () => conv?.conversations.map((c) => c.callData?.agentName).find((n) => n && n.trim()) || "Vini",
-    [conv],
-  );
+  // The AI agent's display name: a call's own agentName if present, else the team's onboarded agent
+  // (e.g. "Emily Carter"), else "Vini". Plain const (not memoized) so it reflects the onboarded-agents
+  // data even when that resolves after the conversation loads. Photo comes from the same config (Avatar).
+  const aiAgentName = conv?.conversations.map((c) => c.callData?.agentName).find((n) => n && n.trim()) || AI_AGENT.name || "Vini";
   const custFirst = (customer.customer_name || "Customer").trim().split(/\s+/)[0];
 
   // §13 — one chronological, day-grouped stream: every SMS bubble + call + journey milestone interleaved.
@@ -1097,6 +1129,11 @@ function MessageBubble({ side, sender, text, at, fbNode, fb }: {
 // Message avatar — agent (flat headset glyph) vs customer (colored initials).
 function Avatar({ kind, name }: { kind: "agent" | "customer"; name: string }) {
   if (kind === "agent") {
+    const photo = aiAgentImage(name);
+    if (photo) {
+      // eslint-disable-next-line @next/next/no-img-element
+      return <img src={photo} alt={name} title={name} className="mt-0.5 size-8 shrink-0 rounded-full object-cover" />;
+    }
     return (
       <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full" style={{ background: C.primaryAccent, color: C.primary }} title={name}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M4 14v-2a8 8 0 0 1 16 0v2" /><rect x="2.5" y="13.5" width="4" height="6" rx="1.5" /><rect x="17.5" y="13.5" width="4" height="6" rx="1.5" /><path d="M20 19v1a3 3 0 0 1-3 3h-3" /></svg>
@@ -1223,7 +1260,7 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
                       <div key={i} className="flex gap-2.5 rounded-[8px] px-2 py-1" style={isAI ? undefined : { background: "#fff9e6" }}>
                         <span className="shrink-0 pt-0.5 text-[10px] tabular-nums" style={{ color: C.sub }}>{fmtSecs(t.secondsFromStart)}</span>
                         <p className="text-[12px] leading-[17px]" style={{ color: C.dark }}>
-                          <span className="font-semibold" style={{ color: isAI ? C.primary : "#0a6029" }}>{isAI ? cd.agentName || "Vini" : custFirst}:</span> {t.content}
+                          <span className="font-semibold" style={{ color: isAI ? C.primary : "#0a6029" }}>{isAI ? cd.agentName || AI_AGENT.name || "Vini" : custFirst}:</span> {t.content}
                         </p>
                       </div>
                     );

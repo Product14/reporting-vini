@@ -470,6 +470,30 @@ export async function fetchInboxCall(a: InboxAuth, callId: string): Promise<Call
   }
 }
 
+/* A team's onboarded AI agent — real display name + avatar photo (imageUrl), split by department
+ * (agentType) and direction (agentCallType). Used to label the AI side of a conversation. */
+export interface OnboardedAgent {
+  name?: string;
+  imageUrl?: string;
+  agentType?: string;     // "Sales" | "Service"
+  agentCallType?: string; // "inbound" | "outbound"
+  isOnboarded?: boolean;
+  [k: string]: unknown;
+}
+export async function fetchInboxAgents(a: InboxAuth): Promise<OnboardedAgent[]> {
+  if (!a.teamId) return [];
+  const p = new URLSearchParams({ team_id: a.teamId });
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/agents?${p}`, { cache: "no-store", headers: authHeaders(a) });
+    const j = (await r.json().catch(() => null)) as OnboardedAgent[] | { data?: OnboardedAgent[] } | null;
+    const arr = Array.isArray(j) ? j : Array.isArray((j as { data?: OnboardedAgent[] })?.data) ? (j as { data: OnboardedAgent[] }).data : [];
+    return arr;
+  } catch {
+    return [];
+  }
+}
+
 /* The rooftop's IANA timezone (e.g. "America/Los_Angeles") so the UI renders every timestamp in the
  * dealer's local day — same source the reports use. null when unresolved (UI falls back to local tz). */
 export async function fetchInboxTimezone(a: InboxAuth): Promise<string | null> {
