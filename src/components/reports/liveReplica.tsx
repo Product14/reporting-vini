@@ -428,7 +428,7 @@ export function LiveHotLeadsCard({ items, onViewAll }: { items: WarmLeadItem[]; 
           </React.Fragment>
         ))}
       </div>
-      <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
+      <div className="mt-auto flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
         <p className="text-[12px] text-[#626f81]">Top {shown.length} of {hot.length} hot leads</p>
         <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View all Hot Leads →</button>
       </div>
