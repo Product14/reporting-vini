@@ -3,7 +3,7 @@ import { buildResult } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
-import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames } from "@/lib/spyne/teamContext";
+import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
@@ -178,10 +178,11 @@ export async function GET(request: Request): Promise<Response> {
 
   // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
   // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).
-  const [timezone, onboardedSlots, onboardedNames] = await Promise.all([
+  const [timezone, onboardedSlots, onboardedNames, onboardedPhotos] = await Promise.all([
     getStoreTimeZone(teamId, spyneToken, spyneEnv),
     getOnboardedSlots(teamId, spyneToken, spyneEnv),
     getOnboardedNames(teamId, spyneToken, spyneEnv),
+    getOnboardedPhotos(teamId, spyneToken, spyneEnv),
   ]);
 
   // Relative buckets resolve to a window in the STORE's timezone (so a Pacific rooftop's "Today" is a
@@ -198,7 +199,7 @@ export async function GET(request: Request): Promise<Response> {
   const sb = getSupabase();
   if (!sb) {
     // No backend configured → return mock-shaped result so the UI still renders.
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames }), ...meta });
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }), ...meta });
   }
 
   // agent_daily is read ONCE across the combined [prior.start, end) range and split in-memory into the
@@ -231,7 +232,7 @@ export async function GET(request: Request): Promise<Response> {
     // from a genuinely quiet day and SUPPRESS the email instead of sending all-zeros. HTTP stays 200 so
     // existing healthy callers that rely on 200 don't break.
     console.error(`[/api/reports] Supabase read failed for team ${teamId}: ${err.message}`);
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames }), ...meta, degraded: true }, {
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }), ...meta, degraded: true }, {
       headers: { "X-Reports-Degraded": "supabase-read-error" },
     });
   }
@@ -273,6 +274,7 @@ export async function GET(request: Request): Promise<Response> {
     warmLeads,
     onboardedSlots,
     onboardedNames,
+    onboardedPhotos,
     leadCounts: lc.cur,
     priorLeadCounts: lc.prior,
     sourceCounts,

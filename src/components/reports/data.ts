@@ -73,6 +73,7 @@ export interface AgentData {
   dept: "Sales" | "Service";
   dir: "Inbound" | "Outbound";
   icon: string;
+  photoUrl?: string | null; // real agent avatar from the Spyne onboarded-agents API (imageUrl); null → mock
   blurb: string;
   health: RAG;
   headlineLabel: string; // "Calls handled" / "Calls dispatched"
