@@ -5,7 +5,7 @@
  * deliberately illustrative (it markets a not-yet-live agent); any hard numbers shown are framed as
  * "typical" or grounded in the rooftop's OWN live volume — never presented as this agent's live data. */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { type AgentData, fmtInt } from "./kit";
 import type { SpeedToLead } from "./data";
 import { track } from "@/lib/analytics";
@@ -221,18 +221,25 @@ export function StlUpsell({ accountName, teamId, stl }: { accountName: string; t
 }
 
 /* ── interest-capture form → POST /api/agent-interest ── */
-function InterestForm({
+/* Reused by the agent/STL upsells AND the Live "unlock more flows" modal, so the same server path
+ * (log + sendInterestEmail + optional Slack) captures every CTA. `agentId`/`agentName` label the lead;
+ * `ctaLabel`/`blurb` let a caller word the ask for its context (defaults suit the agent upsell). */
+export function InterestForm({
   agentId,
   agentName,
   accountName,
   teamId,
   onCancel,
+  ctaLabel = "Request this agent",
+  blurb,
 }: {
   agentId: string;
   agentName: string;
   accountName: string;
   teamId: string;
   onCancel: () => void;
+  ctaLabel?: string;
+  blurb?: ReactNode;
 }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -291,7 +298,7 @@ function InterestForm({
       <div>
         <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#813fed]">Tell us where to reach you</p>
         <p className="mt-1 text-[12.5px] text-[#6b7280]">
-          We’ll show you what <b className="text-[#111]">{agentName}</b> would do for <b className="text-[#111]">{accountName}</b> and get it set up.
+          {blurb ?? <>We’ll show you what <b className="text-[#111]">{agentName}</b> would do for <b className="text-[#111]">{accountName}</b> and get it set up.</>}
         </p>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -307,7 +314,7 @@ function InterestForm({
           disabled={!canSubmit}
           className="rounded-xl bg-[#813fed] px-5 py-2.5 text-[13px] font-bold text-white transition-colors hover:bg-[#6d28d9] disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {status === "sending" ? "Sending…" : "Request this agent"}
+          {status === "sending" ? "Sending…" : ctaLabel}
         </button>
         <button onClick={onCancel} className="text-[12.5px] font-semibold text-[#6b7280] hover:text-[#111]">
           Cancel
