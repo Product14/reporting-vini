@@ -3,7 +3,7 @@ import { buildResult } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
-import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames } from "@/lib/spyne/teamContext";
+import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
@@ -178,10 +178,11 @@ export async function GET(request: Request): Promise<Response> {
 
   // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
   // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).
-  const [timezone, onboardedSlots, onboardedNames] = await Promise.all([
+  const [timezone, onboardedSlots, onboardedNames, onboardedPhotos] = await Promise.all([
     getStoreTimeZone(teamId, spyneToken, spyneEnv),
     getOnboardedSlots(teamId, spyneToken, spyneEnv),
     getOnboardedNames(teamId, spyneToken, spyneEnv),
+    getOnboardedPhotos(teamId, spyneToken, spyneEnv),
   ]);
 
   // Relative buckets resolve to a window in the STORE's timezone (so a Pacific rooftop's "Today" is a
@@ -198,7 +199,7 @@ export async function GET(request: Request): Promise<Response> {
   const sb = getSupabase();
   if (!sb) {
     // No backend configured → return mock-shaped result so the UI still renders.
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames }), ...meta });
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }), ...meta });
   }
 
   // agent_daily is read ONCE across the combined [prior.start, end) range and split in-memory into the
@@ -209,15 +210,19 @@ export async function GET(request: Request): Promise<Response> {
       sb.from(AGENT_DAILY_BREAKDOWN).select("*").eq("team_id", teamId).gte("activity_day", start).lt("activity_day", end),
     ]);
 
-  // Retry once on a transient read error before degrading — a momentary connection blip usually
-  // clears on a fresh attempt.
+  // Retry a transient read error — a momentary connection blip usually clears on a fresh attempt. ALSO
+  // retry a clean-but-EMPTY read: an established rooftop returning ZERO rows across the whole ~60-day
+  // [prior.start, end) window is almost always a momentary empty result set, not "never live". Letting
+  // it through flips a LIVE rooftop to the "Coming soon" gate until the user manually reloads — the bug
+  // where dealers had to refresh many times before their report appeared. A genuinely brand-new rooftop
+  // just re-confirms empty here (a little extra latency on a page it doesn't populate anyway).
   let res = await readFacts();
-  let err = res[0].error || res[1].error;
-  if (err) {
-    await new Promise((r) => setTimeout(r, 150));
+  const blank = () => !(res[0].error || res[1].error) && ((res[0].data?.length ?? 0) === 0);
+  for (let attempt = 0; attempt < 3 && ((res[0].error || res[1].error) || blank()); attempt++) {
+    await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
     res = await readFacts();
-    err = res[0].error || res[1].error;
   }
+  const err = res[0].error || res[1].error;
   const [allDailyRes, bd] = res;
 
   if (err) {
@@ -227,7 +232,7 @@ export async function GET(request: Request): Promise<Response> {
     // from a genuinely quiet day and SUPPRESS the email instead of sending all-zeros. HTTP stays 200 so
     // existing healthy callers that rely on 200 don't break.
     console.error(`[/api/reports] Supabase read failed for team ${teamId}: ${err.message}`);
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames }), ...meta, degraded: true }, {
+    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }), ...meta, degraded: true }, {
       headers: { "X-Reports-Degraded": "supabase-read-error" },
     });
   }
@@ -269,6 +274,7 @@ export async function GET(request: Request): Promise<Response> {
     warmLeads,
     onboardedSlots,
     onboardedNames,
+    onboardedPhotos,
     leadCounts: lc.cur,
     priorLeadCounts: lc.prior,
     sourceCounts,

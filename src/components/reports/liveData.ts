@@ -16,6 +16,27 @@ export const ID_BY_AGENT_TYPE: Record<string, AgentData["id"]> = {
   "Service Outbound": "service_ob",
 };
 
+/* The funnel-entry stage (top of the "leads → conversations → qualified → appointments" funnel) as a
+ * label + value, canonical + channel-honest + monotonic. ONE source of truth so every surface (Overview
+ * agent cards, By-agent funnel) shows the SAME number/label for the same agent.
+ *   • Inbound  → "Leads reached" = unique leads contacted.
+ *   • Outbound → "Leads dialed" = unique leads DIALED, but ONLY when dialing is the actual outreach
+ *     mechanism (dialed > 0) AND it keeps the funnel monotonic (dialed ≥ connected). SMS-only outbound
+ *     has dialed = 0 (e.g. Service Outbound texts, never calls) — showing "0 dialed" is wrong AND breaks
+ *     the funnel (0 → N conversations), so fall back to "Leads contacted" = contacted. */
+export function leadEntryStage(
+  dir: string,
+  lf: { contacted: number; dialed: number; connected: number } | undefined,
+  fallbackContacted: number,
+): { label: string; value: number } {
+  const contacted = lf?.contacted ?? fallbackContacted;
+  if (dir === "Inbound") return { label: "Leads reached", value: contacted };
+  const dialed = lf?.dialed ?? 0;
+  const connected = lf?.connected ?? 0;
+  if (dialed > 0 && dialed >= connected) return { label: "Leads dialed", value: dialed };
+  return { label: "Leads contacted", value: contacted };
+}
+
 /* Does this agent have ANY real activity in the window? Activity is ground truth for whether an agent
  * should appear — not just calls (an inbound agent can have a busy SMS/lead day with zero calls), so we
  * look across calls, conversations, qualified, appointments, SMS and unique leads touched. */
@@ -202,6 +223,9 @@ export interface FleetLive {
   // The honest rooftop "Response time" figure; null when no measurable new-lead touches. SMS reply
   // latency is shown on the Recent-calls detail page, not folded into this headline.
   responseTimeSec: number | null;
+  // Speed-to-Lead runs on this rooftop (Sales Inbound is live). Window-independent — gates the STL
+  // "not switched on" upsell so an empty window (e.g. "Today") shows "—" instead of a false upsell.
+  stlEnabled: boolean;
   // % of real conversations the AI handled end-to-end (no transfer) — the workload-offload headline.
   // null when there are no conversations.
   handledEndToEndPct: number | null;
@@ -277,6 +301,10 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const leads = hasLeadFunnel ? lf((f) => f.contacted) : sum((a) => a.report?.leadsAttempted ?? 0);
   // Response time = the Sales-Inbound speed-to-lead avg (only slot with a new-lead first-response funnel).
   const responseTimeSec = agents.find((a) => a.id === "sales_ib")?.report.speedToLead?.avgSec ?? null;
+  // Speed-to-Lead is a Sales-Inbound capability: it's ENABLED whenever the rooftop runs Sales Inbound.
+  // This is window-INDEPENDENT — so a short window (e.g. "Today") with no new-lead sample shows "—",
+  // NOT the "not switched on" upsell. The upsell only shows for rooftops that don't run Sales Inbound.
+  const stlEnabled = agents.some((a) => a.id === "sales_ib");
 
   // Per-direction split for the hero tri-rows.
   const splitFor = (dir: "Inbound" | "Outbound"): FleetSplit => {
@@ -335,6 +363,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     queryConversations,
     queryResolutionRate,
     responseTimeSec,
+    stlEnabled,
     handledEndToEndPct: conversations > 0 ? Math.max(0, Math.round(((conversations - transfers) / conversations) * 100)) : null,
     afterHours,
     talkMinutes,
@@ -535,7 +564,7 @@ export async function fetchActionItemStats(
 
 export async function fetchActionItems(
   teamId: string,
-  opts: { scope?: "open" | "overdue" | "recent"; service?: "sales" | "service" | "both"; limit?: number; spyneToken?: string } = {},
+  opts: { scope?: "open" | "overdue" | "recent" | "created"; service?: "sales" | "service" | "both"; limit?: number; start?: string; end?: string; spyneToken?: string } = {},
 ): Promise<ActionItem[]> {
   if (!teamId) return [];
   const query: Record<string, string> = {
@@ -544,6 +573,8 @@ export async function fetchActionItems(
     serviceType: opts.service ?? "both",
     limit: String(opts.limit ?? 100),
   };
+  // scope=created is windowed — pass the report's store-local window so it matches the stats/hero counts.
+  if (opts.start && opts.end) { query.start = opts.start; query.end = opts.end; }
   try {
     const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
     const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });

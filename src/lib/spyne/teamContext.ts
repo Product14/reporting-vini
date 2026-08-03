@@ -53,6 +53,22 @@ interface OnboardedAgent {
   agentType?: string; // "Sales" | "Service"
   agentCallType?: string; // "inbound" | "outbound"
   isOnboarded?: boolean;
+  imageUrl?: string; // avatar URL (Spyne S3), e.g. …/converseai/agents/internal/emily.png
+  [k: string]: unknown; // tolerate other fields + let the fallback scan reach them
+}
+
+// The agent's avatar URL. Primary field is `imageUrl` (confirmed from the onboarded-agents payload);
+// fall back to a couple of likely aliases, then to the first value that looks like an image/Spyne-S3
+// URL, so a field rename on the API side never silently drops the photo.
+function imageUrlOf(a: OnboardedAgent): string | null {
+  for (const k of ["imageUrl", "image", "agentImage", "avatarUrl", "avatar", "photoUrl", "profileImage"]) {
+    const v = a[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  for (const v of Object.values(a)) {
+    if (typeof v === "string" && /^https?:\/\//i.test(v) && /(\.(png|jpe?g|webp|gif)(\?|$)|spyne-static|amazonaws|agents\/internal)/i.test(v)) return v.trim();
+  }
+  return null;
 }
 
 // (agentType, agentCallType) → this report's slot id. Anything unrecognised maps to null and is ignored.
@@ -111,4 +127,21 @@ export async function getOnboardedNames(teamId: string, token?: string | null, e
   const names: Partial<Record<SlotId, string>> = {};
   for (const [s, arr] of perSlot) names[s] = arr.join(" & ");
   return names;
+}
+
+/* The dealer's REAL agent avatar per slot (imageUrl from the onboarded-agents config) — so the report
+ * shows the actual agent photo instead of the mock Emily/Jenny art. First onboarded agent with an image
+ * wins per slot. Null / missing slot → caller keeps the mock avatar. */
+export async function getOnboardedPhotos(teamId: string, token?: string | null, env?: string | null): Promise<Partial<Record<SlotId, string>> | null> {
+  const list = await getOnboardedAgents(teamId, token, env);
+  if (!list) return null;
+  const photos: Partial<Record<SlotId, string>> = {};
+  for (const a of list) {
+    if (a.isOnboarded === false) continue;
+    const s = slotOf(a);
+    if (!s || photos[s]) continue; // first image per slot wins
+    const url = imageUrlOf(a);
+    if (url) photos[s] = url;
+  }
+  return photos;
 }

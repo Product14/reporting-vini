@@ -73,6 +73,7 @@ export interface AgentData {
   dept: "Sales" | "Service";
   dir: "Inbound" | "Outbound";
   icon: string;
+  photoUrl?: string | null; // real agent avatar from the Spyne onboarded-agents API (imageUrl); null → mock
   blurb: string;
   health: RAG;
   headlineLabel: string; // "Calls handled" / "Calls dispatched"
@@ -91,7 +92,7 @@ export interface AgentData {
   // Unique-lead funnel stages (distinct leads over the window) — drives the Outreach→conversation→
   // qualified→appointment funnel on both the Overview (fleet sum) and per-agent pages. Set live by
   // build.ts; absent on mock agents (those funnels fall back to event-count metrics).
-  leadFunnel?: { contacted: number; connected: number; qualified: number; appt: number };
+  leadFunnel?: { contacted: number; dialed: number; connected: number; qualified: number; appt: number };
 }
 
 /* ────────────── Agent-wise report blocks (from the IB / OB mockups) ────────────── */

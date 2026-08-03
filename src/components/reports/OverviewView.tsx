@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   BUCKET_LABELS,
@@ -14,9 +14,9 @@ import {
   StepList,
 } from "@/components/reports/kit";
 import { TrainingOverview, type Direction, type DirectionStatus } from "@/components/reports/training";
-import { LiveOverview } from "@/components/reports/liveReplica";
-import { FirstTimeTour } from "@/components/reports/firstRun";
-import { StageStepper, OnboardingStub, type Stage } from "@/components/reports/stageFlow";
+import { LiveOverview, LIVE_SECTIONS } from "@/components/reports/liveReplica";
+import { OnboardingStub, type Stage } from "@/components/reports/stageFlow";
+import { SAMPLE_SERVICE_FEED, SAMPLE_AISTATS, SAMPLE_WORKITEMS, SAMPLE_CONVERSATIONS } from "@/components/reports/sampleData";
 import {
   ActionItemList,
   ActionItemsScoreboard,
@@ -35,14 +35,17 @@ import {
   WarmLeadsModal,
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
+import { useDateRange, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { track } from "@/lib/analytics";
 
 // Customizable section ids for the Overview (stable module constant → identity-stable across renders).
 const OVERVIEW_SECTION_IDS = ["value", "agents", "work", "conversations"];
+// Customize manifest for the NEW Live overview — ids/labels come straight from LiveOverview so they can
+// never drift from what actually renders.
+const LIVE_SECTION_IDS = LIVE_SECTIONS.map((s) => s.id);
 
 // "internal" (/reports/ root) → the By-agent drill-down lives in the SAME iframe, keep navigating there
 // via router.push. "parent" (/overview/, standalone) → By-agent is a DIFFERENT parent-console iframe now,
@@ -63,8 +66,12 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const router = useRouter();
   // Selected window comes from the URL so it persists across navigation to the By-agent tab (and back).
   const { bucket, custom, setPreset, setCustom } = useDateRange();
-  const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
+  const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId, serviceType } = useScenario();
 
+  // ?sample=1 → fully self-contained SAMPLE mode: every fetch is skipped and the built-in service demo
+  // data is fed in (no backend, no auth, no env). Declared up here so the fetch effects can short-circuit.
+  const previewParams = useSearchParams();
+  const sampleMode = previewParams.get("sample") != null;
 
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for the query.
   // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents;
@@ -83,7 +90,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // per opened report with the real team_id. team_id "" → "(unscoped)" in track().
   useEffect(() => { track("report_viewed", { tab: "overview", team_id: teamId }); }, [teamId]);
   useEffect(() => {
-    if (!teamId) return; // no rooftop selected → leave feed as-is (UI shows the no-rooftop state)
+    if (sampleMode || !teamId) return; // sample mode / no rooftop → leave feed as-is
     let on = true;
     // show cached data immediately (stale-while-revalidate); only blank to the skeleton when cold
     const cached = peekAgents({ teamId, ...rangeOpts });
@@ -120,7 +127,11 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
   // Department switcher (All / Sales / Service) — scopes the WHOLE report: agents (fleet + IB/OB split),
   // named appointments, warm leads, action items and recent conversations. "all" → both departments.
-  const { dept, locked } = useDept(); // top-level scope (shared header, URL-persisted)
+  // Department is a HARD scope from the iframe URL (serviceType / service_type / department), exactly like
+  // the appointments + action-items consoles: no in-app "all"/switcher, defaults to sales when absent.
+  // The caller passes the scope on the URL and the view (and its sales/service skin) follows.
+  const dept = serviceType as Dept; // "sales" | "service" (never "all")
+  const locked = true;
   const svc = dept === "all" ? "both" : dept;
 
   // Action-item scoreboard (created/closed for the window + open/overdue/due-today now + who-closed-most).
@@ -130,6 +141,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   useEffect(() => {
     // Wait for the server-resolved window (feed.start/end) before fetching, so the tile never flashes a
     // count for the wrong (server-default) window on cold load.
+    if (sampleMode) return;
     if (!teamId || !feed?.start || !feed?.end) { setAiStats(null); return; }
     let on = true;
     fetchActionItemStats(teamId, { start: feed.start, end: feed.end, service: svc, spyneToken, spyneEnv }).then((r) => { if (on) setAiStats(r); });
@@ -140,7 +152,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // scoreboard counts above; a small named list the team can action directly.
   const [openItems, setOpenItems] = useState<ActionItem[]>([]);
   useEffect(() => {
-    if (!teamId) { setOpenItems([]); return; }
+    if (sampleMode || !teamId) { if (!sampleMode) setOpenItems([]); return; }
     let on = true;
     fetchActionItems(teamId, { scope: "open", service: svc, limit: 40, spyneToken }).then((r) => { if (on) setOpenItems(r); });
     return () => { on = false; };
@@ -150,10 +162,30 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     () => openItems.filter((i) => i.dueAt).sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime()),
     [openItems],
   );
+  // CREATED items in the window (incl. completed) — backs the new Overview action-items table so its
+  // "Created (N)" tab actually shows rows (the open-only list above is empty when a rooftop has drained
+  // its open items to zero, which made "Created" read a count with no rows). Its Open/Overdue/Due-Today
+  // tabs filter this list client-side via the `completed` flag.
+  const [createdItems, setCreatedItems] = useState<ActionItem[]>([]);
+  useEffect(() => {
+    if (sampleMode || !teamId || !feed?.start || !feed?.end) return;
+    let on = true;
+    fetchActionItems(teamId, { scope: "created", start: feed.start, end: feed.end, service: svc, limit: 50, spyneToken })
+      .then((r) => { if (on) setCreatedItems(r); })
+      .catch(() => {});
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, feed?.start, feed?.end, svc, spyneToken]);
+  // recent-created first for the table preview
+  const createdWork = useMemo(
+    () => [...createdItems].sort((a, b) => new Date(b.at || b.dueAt || 0).getTime() - new Date(a.at || a.dueAt || 0).getTime()),
+    [createdItems],
+  );
 
   // Recent conversations (calls + SMS) for the Overview preview list + drawer, scoped to dept + window.
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   useEffect(() => {
+    if (sampleMode) return;
     if (!teamId) { setConversations([]); return; }
     let on = true;
     setConversations(null);
@@ -163,12 +195,20 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     return () => { on = false; };
   }, [teamId, svc, feed?.start, feed?.end, spyneToken, spyneEnv]);
 
+  // SAMPLE mode: feed the built-in service demo data and skip every network fetch above (all guarded on
+  // sampleMode). Placed after every useState so the setters are in scope.
+  useEffect(() => {
+    if (!sampleMode) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFeed(SAMPLE_SERVICE_FEED); setAiStats(SAMPLE_AISTATS); setOpenItems(SAMPLE_WORKITEMS); setCreatedItems(SAMPLE_WORKITEMS); setConversations(SAMPLE_CONVERSATIONS);
+  }, [sampleMode]);
+
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
   const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
 
-  const hasTeam = teamId !== "";
+  const hasTeam = teamId !== "" || sampleMode;
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
   // chosen date range survives navigation to the By-agent view.
   const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked);
@@ -185,22 +225,71 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // A degraded fetch (transient outage / cold-start timeout) is NOT "never live" — keep the UI in the
   // syncing state and let the re-arm effect below retry, rather than flip to the "coming soon" gate.
   const degraded = feed?.degraded === true;
-  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData);
+  // "Ever live" sticky: once a rooftop has returned real data in THIS browser, it can never legitimately
+  // become "never live" again. A later clean-but-empty read is therefore a transient blip, not a genuine
+  // coming-soon — so we suppress the gate and self-heal (below) instead of making the dealer reload.
+  const feedIsLive = feed !== null && (feed.everLive === true || feed.hasData === true || feed.agents.length > 0);
+  const [wasLive, setWasLive] = useState(false);
+  useEffect(() => {
+    let seen = false;
+    if (teamId) { try { seen = localStorage.getItem(`vini_live_${teamId}`) === "1"; } catch { /* storage blocked */ } }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWasLive(seen);
+  }, [teamId]);
+  useEffect(() => {
+    if (!teamId || !feedIsLive) return;
+    try { localStorage.setItem(`vini_live_${teamId}`, "1"); } catch { /* storage blocked */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWasLive(true);
+  }, [teamId, feedIsLive]);
+  // A clean-but-empty read for a rooftop we KNOW was live → treat it like a transient blip, not the gate.
+  const staleEmpty = hasTeam && wasLive && feed !== null && !degraded && !feedIsLive;
+  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData) && !staleEmpty;
+  // Self-heal a stale-empty read: quietly re-fetch (bounded, ~5 tries) until real data lands, so the
+  // report fills in on its own instead of stranding a known-live rooftop on the syncing state. Depends on
+  // `feed` so each re-fetch re-arms; the counter caps it so it can never poll forever.
+  const staleHealsRef = useRef(0);
+  useEffect(() => {
+    if (!staleEmpty) { staleHealsRef.current = 0; return; }
+    if (staleHealsRef.current >= 5) return;
+    let on = true;
+    const t = setTimeout(() => {
+      staleHealsRef.current += 1;
+      fetchAgents({ teamId, ...rangeOpts, force: true }).then((res) => { if (on) setFeed(res); }).catch(() => {});
+    }, 1500);
+    return () => { on = false; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, bucket, custom, staleEmpty, feed]);
   // Preview-only override for reviewing the "just went live" training design AND the exact-replica Live
   // design side by side, without waiting for a real comingSoon rooftop — e.g. ?state=training or
   // ?state=live, plus (training only) forcing one direction's status via ?ib=/?ob= (not_sold |
   // start_onboarding | continue_onboarding | training) since there's no real per-direction onboarding-
   // status field yet. Never engages unless explicitly passed on the URL OR the rooftop really has no
   // data yet (the real comingSoon gate, which still defaults to the training treatment).
-  const previewParams = useSearchParams();
   const previewState = previewParams.get("state");
   const previewActive = previewState === "onboarding" || previewState === "training" || previewState === "live";
-  const showPreview = comingSoon || previewActive;
+  const showReport = scenario !== "first_time" && scenario !== "onboarding";
+  // A genuinely-live rooftop: has a team, its data has loaded, it's past onboarding. This is the real
+  // production audience — they now get the new stepper/Live experience by default. ?classic=1 is the
+  // safe rollback: it forces the legacy overview for this session without a redeploy.
+  const classic = previewParams.get("classic") != null;
+  const liveTeam = showReport && hasTeam && feed !== null && !degraded && !comingSoon && !staleEmpty;
+  // The new experience (Onboarding → Training → Live) drives previews (comingSoon / ?state= / ?sample=)
+  // AND real live rooftops. ?classic=1 opts a real live team back to the old MetricTile overview — it
+  // never disables an explicit preview/sample, only the live-team auto-enable.
+  const showPreview = comingSoon || previewActive || sampleMode || (liveTeam && !classic);
   // The dealer journey as one flow: Onboarding → Training → Live. ?state= picks the entry stage; the
   // stepper + in-view CTAs move between them (manualStage wins once the user navigates). comingSoon
-  // (a genuine just-went-live rooftop with no data) enters at Training.
+  // (a genuine just-went-live rooftop with no data) enters at Training; ?sample= defaults to Live.
   const [manualStage, setManualStage] = useState<Stage | null>(null);
-  const stage: Stage = manualStage ?? (previewState === "onboarding" ? "onboarding" : previewState === "live" ? "live" : "training");
+  // Entry stage: Live is the only surfaced experience — every real rooftop (live or just-went-live)
+  // lands on Live. Onboarding/Training remain reachable ONLY via an explicit ?state= for internal
+  // design review; there's no in-UI navigation to them anymore.
+  const stage: Stage = manualStage ?? (
+    previewState === "onboarding" ? "onboarding"
+    : previewState === "training" ? "training"
+    : "live"
+  );
   // Onboarding & Training aren't reports — strip the report chrome (tabs, Sales/Service scope, date
   // filter, and the "what your AI delivered" subtitle). Only Live is a report.
   const setupChrome = showPreview && stage !== "live";
@@ -215,28 +304,9 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const trainingEarly = previewParams.get("day") === "3"
     ? { coveragePct: fleet.answerRateInbound, responseSec: fleet.responseTimeSec, followups: aiStats?.stats.created ?? null }
     : null;
-  const showReport = scenario !== "first_time" && scenario !== "onboarding";
-  const liveReady = showReport && hasTeam && feed !== null && !degraded && !comingSoon && !showPreview;
+  // Legacy overview path: a real live rooftop that has explicitly opted out via ?classic=1.
+  const liveReady = liveTeam && classic;
 
-  // First-time welcome tour — a once-per-rooftop greeting for a genuine just-went-live dealer (the real
-  // comingSoon gate). It's a full-screen modal, so it must NOT auto-open while someone is REVIEWING via
-  // ?state= (its backdrop would swallow every click). During review it's reachable via "Take a tour" or
-  // ?tour=1. Auto-opens once per team (localStorage); records dismissal so it never nags twice. SSR-safe.
-  const [tourOpen, setTourOpen] = useState(false);
-  useEffect(() => {
-    if (!hasTeam) return;
-    const forced = previewParams.get("tour") === "1";
-    const autoFirstTime = comingSoon && !previewActive; // real first-timer only, never during ?state= review
-    if (!forced && !autoFirstTime) return;
-    let seen = false;
-    try { seen = localStorage.getItem(`vini_tour_seen_${teamId}`) === "1"; } catch { /* storage blocked */ }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (forced || !seen) setTourOpen(true);
-  }, [comingSoon, previewActive, hasTeam, teamId, previewParams]);
-  const closeTour = () => {
-    setTourOpen(false);
-    try { localStorage.setItem(`vini_tour_seen_${teamId}`, "1"); } catch { /* storage blocked */ }
-  };
   // Live rooftop, but the selected window has no activity yet → gentle inline note above the report.
   const emptyWindow = liveReady && feed !== null && !feed.hasData;
 
@@ -252,22 +322,29 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     [allAgents],
   );
 
-  // Agent drill-down — internal (/reports/ root: By-agent lives in the same iframe) navigates the app's
-  // own route; parent (/overview/, standalone) breaks out to the parent console's Reports page instead,
-  // since that view is now a different iframe entirely.
+  // Agent drill-down — clicking an agent card takes the user to the parent console's Reporting tab
+  // (top-level nav), NEVER renders the By-agent view inside the Overview. Whenever this app runs inside
+  // the console iframe (embedded), OR the route is wired as the parent Overview, break OUT to the parent
+  // Reports page. Only a truly standalone app (direct/localhost, no parent frame) navigates the in-app
+  // route so the By-agent view stays reachable in dev.
   const openAgent = (agentId: string) => {
     track("agent_opened", { team_id: teamId, agent: agentId });
     const internalPath = `/reports/agents${navQuery}${navQuery ? "&" : "?"}agent=${agentId}`;
-    if (agentLinkMode === "internal") {
-      router.push(internalPath);
-    } else {
+    const embedded = typeof window !== "undefined" && window.top !== window.self;
+    if (embedded || agentLinkMode === "parent") {
       goCrossPage("reports", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined, agent: agentId }, internalPath);
+    } else {
+      router.push(internalPath);
     }
   };
 
   // Customizable layout — the customer can hide/reorder these sections (persisted per rooftop). The
   // manifest drives the Customize modal: sections (reorderable + hideable) + the individual tiles/cards.
+  // `ctrl` drives the legacy (?classic=1) layout; `liveCtrl` drives the new Live overview. Separate
+  // localStorage keys so the two layouts never clobber each other.
   const ctrl = useCustomize("overview", { teamId, enterpriseId, spyneToken }, OVERVIEW_SECTION_IDS);
+  const liveCtrl = useCustomize("overview-live", { teamId, enterpriseId, spyneToken }, LIVE_SECTION_IDS);
+  const liveGroups: CustomizeGroup[] = LIVE_SECTIONS.map((s) => ({ id: s.id, label: s.label }));
   const customizeGroups: CustomizeGroup[] = [
     { id: "value", label: "The value delivered", items: [
       { id: "tile.leads", label: "Leads touched" },
@@ -335,7 +412,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             {ranked.map((a) => {
               const lf = a.leadFunnel;
-              const inboundDir = a.dir === "Inbound";
               const qualifiedLeads = lf?.qualified ?? a.metrics.qualified;
               return (
                 <AgentFunnelCard
@@ -346,7 +422,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   closeRateLabel={fmtRate(a.metrics.appointments, qualifiedLeads)}
                   closeRateSub={`${fmtInt(a.metrics.appointments)} of ${fmtInt(qualifiedLeads)} qualified`}
                   stages={[
-                    { label: inboundDir ? "Leads reached" : "Leads dialed", value: lf?.contacted ?? a.report.leadsAttempted },
+                    leadEntryStage(a.dir, lf, a.report.leadsAttempted),
                     { label: "Real conversations", value: lf?.connected ?? a.metrics.conversations },
                     { label: "Qualified leads", value: qualifiedLeads },
                     { label: "Appointments — AI-booked", value: a.metrics.appointments },
@@ -427,7 +503,8 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // dropped entirely; on the production report they stay in the top bar.
   const liveControls = hasTeam ? (
     <div className="no-print flex items-center gap-3">
-      {(liveReady || (showPreview && stage === "live")) && <CustomizeToggle ctrl={ctrl} />}
+      {liveReady && <CustomizeToggle ctrl={ctrl} />}
+      {showPreview && stage === "live" && <CustomizeToggle ctrl={liveCtrl} />}
       <DateFilter
         bucket={bucket}
         custom={custom}
@@ -448,9 +525,10 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
       </button>
     </div>
   ) : null;
-  // The whole preview flow (Onboarding/Training/Live) owns its own header — the stage stepper plus each
-  // stage's hero. The report top bar would only clash/duplicate, so drop it across all three stages.
-  const hideTopBar = showPreview;
+  // Live is a real report and shows the standard "Overview" top bar (title + date filter + Sales/Service
+  // scope). Only the internal-review Onboarding/Training preview stages own their own header, so the top
+  // bar is dropped just for those.
+  const hideTopBar = showPreview && stage !== "live";
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -468,8 +546,8 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           teamId={teamId}
           query={navQuery}
           hideTabs={showPreview}
-          hideDept={showPreview}
-          hideTitle={showPreview && stage === "live"}
+          hideDept
+          hideTitle={false}
           right={
             setupChrome ? null : hasTeam ? (
               liveControls
@@ -485,21 +563,9 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           {scenario === "onboarding" && <OnboardingOverview view={view} />}
 
           {showReport && !hasTeam && <NoRooftop />}
-          {showReport && hasTeam && (feed === null || degraded) && <OverviewSkeleton />}
+          {showReport && hasTeam && (feed === null || degraded || staleEmpty) && <OverviewSkeleton />}
           {showReport && hasTeam && feed !== null && !degraded && showPreview && (
             <div className="flex flex-col gap-4">
-              <FirstTimeTour open={tourOpen} accountName={account.name} onClose={closeTour} />
-              <div className="flex items-center justify-between gap-3">
-                <StageStepper stage={stage} onJump={(s) => { setManualStage(s); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
-                {stage !== "onboarding" && (
-                  <button
-                    onClick={() => setTourOpen(true)}
-                    className="no-print inline-flex items-center gap-1.5 rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed]"
-                  >
-                    <span aria-hidden>✨</span> Take a tour
-                  </button>
-                )}
-              </div>
               {stage === "onboarding" ? (
                 <OnboardingStub onGoLive={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
               ) : stage === "training" ? (
@@ -509,19 +575,20 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   account={account}
                   fleet={fleet}
                   agents={ranked}
+                  serviceMode={dept === "service"}
                   warmLeads={warmLeads}
                   namedAppts={namedAppts}
                   aiStats={aiStats}
-                  workItems={workItems}
+                  workItems={createdWork}
                   conversations={conversations}
                   agentNames={agentNames}
                   onOpenAgent={openAgent}
-                  onOpenApptModal={openApptModal}
+                  onViewAppointments={() => goCrossPage("appointments", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/appointments${navQuery}`)}
                   onOpenWarmModal={() => setWarmModalOpen(true)}
                   onViewActionItems={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)}
                   onViewConversations={() => goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`)}
                   onBackToTraining={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-                  headerControls={liveControls}
+                  ctrl={liveCtrl}
                 />
               )}
             </div>
@@ -572,8 +639,10 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
         agentNames={agentNames}
         loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken, spyneEnv })}
       />
-      {/* Customize layout — hide/reorder sections + hide individual cards/tiles (opened from the header). */}
+      {/* Customize layout — hide/reorder sections (opened from the header). Two modals: `ctrl` for the
+          legacy layout, `liveCtrl` for the new Live overview. Each renders only when ITS editing is on. */}
       <CustomizeModal ctrl={ctrl} groups={customizeGroups} accountLabel={account.name} />
+      <CustomizeModal ctrl={liveCtrl} groups={liveGroups} accountLabel={account.name} />
     </div>
   );
 }

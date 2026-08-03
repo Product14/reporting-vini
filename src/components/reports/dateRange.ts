@@ -60,11 +60,23 @@ export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: 
  * (enterprise_id / team_id — see scenario.tsx), so it may send this one snake_case as well. Reading
  * only camelCase silently dropped the lock → the report showed the blended "All" view (both sales AND
  * service) instead of the scoped department. Case-insensitive for the same reason. */
+// The console scopes some spaces only on the PARENT url and doesn't forward serviceType into the iframe
+// src. Read it from document.referrer (the parent console url) as a fallback — same as the sibling
+// consoles — so a host-scoped space isn't lost. Client-only + guarded; "" when unavailable/stripped.
+function referrerServiceType(): string {
+  if (typeof document === "undefined" || !document.referrer) return "";
+  try {
+    const rp = new URL(document.referrer).searchParams;
+    const v = (rp.get("serviceType") || rp.get("service_type") || rp.get("department") || "").trim().toLowerCase();
+    return v === "sales" || v === "service" ? v : "";
+  } catch { return ""; }
+}
+
 export function useDept(): { dept: Dept; setDept: (d: Dept) => void; locked: boolean } {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const svcRaw = (params.get("serviceType") ?? params.get("service_type") ?? "").trim().toLowerCase();
+  const svcRaw = (params.get("serviceType") || params.get("service_type") || referrerServiceType() || "").trim().toLowerCase();
   const locked = svcRaw === "sales" || svcRaw === "service";
   const p = params.get("dept");
   const dept: Dept = locked ? (svcRaw as Dept) : p === "sales" || p === "service" ? p : "all";

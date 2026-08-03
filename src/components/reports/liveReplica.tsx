@@ -23,9 +23,11 @@ import type { AgentData, WarmLeadItem, NamedAppt } from "./data";
 import { fmtInt } from "./data";
 import type { ActionItem, ActionItemStats, Conversation } from "./liveData";
 import type { FleetLive } from "./liveData";
-import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, closerLabel, agentDisplayName, ConversationDrawer } from "./kitV3";
+import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, agentDisplayName, ConversationDrawer, Modal } from "./kitV3";
 import { UnlockPotentialBanner } from "./valueStory";
+import { InterestForm } from "./upsell";
 import { CountUp, useInView } from "./anim";
+import type { CustomizeCtrl } from "./customize";
 
 /* ── palette (exact Figma tokens for this design — intentionally not the site's #813fed accent) ── */
 const C = {
@@ -81,40 +83,79 @@ function greeting(): string {
 }
 
 /* ══════════════════════════ 1. Hero — greeting + value-prop strip ══════════════════════════ */
-function HeroTile({ icon, value, label, sub, missing, onUpsell }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; onUpsell?: () => void }) {
+// Where each hero metric tile navigates on click — to the matching parent console tab (or a drill modal).
+interface HeroNav { onAppointments?: () => void; onActionItems?: () => void; onConversations?: () => void; onHotLeads?: () => void }
+function HeroTile({ icon, value, label, sub, missing, onClick }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; onClick?: () => void }) {
   // A metric with no data isn't a dead "—" — it's a feature that isn't switched on. Turn it into an
   // upsell that hands the dealer to Training to enable it.
   if (missing) {
+    // A metric with no data = a feature not switched on. Since Training is no longer an in-app
+    // destination, this is an informational nudge (points at the Spyne team), not a navigating button.
     return (
-      <button onClick={onUpsell} className="group flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-dashed border-[#d8caff] bg-[#faf8ff] p-[15px] text-left transition-colors hover:bg-[#f3eaff]">
+      <div className="flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-dashed border-[#d8caff] bg-[#faf8ff] p-[15px] text-left">
         <Image src={icon} alt="" width={28} height={28} className="opacity-40" />
         <div className="flex flex-col items-start gap-1">
           <p className="text-[12px] font-semibold text-[#030712]">{label}</p>
           <p className="text-[11.5px] text-[#9aa1ac]">Not switched on yet</p>
-          <span className="mt-0.5 inline-flex items-center gap-1 text-[11.5px] font-bold text-[#4600f2]">Turn on in Training <span className="transition-transform group-hover:translate-x-0.5">→</span></span>
+          <span className="mt-0.5 inline-flex items-center gap-1 text-[11.5px] font-bold text-[#4600f2]">Ask your Spyne team to enable</span>
         </div>
-      </button>
+      </div>
     );
   }
-  return (
-    <div className="flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-[#e5e7eb] bg-white p-[15px]">
-      <Image src={icon} alt="" width={28} height={28} />
+  const inner = (
+    <>
+      {icon.startsWith("/") ? <Image src={icon} alt="" width={28} height={28} /> : <span className="text-[24px] leading-none">{icon}</span>}
       <div className="flex flex-col items-start gap-1">
         <p className="text-[16px] font-bold leading-[20px] text-[#030712]">{value}</p>
-        <p className="text-[12px] font-semibold text-[#030712]">{label}</p>
+        <p className="flex items-center gap-1 text-[12px] font-semibold text-[#030712]">{label}{onClick && <span className="text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
         <p className="text-[12px] text-[#626f81]">{sub}</p>
       </div>
+    </>
+  );
+  const base = "flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-[#e5e7eb] bg-white p-[15px]";
+  return onClick
+    ? <button onClick={onClick} className={`group ${base} text-left transition-colors hover:border-[#d8caff] hover:bg-[#faf8ff]`}>{inner}</button>
+    : <div className={base}>{inner}</div>;
+}
+
+// Service hero: 4 metric tiles in ONE divided container, each an icon-chip + "N Noun" headline + sub
+// (matches the Figma service overview — not the sales tile grid).
+function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; hotLeads: number; nav?: HeroNav }) {
+  const tiles = [
+    { icon: "/live-overview/icon-afterhours.svg", chipBg: "#ede9fe", headline: <><CountUp value={fleet.afterHours} /> Leads</>, sub: "Captured after-hours", onClick: nav?.onConversations },
+    { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <>{actionStats ? <CountUp value={actionStats.created} /> : "—"} Action Items</>, sub: actionStats ? `${fmtInt(actionStats.open)} items are still open` : "syncing…", onClick: nav?.onActionItems },
+    { icon: "🔥", chipBg: "#fde9ec", headline: <><CountUp value={hotLeads} /> Hot Leads</>, sub: "warmed & in-market now", onClick: nav?.onHotLeads },
+    { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={fleet.appointments} /> Appointments</>, sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings", onClick: nav?.onAppointments },
+  ];
+  return (
+    <div className="flex w-full flex-wrap items-stretch overflow-hidden rounded-xl border border-[#e5e7eb] bg-white">
+      {tiles.map((t, i) => {
+        const cell = (
+          <>
+            <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg" style={{ background: t.chipBg }}>
+              {t.icon.startsWith("/") ? <Image src={t.icon} alt="" width={18} height={18} /> : <span className="text-[16px] leading-none">{t.icon}</span>}
+            </span>
+            <div className="flex flex-col gap-1">
+              <p className="flex items-center gap-1 text-[18px] font-bold leading-[22px] text-[#030712]">{t.headline}{t.onClick && <span className="text-[14px] text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
+              <p className="text-[12px] text-[#626f81]">{t.sub}</p>
+            </div>
+          </>
+        );
+        const base = `flex flex-1 basis-[210px] items-start gap-3 px-6 py-5 ${i > 0 ? "border-l border-[#e5e7eb]" : ""}`;
+        return t.onClick
+          ? <button key={i} onClick={t.onClick} className={`group ${base} text-left transition-colors hover:bg-[#faf8ff]`}>{cell}</button>
+          : <div key={i} className={base}>{cell}</div>;
+      })}
     </div>
   );
 }
 
-export function LiveHero({ fleet, actionStats, onUpsell, controls }: { fleet: FleetLive; actionStats: ActionItemStats | null; onUpsell?: () => void; controls?: React.ReactNode }) {
+export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; nav?: HeroNav }) {
   const tiles = [
-    { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: "avg first response", missing: fleet.responseTimeSec == null },
-    { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created },
-    { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…" },
-    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings" },
-    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed" },
+    { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled },
+    { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…", onClick: nav?.onActionItems },
+    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings", onClick: nav?.onAppointments },
+    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed", onClick: nav?.onConversations },
   ];
   return (
     <section
@@ -124,12 +165,16 @@ export function LiveHero({ fleet, actionStats, onUpsell, controls }: { fleet: Fl
       <div className="flex flex-col items-center gap-1.5">
         <Image src="/live-overview/icon-sparkle.svg" alt="" width={18} height={18} />
         <p className="text-[14px] text-[#030712]">{greeting()}</p>
-        <p className="text-[22px] font-bold tracking-[-0.01em] text-[#030712]">Here&apos;s what your sales AI handled</p>
+        <p className="text-[22px] font-bold tracking-[-0.01em] text-[#030712]">{serviceMode ? "Here’s what your Service AI agents handled" : "Here’s what your sales AI handled"}</p>
       </div>
       {controls && <div className="no-print flex flex-wrap items-center justify-center gap-2.5">{controls}</div>}
-      <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
-        {tiles.map((t) => <HeroTile key={t.label} {...t} onUpsell={onUpsell} />)}
-      </div>
+      {serviceMode ? (
+        <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} nav={nav} />
+      ) : (
+        <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
+          {tiles.map((t) => <HeroTile key={t.label} {...t} />)}
+        </div>
+      )}
     </section>
   );
 }
@@ -168,34 +213,40 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
   ];
   return (
     <button onClick={onClick} className="lv-lift flex flex-1 basis-0 flex-col items-start gap-6 overflow-hidden rounded-[15px] border border-[#e5e7eb] bg-white p-5 text-left">
-      <div className="flex w-full items-center justify-between rounded-[15px] border border-[#e5e7eb] pl-5">
-        <div className="flex flex-col items-start gap-6">
+      <div className="flex w-full items-start justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <span
+            className="relative flex h-[60px] w-[60px] flex-none items-center justify-center rounded-full p-[2.5px]"
+            style={{ background: inbound ? "linear-gradient(135deg,#86efac,#93c5fd,#c4b5fd)" : "linear-gradient(135deg,#fdba74,#fca5a5,#f0abfc)" }}
+          >
+            <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white bg-white">
+              {/* Real agent avatar from the onboarded-agents API (imageUrl); mock art only as a fallback.
+                  Plain <img> — the photo is an external Spyne-S3 URL whose host varies by env. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={agent.photoUrl || (inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png")} alt="" className="h-full w-full object-cover object-top" />
+            </span>
+          </span>
           <div className="flex flex-col items-start gap-2">
+            <p className="text-[20px] font-semibold leading-none text-[#030712]">{possessive(person)} Performance</p>
             <span
-              className="flex items-center gap-1 rounded px-2.5 py-1 text-[12px] font-medium"
+              className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium"
               style={inbound ? { background: C.blueBg, color: C.blue } : { background: C.greenBg, color: C.green }}
             >
-              {inbound ? "↙" : "↗"} {agent.dir}
+              {inbound ? "↙" : "↗"} {agent.dept} {agent.dir}
             </span>
-            <p className="text-[20px] font-semibold text-[#030712]">{possessive(person)} Performance</p>
-          </div>
-          <div className="flex w-[219px] flex-col items-start gap-3">
-            <p className="w-full text-[12px] font-medium text-[#626f81]">Close Rate</p>
-            <div className="flex w-full items-end justify-between">
-              <p className="text-[32px] font-semibold leading-none tracking-[-1px] text-[#030712]">{fmtRate(appts, qualified)}</p>
-              <p className="text-[12px] font-medium text-[#626f81]">{fmtInt(appts)} of {fmtInt(qualified)} Qualified</p>
-            </div>
-            <div className="h-px w-full bg-[#e5e7eb]" />
           </div>
         </div>
-        <div className="relative h-[220px] w-[195px] flex-none overflow-hidden">
-          <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover" />
+        <div className="flex flex-col items-end gap-0.5">
+          <p className="text-[32px] font-semibold leading-none tracking-[-1px] text-[#030712]">{fmtRate(appts, qualified)}</p>
+          <p className="text-[12px] font-medium text-[#626f81]">Close Rate</p>
         </div>
       </div>
 
-      <div className="flex w-full flex-col items-start gap-2.5 px-[15px]">
-        <p className="text-[12px] font-semibold text-[#030712]">Where {possessive(person)} leads stand</p>
-        <p className="text-[20px] font-semibold tracking-[-0.4px] text-[#030712]"><CountUp value={reached} /></p>
+      <div className="flex w-full flex-col gap-3 rounded-[15px] border border-[#e5e7eb] p-4">
+        <div className="flex w-full items-center justify-between">
+          <p className="text-[13px] font-semibold text-[#030712]">Where {possessive(person)} leads stand</p>
+          <p className="text-[22px] font-bold tracking-[-0.4px] text-[#030712]"><CountUp value={reached} /></p>
+        </div>
         <div ref={barRef} className="flex h-2 w-full overflow-hidden rounded-lg bg-[#f3f4f6]">
           {segments.map((s, i) => (
             <div
@@ -205,12 +256,14 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
             />
           ))}
         </div>
-        <div className="grid w-full grid-cols-2 gap-x-[15px] gap-y-[15px]">
-          {legend.map((l) => (
-            <div key={l.label} className="flex items-center gap-2">
-              <span className="h-3 w-3 flex-none rounded-sm" style={{ background: l.color }} />
-              <span className="text-[14px] font-medium tracking-[-0.28px] text-[#030712]"><CountUp value={l.value} /></span>
-              <span className="text-[12px] tracking-[-0.24px] text-[#626f81]">{l.label}</span>
+        <div className="flex w-full flex-col">
+          {legend.map((l, i) => (
+            <div key={l.label} className={`flex w-full items-center justify-between py-2.5 ${i > 0 ? "border-t border-[#f0f1f3]" : ""}`}>
+              <div className="flex items-center gap-2.5">
+                <span className="h-3 w-3 flex-none rounded-sm" style={{ background: l.color }} />
+                <span className="text-[13px] tracking-[-0.24px] text-[#626f81]">{l.label}</span>
+              </div>
+              <span className="text-[15px] font-semibold tracking-[-0.28px] text-[#030712]"><CountUp value={l.value} /></span>
             </div>
           ))}
         </div>
@@ -228,6 +281,56 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
         ))}
       </div>
     </button>
+  );
+}
+
+/* ══════════════════════════ 2b. Agent NOT available — upsell placeholder ══════════════════════════ */
+// Direction-specific value prop shown when a dept's Inbound/Outbound agent isn't live yet. The CTA opens
+// the SAME in-app enable-request form used by the flows modal + agent upsell (POST /api/agent-interest →
+// logs + emails the Spyne team) — no dependency on the dealer's mail client.
+const UPSELL_COPY: Record<string, { headline: string; body: string }> = {
+  "Sales Inbound": { headline: "Never miss a buyer who calls in", body: "Emily answers every inbound sales lead instantly — day or night — and books the test drive before they call the next dealer." },
+  "Sales Outbound": { headline: "Turn old leads into tomorrow's deals", body: "Jenny works your aged and unsold leads, wins back the ones who slipped away, and books them back in." },
+  "Service Inbound": { headline: "Answer every service call, instantly", body: "Emily picks up every inbound service call, books the appointment, and frees your advisors for the drive lane." },
+  "Service Outbound": { headline: "Fill tomorrow's empty bays tonight", body: "Jenny wins back the customers who slipped away. You wake up to a booked schedule." },
+};
+function AgentUpsellCard({ dept, dir, teamId, accountName }: { dept: "Sales" | "Service"; dir: "Inbound" | "Outbound"; teamId: string; accountName: string }) {
+  const inbound = dir === "Inbound";
+  const copy = UPSELL_COPY[`${dept} ${dir}`] ?? { headline: `Get your ${dir} agent live`, body: "Switch it on to capture more leads, any hour." };
+  const [open, setOpen] = React.useState(false);
+  return (
+    <>
+      <div className="lv-lift flex flex-1 basis-0 flex-col items-center justify-center gap-3 rounded-[15px] border border-dashed border-[#d8caff] bg-[#faf8ff] p-8 text-center">
+        <span
+          className="relative flex h-[72px] w-[72px] flex-none items-center justify-center rounded-full p-[2.5px]"
+          style={{ background: inbound ? "linear-gradient(135deg,#86efac,#93c5fd,#c4b5fd)" : "linear-gradient(135deg,#fdba74,#fca5a5,#f0abfc)" }}
+        >
+          <span className="relative h-full w-full overflow-hidden rounded-full border-2 border-white">
+            <Image src={inbound ? "/live-overview/agent-emily.png" : "/live-overview/agent-jenny.png"} alt="" fill className="object-cover object-top opacity-90" />
+          </span>
+        </span>
+        <span className="bg-clip-text text-[11px] font-bold uppercase tracking-wider text-transparent" style={{ backgroundImage: "linear-gradient(90deg,#7c3aed,#ca1f34)" }}>{dept} {dir}</span>
+        <p className="text-[18px] font-bold leading-tight text-[#030712]">{copy.headline}</p>
+        <p className="max-w-[300px] text-[13px] leading-relaxed text-[#626f81]">{copy.body}</p>
+        <button onClick={() => setOpen(true)} className="mt-1 rounded-lg px-5 py-2.5 text-[13px] font-bold text-white transition-transform hover:scale-[1.02]" style={{ background: C.primary }}>Get {dept} {dir}</button>
+      </div>
+      <Modal open={open} onClose={() => setOpen(false)} title={`Get your ${dept} ${dir} agent live`} sub={copy.headline}>
+        <div className="flex flex-col gap-4">
+          <p className="text-[13px] leading-relaxed text-[#626f81]">{copy.body}</p>
+          <div className="rounded-xl border border-[#ece6fb] bg-[#faf8ff] p-4">
+            <InterestForm
+              agentId={`${dept.toLowerCase()}-${dir.toLowerCase()}`}
+              agentName={`${dept} ${dir}`}
+              accountName={accountName}
+              teamId={teamId}
+              onCancel={() => setOpen(false)}
+              ctaLabel="Send to my Spyne team"
+              blurb={<>Tell us where to reach you and the Spyne team will switch on your <b className="text-[#111]">{dept} {dir}</b> agent for <b className="text-[#111]">{accountName || "your store"}</b>.</>}
+            />
+          </div>
+        </div>
+      </Modal>
+    </>
   );
 }
 
@@ -251,7 +354,7 @@ function FunnelCell({ label, value, delta, last }: { label: string; value: numbe
     </div>
   );
 }
-export function LiveFunnelCard({ fleet }: { fleet: FleetLive }) {
+export function LiveFunnelCard({ fleet, serviceMode }: { fleet: FleetLive; serviceMode?: boolean }) {
   const [leads, conv, qual, appt] = fleet.funnel;
   const conv1 = leads.value > 0 ? Math.round((conv.value / leads.value) * 100) : null;
   const conv2 = conv.value > 0 ? Math.round((qual.value / conv.value) * 100) : null;
@@ -259,7 +362,7 @@ export function LiveFunnelCard({ fleet }: { fleet: FleetLive }) {
   return (
     <div className="flex w-full flex-col items-start overflow-hidden rounded-[10px] border border-[#e5e7eb] bg-white p-5">
       <div className="flex w-full flex-col items-start gap-[15px]">
-        <p className="text-[12px] font-semibold uppercase text-[#030712]">📊 Lead-to-sale funnel</p>
+        <p className="text-[12px] font-semibold uppercase text-[#030712]">📊 {serviceMode ? "Lead-to-service funnel" : "Lead-to-sale funnel"}</p>
         <div className="flex w-full items-start">
           <FunnelCell label="Leads touched" value={leads.value} delta={fleet.deltas.leads} />
           <FunnelCell label="Real Conversations" value={conv.value} delta={fleet.deltas.conversations} />
@@ -295,7 +398,7 @@ export function LiveHotLeadsCard({ items, onViewAll }: { items: WarmLeadItem[]; 
   const hot = items.filter((w) => w.tier === "hot");
   const shown = hot.slice(0, 3);
   return (
-    <div className="flex flex-1 basis-0 flex-col items-start gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
+    <div className="flex min-h-[460px] flex-1 basis-0 flex-col items-start gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
       <div className="flex h-[60px] w-full items-center justify-between border-b border-[#e5e7eb] px-5 py-[15px]">
         <div className="flex items-center gap-2">
           <span>🔥</span>
@@ -324,7 +427,7 @@ export function LiveHotLeadsCard({ items, onViewAll }: { items: WarmLeadItem[]; 
           </React.Fragment>
         ))}
       </div>
-      <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
+      <div className="mt-auto flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
         <p className="text-[12px] text-[#626f81]">Top {shown.length} of {hot.length} hot leads</p>
         <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View all Hot Leads →</button>
       </div>
@@ -354,9 +457,16 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
   const todayKey = today.toISOString().slice(0, 10);
   const activeKey = selected ?? days.find((d) => d.toISOString().slice(0, 10) === todayKey)?.toISOString().slice(0, 10) ?? days[3].toISOString().slice(0, 10);
   const dayAppts = (byDay.get(activeKey) ?? []).sort((a, b) => (a.when ?? "").localeCompare(b.when ?? ""));
+  // Footer count must match the VISIBLE week grid — not `items.length` (that's every appointment in the
+  // selected report window, e.g. 36 across 30 days, which read as "36 appointments this week"). Sum only
+  // the 7 days currently shown so the number tracks the week the user is looking at.
+  const weekCount = React.useMemo(
+    () => days.reduce((n, d) => n + (byDay.get(d.toISOString().slice(0, 10))?.length ?? 0), 0),
+    [days, byDay],
+  );
 
   return (
-    <div className="flex flex-1 basis-0 flex-col items-start justify-between gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
+    <div className="flex min-h-[460px] flex-1 basis-0 flex-col items-start justify-between gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
       <div className="flex w-full flex-col items-start gap-[30px]">
         <div className="flex w-full flex-col items-start gap-6 border-b border-[#e5e7eb] px-5 py-[15px]">
           <div className="flex w-full items-center justify-between">
@@ -411,7 +521,7 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
         </div>
       </div>
       <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
-        <p className="text-[12px] text-[#626f81]">{items.length} appointments this week</p>
+        <p className="text-[12px] text-[#626f81]">{weekCount} appointment{weekCount === 1 ? "" : "s"} this week</p>
         <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View All →</button>
       </div>
     </div>
@@ -425,23 +535,59 @@ function overdueLabel(dueAt: string): { text: string; danger: boolean } {
   if (days === 0) return { text: "Due today", danger: false };
   return { text: `Due in ${-days} day${-days === 1 ? "" : "s"}`, danger: false };
 }
+function TableTabs({ tabs, active, onPick }: { tabs: { key: string; label: string; count?: number }[]; active: string; onPick: (k: string) => void }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {tabs.map((t) => {
+        const on = t.key === active;
+        return (
+          <button
+            key={t.key}
+            onClick={() => onPick(t.key)}
+            className="rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
+            style={on ? { background: C.primary, color: "#fff" } : { background: C.greyBg, color: C.sub }}
+          >
+            {t.label}{t.count != null ? ` (${t.count})` : ""}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 export function LiveActionItemsTable({ items, stats, onViewAll }: { items: ActionItem[]; stats: ActionItemStats | null; onViewAll: () => void }) {
-  const rows = items.slice(0, 5);
+  const [tab, setTab] = React.useState("created");
+  // `items` are the CREATED items in the window (incl. completed). Open/Overdue/Due-Today filter to the
+  // still-open ones (via the `completed` flag) so their rows match the open-based counts; Created = all.
+  const filtered = items.filter((a) => {
+    if (tab === "open") return !a.completed;
+    if (tab === "overdue") return !a.completed && overdueLabel(a.dueAt).danger;
+    if (tab === "today") return !a.completed && overdueLabel(a.dueAt).text === "Due today";
+    return true; // created
+  });
+  const rows = filtered.slice(0, 5);
+  const tabs = [
+    { key: "created", label: "Created", count: stats?.created },
+    { key: "overdue", label: "Overdue", count: stats?.overdue },
+    { key: "today", label: "Due Today", count: stats?.dueToday },
+    { key: "open", label: "All Open", count: stats?.open },
+  ];
   return (
     <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
-      <div className="flex h-[60px] w-full items-center justify-between border-b border-[#e5e7eb] px-5 py-[15px]">
+      <div className="flex min-h-[60px] w-full flex-wrap items-center justify-between gap-3 border-b border-[#e5e7eb] px-5 py-[15px]">
         <p className="text-[14px] font-semibold uppercase text-[#030712]">📝 Action items</p>
+        <TableTabs tabs={tabs} active={tab} onPick={setTab} />
       </div>
       {rows.length === 0 ? (
-        <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">No open action items right now.</p>
+        <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">No action items in this view.</p>
       ) : (
         <div className="w-full overflow-x-auto px-[15px]">
-          <table className="w-full min-w-[760px] border-collapse text-[14px]">
+          <table className="w-full min-w-[820px] border-collapse text-[14px]">
             <thead>
               <tr className="text-left text-[#626f81]">
                 <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Customer</th>
+                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Contact</th>
                 <th className="border-b border-[#e5e7eb] p-[15px] font-medium">What to do?</th>
-                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Assigned</th>
+                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Due Date</th>
                 <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Status</th>
               </tr>
             </thead>
@@ -457,8 +603,9 @@ export function LiveActionItemsTable({ items, stats, onViewAll }: { items: Actio
                         <span className="whitespace-nowrap text-[#030712]">{name}</span>
                       </div>
                     </td>
-                    <td className="max-w-[360px] border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.description}</td>
-                    <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{closerLabel(a.assignedTo)}</td>
+                    <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.phone ?? "—"}</td>
+                    <td className="max-w-[320px] border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.description}</td>
+                    <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{fmtWhenShort(a.dueAt).split(" · ")[0]}</td>
                     <td className="border-b border-[#e5e7eb] p-[15px] text-center">
                       <span className="whitespace-nowrap rounded px-[15px] py-1 text-[12px] font-medium" style={st.danger ? { background: C.redBg, color: C.red } : { background: C.blueBg, color: C.blue }}>{st.text}</span>
                     </td>
@@ -491,29 +638,55 @@ export function LiveConversationsTable({
   onViewAll: () => void;
 }) {
   const [sel, setSel] = React.useState<Conversation | null>(null);
-  const rows = (items ?? []).slice(0, 6);
-  const unresolved = (items ?? []).filter((c) => !convStatus(c).ok).length;
+  const [tab, setTab] = React.useState("attention");
+  const all = items ?? [];
+  const unresolved = all.filter((c) => !convStatus(c).ok).length;
+  // "Real conversation" (canonical): the customer actually engaged — a call they stayed on (not a
+  // voicemail/no-answer blip) OR an SMS thread with a human reply. No connected flag on the row, so
+  // proxy calls by a short talk-time floor and SMS by the presence of an inbound/human message.
+  const isReal = (c: Conversation) =>
+    c.channel === "call"
+      ? (c.durationSec ?? 0) >= 15
+      : (c.sms?.some((m) => m.direction === "inbound" || m.authorType === "human") ?? (c.msgs ?? 0) > 1);
+  const match = (c: Conversation) => {
+    switch (tab) {
+      case "attention": return !convStatus(c).ok;
+      case "real": return isReal(c);
+      case "call": return c.channel === "call";
+      case "sms": return c.channel === "sms";
+      default: return true; // all
+    }
+  };
+  const rows = all.filter(match).slice(0, 6);
+  const tabs = [
+    { key: "attention", label: "Needs Attention", count: unresolved },
+    { key: "real", label: "Real", count: all.filter(isReal).length },
+    { key: "call", label: "Calls", count: all.filter((c) => c.channel === "call").length },
+    { key: "sms", label: "SMS", count: all.filter((c) => c.channel === "sms").length },
+    { key: "all", label: "All", count: all.length },
+  ];
   return (
     <>
       <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
-        <div className="flex h-[60px] w-full items-center justify-between border-b border-[#e5e7eb] px-5 py-[15px]">
+        <div className="flex min-h-[60px] w-full flex-wrap items-center justify-between gap-3 border-b border-[#e5e7eb] px-5 py-[15px]">
           <p className="text-[14px] font-semibold uppercase text-[#030712]">💬 Recent conversations</p>
+          {items !== null && <TableTabs tabs={tabs} active={tab} onPick={setTab} />}
         </div>
         {items === null ? (
           <div className="w-full px-5 pb-5"><div className="h-[220px] w-full animate-pulse rounded-xl bg-[#f3f4f6]" /></div>
         ) : rows.length === 0 ? (
-          <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">No conversations synced yet.</p>
+          <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">{tab === "attention" ? "Nothing needs attention — all conversations resolved." : "No conversations synced yet."}</p>
         ) : (
           <div className="w-full overflow-x-auto px-[15px]">
-            <table className="w-full min-w-[820px] border-collapse text-[14px]">
+            <table className="w-full min-w-[860px] border-collapse text-[14px]">
               <thead>
                 <tr className="text-left text-[#626f81]">
                   <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Customer</th>
+                  <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Contact</th>
                   <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Intent</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Channel</th>
                   <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Date &amp; Time</th>
                   <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Duration</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Status</th>
+                  <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Outcome</th>
                 </tr>
               </thead>
               <tbody>
@@ -528,8 +701,8 @@ export function LiveConversationsTable({
                           <span className="whitespace-nowrap text-[#030712]">{name}</span>
                         </div>
                       </td>
-                      <td className="max-w-[280px] truncate border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.title || agentDisplayName(c, agentNames)}</td>
                       <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.channel === "sms" ? "💬" : "📞"} {c.phone ?? "—"}</td>
+                      <td className="max-w-[280px] truncate border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.title || agentDisplayName(c, agentNames)}</td>
                       <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-center text-[#030712]">{fmtWhenShort(c.at)}</td>
                       <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-center text-[#030712]">{c.channel === "call" ? (c.durationSec ? fmtSecs(c.durationSec) : "—") : `${c.msgs ?? 0} messages`}</td>
                       <td className="border-b border-[#e5e7eb] p-[15px] text-center">
@@ -564,37 +737,85 @@ export interface LiveOverviewProps {
   conversations: Conversation[] | null;
   agentNames: Record<string, string>;
   onOpenAgent: (id: string) => void;
-  onOpenApptModal: () => void;
+  onViewAppointments: () => void; // "View All →" on the appointments card — navigates to the Appointments tab
   onOpenWarmModal: () => void;
   onViewActionItems: () => void;
   onViewConversations: () => void;
-  onBackToTraining: () => void; // "unlock full potential" — jump back to Training to switch on more flows
+  onBackToTraining?: () => void; // legacy hook; Training is no longer surfaced, so unused on Live
   headerControls?: React.ReactNode; // date filter + customize, rendered inside the hero (this IS the header)
+  ctrl?: CustomizeCtrl; // Customize: hide + reorder the sections below (omit → default order, all shown)
+  serviceMode: boolean; // department SKIN, from the URL serviceType scope — NOT inferred from the agent
+                        // list (which is empty when the dept has no live agents), so a service rooftop
+                        // with no service agents still shows the Service skin + "Get Service …" upsell.
 }
+
+// The customizable sections of the Live overview, in default order. Exposed so OverviewView can build
+// the matching useCustomize(ids) + Customize modal groups from the SAME list (ids never drift).
+export const LIVE_SECTIONS: { id: string; label: string }[] = [
+  { id: "live.hero", label: "Hero metric tiles" },
+  { id: "live.agents", label: "Agent performance" },
+  { id: "live.funnel", label: "Lead-to-sale funnel" },
+  { id: "live.hotleads", label: "Hot Leads" },
+  { id: "live.appts", label: "Appointments" },
+  { id: "live.actions", label: "Action Items" },
+  { id: "live.conversations", label: "Recent Conversations" },
+];
+// Hot Leads + Appointments render side-by-side when both are visible AND adjacent (the default), and go
+// full-width when hidden/separated — so reorder + independent hide work without breaking the layout.
+const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
+
 export function LiveOverview({
-  fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
-  onOpenAgent, onOpenApptModal, onOpenWarmModal, onViewActionItems, onViewConversations, onBackToTraining, headerControls,
+  account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
+  onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl, serviceMode,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
+  const hotLeads = warmLeads.filter((w) => w.tier === "hot").length;
+  // Department skin follows the URL scope (serviceMode), so a scope with no live agents still shows the
+  // right "Get {dept} {dir}" upsell — not a Sales fallback.
+  const deptLabel: "Sales" | "Service" = serviceMode ? "Service" : "Sales";
+
+  const nodes: Record<string, React.ReactNode> = {
+    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
+    "live.agents": (
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
+        {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" teamId={account.teamId} accountName={account.name} />}
+        {outbound ? <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Outbound" teamId={account.teamId} accountName={account.name} />}
+      </div>
+    ),
+    "live.funnel": (
+      <div className="flex flex-col gap-3.5">
+        <UnlockPotentialBanner liveCount={1} total={3} teamId={account.teamId} accountName={account.name} />
+        <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />
+      </div>
+    ),
+    "live.hotleads": <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />,
+    "live.appts": <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
+    "live.actions": <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,
+    "live.conversations": <LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} />,
+  };
+
+  // Apply the customize layout: chosen order (ctrl.order) minus hidden ids; default order + all shown
+  // when there's no ctrl. Unknown ids are skipped so a stale saved layout never renders a ghost.
+  const defaultOrder = LIVE_SECTIONS.map((s) => s.id);
+  const order = (ctrl ? ctrl.order.filter((id) => nodes[id] !== undefined) : defaultOrder).filter((id) => !ctrl?.hidden.has(id));
+  const rows: React.ReactNode[] = [];
+  for (let i = 0; i < order.length; i++) {
+    const id = order[i];
+    const next = order[i + 1];
+    const delay = `${rows.length * 70}ms`;
+    if (PAIRABLE.has(id) && next && PAIRABLE.has(next)) {
+      rows.push(<div key={id} className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: delay }}>{nodes[id]}{nodes[next]}</div>);
+      i++; // consumed the pair
+    } else {
+      rows.push(<div key={id} className="lv-rise" style={{ animationDelay: delay }}>{nodes[id]}</div>);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <LiveAnims />
-      <div className="lv-rise" style={{ animationDelay: "0ms" }}><LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} onUpsell={onBackToTraining} controls={headerControls} /></div>
-      <div className="lv-rise flex flex-col gap-5 lg:flex-row" style={{ animationDelay: "70ms" }}>
-        {inbound && <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} />}
-        {outbound && <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} />}
-      </div>
-      <div className="lv-rise flex flex-col gap-3.5" style={{ animationDelay: "140ms" }}>
-        <UnlockPotentialBanner liveCount={1} total={3} onBackToTraining={onBackToTraining} />
-        <LiveFunnelCard fleet={fleet} />
-      </div>
-      <div className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: "210ms" }}>
-        <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />
-        <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onOpenApptModal} />
-      </div>
-      <div className="lv-rise" style={{ animationDelay: "280ms" }}><LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} /></div>
-      <div className="lv-rise" style={{ animationDelay: "350ms" }}><LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} /></div>
+      {rows}
     </div>
   );
 }
