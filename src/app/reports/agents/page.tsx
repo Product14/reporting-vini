@@ -32,7 +32,7 @@ import {
 } from "@/components/reports/kit";
 import { fmtRate, fmtWhenShort, IntentOutcomeTable, RankedOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
+import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
@@ -270,8 +270,9 @@ function AgentReportsView() {
   // appointments) and never double-counts a lead touched on multiple days. Falls back to event counts
   // only if leadFunnel is absent. Canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) ·
   // "Real conversations" · "Qualified leads" · "Appointments — AI-booked".
+  const entryStage = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
   const funnelStages = [
-    { label: inbound ? "Leads reached" : "Leads dialed", value: scale(r.leadsAttempted) },
+    { label: entryStage.label, value: scale(entryStage.value) },
     { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
     { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified) },
     { label: "Appointments — AI-booked", value: scale(m.appointments) },
