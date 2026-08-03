@@ -10,7 +10,8 @@
  *                "createdAt BETWEEN start AND end GROUP BY intent" query — a per-window count, unlike
  *                the current-state `open` snapshot which dealers drain to near-zero.
  *
- * "All actionable intents" (product decision) → no intent allow-list; we only drop blank intents.
+ * "All actionable intents" (product decision) → no intent allow-list; we drop blank intents and the
+ * freeform 'custom' catch-all (uncategorized, no dealer-actionable meaning — RETCONVAI QA).
  * Degrades to an empty list — never 502s the pipeline.
  *
  *   /api/action-items?team_id=&serviceType=sales|service|both&scope=recent|open|overdue|created[&minutes=15][&start=&end=][&limit=50][&offset=0]
@@ -125,7 +126,7 @@ export async function GET(request: Request): Promise<Response> {
       " max(is_completed=0 AND is_active=1) AS open_any," +
       " max(is_completed=0 AND is_active=1 AND due_date > toDateTime('1971-01-01') AND due_date < now()) AS overdue_any," +
       " max(is_completed=0 AND is_active=1 AND toDate(due_date)=today()) AS dueToday_any" +
-      ` FROM (${byId}) WHERE deleted=0 AND intent != '' GROUP BY lead_id`;
+      ` FROM (${byId}) WHERE deleted=0 AND intent != '' AND lower(intent) != 'custom' GROUP BY lead_id`;
     const statsSql =
       "SELECT sum(created_in_win) AS created, sum(completed_in_win) AS completed," +
       " sum(open_any) AS open, sum(overdue_any) AS overdue, sum(dueToday_any) AS dueToday" +
@@ -133,7 +134,7 @@ export async function GET(request: Request): Promise<Response> {
     // Who-closed-most: distinct LEADS with an item completed in-window, grouped by that item's assignee.
     const closersSql =
       "SELECT assigned_to AS assignedTo, uniqExact(lead_id) AS closed" +
-      ` FROM (${byId}) WHERE deleted=0 AND intent != '' AND is_completed=1` +
+      ` FROM (${byId}) WHERE deleted=0 AND intent != '' AND lower(intent) != 'custom' AND is_completed=1` +
       ` AND updatedAt >= ${startExpr} AND updatedAt < ${endExpr}` +
       " GROUP BY assigned_to ORDER BY closed DESC LIMIT 10";
     const [statRows, closerRows] = await Promise.all([
@@ -177,7 +178,10 @@ export async function GET(request: Request): Promise<Response> {
 
   // Item-level predicates (scope + hygiene) applied to the deduped-per-_id rows BEFORE the per-lead
   // collapse — a lead is listed iff it has ≥1 item passing these (matches the scoreboard's "any" rule).
-  const itemWhere: string[] = ["is_active=1", "__deleted=0", "intent != ''"];
+  // Drop the freeform 'custom' intent — it's an uncategorized AI catch-all with no actionable meaning to
+  // the dealer (RETCONVAI QA: "custom intent looks meaningless"). Applied here (list) AND in the stats
+  // roll-up above so the tab count and the rows stay consistent.
+  const itemWhere: string[] = ["is_active=1", "__deleted=0", "intent != ''", "lower(intent) != 'custom'"];
   // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. `service`/`both` validated above.
   if (service !== "both") itemWhere.push(`service_type LIKE '${service}%'`);
   if (scope === "recent") itemWhere.push(`created_ts >= now() - INTERVAL ${minutes} MINUTE`);

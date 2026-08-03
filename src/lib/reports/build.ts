@@ -99,6 +99,9 @@ export interface BuildInput {
   // Overrides the mock persona (summary.person) so the report shows the name the dealer actually gave
   // the agent instead of a fabricated one. A missing slot / undefined → keep the mock persona.
   onboardedNames?: Partial<Record<AgentData["id"], string>> | null;
+  // The dealer's REAL agent avatar per slot (imageUrl from the onboarded-agents API). Sets agent.photoUrl
+  // so the report shows the actual photo; a missing slot → keep the mock avatar.
+  onboardedPhotos?: Partial<Record<AgentData["id"], string>> | null;
   // EXACT window-distinct lead counts per agent_type (from report_lead_counts). When present, used for
   // "Leads dialed" (= unique leads contacted) + distinct appointments instead of summing per-day
   // distincts (which over-counts cross-day leads). undefined → fall back to the daily sum.
@@ -142,7 +145,7 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, warmLeads, onboardedSlots, onboardedNames, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, warmLeads, onboardedSlots, onboardedNames, onboardedPhotos, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
   // Keep service_type so each agent shows only its department's callbacks (sales agents → sales leads,
@@ -245,6 +248,8 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     const rows = daily.filter((r) => r.agent_type === type).sort((a, b) => a.activity_day.localeCompare(b.activity_day));
     const bd = breakdown.filter((r) => r.agent_type === type);
     const a: AgentData = structuredClone(base);
+    // Real agent avatar from the dealer's onboarded-agents config (imageUrl); null → keep mock art.
+    a.photoUrl = onboardedPhotos?.[base.id]?.trim() || null;
     // NOTE: we do NOT early-return mock when rows is empty. An agent with no activity in the
     // selected window must read as ZERO on a live rooftop — returning mock here let fabricated
     // volume leak into the fleet roll-up and "Value created" (e.g. a 1-day window showing more
@@ -282,6 +287,10 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     // lead-day counts are unavailable so the funnel still renders. contacted ≥ connected ≥ qualified ≥ appt.
     const leadConnected = lc ? lc.connected : connected;
     const leadQualified = lc ? lc.qualified : qualified;
+    // Distinct leads actually DIALED (a call was placed), separate from `contacted` which also counts
+    // SMS-only touches. Outbound cards label their number "Leads dialed", so it must be the dialed count,
+    // not contacted. Falls back to contacted when the RPC row is unavailable (keeps the funnel rendering).
+    const leadDialed = lc ? lc.dialed : leadsAttempted;
 
     // ── metrics: live-backed fields only, real 0 stays 0. Fields with NO Q12227 source
     //    (showed/deals/revenue/cost) are zeroed — never fabricated — and surfaced as "coming soon"
@@ -306,7 +315,7 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
 
     // ── unique-lead funnel (distinct leads at each stage) → fleet + per-agent "Outreach → conversation
     //    → qualified → appointment" funnels. Every stage is window-distinct, so no lead is counted twice. ──
-    a.leadFunnel = { contacted: leadsAttempted, connected: leadConnected, qualified: leadQualified, appt: appointments };
+    a.leadFunnel = { contacted: leadsAttempted, dialed: leadDialed, connected: leadConnected, qualified: leadQualified, appt: appointments };
 
     // ── quality: only the live-backed bits. csat/sentiment have no Q12227 column → zeroed (the UI
     //    hides them); handleTime is "—" when there's no talk time, never a mock value. ──
