@@ -16,6 +16,27 @@ export const ID_BY_AGENT_TYPE: Record<string, AgentData["id"]> = {
   "Service Outbound": "service_ob",
 };
 
+/* The funnel-entry stage (top of the "leads → conversations → qualified → appointments" funnel) as a
+ * label + value, canonical + channel-honest + monotonic. ONE source of truth so every surface (Overview
+ * agent cards, By-agent funnel) shows the SAME number/label for the same agent.
+ *   • Inbound  → "Leads reached" = unique leads contacted.
+ *   • Outbound → "Leads dialed" = unique leads DIALED, but ONLY when dialing is the actual outreach
+ *     mechanism (dialed > 0) AND it keeps the funnel monotonic (dialed ≥ connected). SMS-only outbound
+ *     has dialed = 0 (e.g. Service Outbound texts, never calls) — showing "0 dialed" is wrong AND breaks
+ *     the funnel (0 → N conversations), so fall back to "Leads contacted" = contacted. */
+export function leadEntryStage(
+  dir: string,
+  lf: { contacted: number; dialed: number; connected: number } | undefined,
+  fallbackContacted: number,
+): { label: string; value: number } {
+  const contacted = lf?.contacted ?? fallbackContacted;
+  if (dir === "Inbound") return { label: "Leads reached", value: contacted };
+  const dialed = lf?.dialed ?? 0;
+  const connected = lf?.connected ?? 0;
+  if (dialed > 0 && dialed >= connected) return { label: "Leads dialed", value: dialed };
+  return { label: "Leads contacted", value: contacted };
+}
+
 /* Does this agent have ANY real activity in the window? Activity is ground truth for whether an agent
  * should appear — not just calls (an inbound agent can have a busy SMS/lead day with zero calls), so we
  * look across calls, conversations, qualified, appointments, SMS and unique leads touched. */

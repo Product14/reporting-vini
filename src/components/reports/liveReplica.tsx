@@ -153,7 +153,6 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
 export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; nav?: HeroNav }) {
   const tiles = [
     { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled },
-    { icon: "/live-overview/icon-resolved.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Follow-ups", sub: "logged & worked for your team", missing: !actionStats?.created, onClick: nav?.onActionItems },
     { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…", onClick: nav?.onActionItems },
     { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings", onClick: nav?.onAppointments },
     { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed", onClick: nav?.onConversations },
@@ -458,6 +457,13 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
   const todayKey = today.toISOString().slice(0, 10);
   const activeKey = selected ?? days.find((d) => d.toISOString().slice(0, 10) === todayKey)?.toISOString().slice(0, 10) ?? days[3].toISOString().slice(0, 10);
   const dayAppts = (byDay.get(activeKey) ?? []).sort((a, b) => (a.when ?? "").localeCompare(b.when ?? ""));
+  // Footer count must match the VISIBLE week grid — not `items.length` (that's every appointment in the
+  // selected report window, e.g. 36 across 30 days, which read as "36 appointments this week"). Sum only
+  // the 7 days currently shown so the number tracks the week the user is looking at.
+  const weekCount = React.useMemo(
+    () => days.reduce((n, d) => n + (byDay.get(d.toISOString().slice(0, 10))?.length ?? 0), 0),
+    [days, byDay],
+  );
 
   return (
     <div className="flex min-h-[460px] flex-1 basis-0 flex-col items-start justify-between gap-[30px] rounded-[10px] border border-[#e5e7eb] bg-white">
@@ -515,7 +521,7 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
         </div>
       </div>
       <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
-        <p className="text-[12px] text-[#626f81]">{items.length} appointments this week</p>
+        <p className="text-[12px] text-[#626f81]">{weekCount} appointment{weekCount === 1 ? "" : "s"} this week</p>
         <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View All →</button>
       </div>
     </div>

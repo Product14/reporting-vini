@@ -35,7 +35,7 @@ import {
   WarmLeadsModal,
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
-import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
+import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
 import { useDateRange, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { goCrossPage } from "@/components/reports/parentNav";
@@ -412,7 +412,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             {ranked.map((a) => {
               const lf = a.leadFunnel;
-              const inboundDir = a.dir === "Inbound";
               const qualifiedLeads = lf?.qualified ?? a.metrics.qualified;
               return (
                 <AgentFunnelCard
@@ -423,7 +422,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   closeRateLabel={fmtRate(a.metrics.appointments, qualifiedLeads)}
                   closeRateSub={`${fmtInt(a.metrics.appointments)} of ${fmtInt(qualifiedLeads)} qualified`}
                   stages={[
-                    { label: inboundDir ? "Leads reached" : "Leads dialed", value: lf?.contacted ?? a.report.leadsAttempted },
+                    leadEntryStage(a.dir, lf, a.report.leadsAttempted),
                     { label: "Real conversations", value: lf?.connected ?? a.metrics.conversations },
                     { label: "Qualified leads", value: qualifiedLeads },
                     { label: "Appointments — AI-booked", value: a.metrics.appointments },

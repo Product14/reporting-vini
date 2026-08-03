@@ -287,6 +287,10 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     // lead-day counts are unavailable so the funnel still renders. contacted ≥ connected ≥ qualified ≥ appt.
     const leadConnected = lc ? lc.connected : connected;
     const leadQualified = lc ? lc.qualified : qualified;
+    // Distinct leads actually DIALED (a call was placed), separate from `contacted` which also counts
+    // SMS-only touches. Outbound cards label their number "Leads dialed", so it must be the dialed count,
+    // not contacted. Falls back to contacted when the RPC row is unavailable (keeps the funnel rendering).
+    const leadDialed = lc ? lc.dialed : leadsAttempted;
 
     // ── metrics: live-backed fields only, real 0 stays 0. Fields with NO Q12227 source
     //    (showed/deals/revenue/cost) are zeroed — never fabricated — and surfaced as "coming soon"
@@ -311,7 +315,7 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
 
     // ── unique-lead funnel (distinct leads at each stage) → fleet + per-agent "Outreach → conversation
     //    → qualified → appointment" funnels. Every stage is window-distinct, so no lead is counted twice. ──
-    a.leadFunnel = { contacted: leadsAttempted, connected: leadConnected, qualified: leadQualified, appt: appointments };
+    a.leadFunnel = { contacted: leadsAttempted, dialed: leadDialed, connected: leadConnected, qualified: leadQualified, appt: appointments };
 
     // ── quality: only the live-backed bits. csat/sentiment have no Q12227 column → zeroed (the UI
     //    hides them); handleTime is "—" when there's no talk time, never a mock value. ──
