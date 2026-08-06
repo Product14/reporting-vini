@@ -38,6 +38,7 @@ import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
 import { useDateRange, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
+import { useOutcomes, OutcomesSection } from "@/components/reports/outcomes";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { track } from "@/lib/analytics";
 
@@ -342,6 +343,25 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // manifest drives the Customize modal: sections (reorderable + hideable) + the individual tiles/cards.
   // `ctrl` drives the legacy (?classic=1) layout; `liveCtrl` drives the new Live overview. Separate
   // localStorage keys so the two layouts never clobber each other.
+  /* Conversation-outcome evals (Spyne eval pipeline) — SALES only, so a Service-scoped report never asks
+   * for them and the section drops out of the Live layout. Both directions in one hook; each renders only
+   * if it actually has scored conversations. Independent of the main feed: a slow/absent eval API leaves
+   * the rest of the Overview untouched. */
+  const outcomesFeed = useOutcomes({
+    teamId,
+    enterpriseId,
+    dirs: ["inbound", "outbound"],
+    bucket: custom ? undefined : bucket,
+    start: custom?.start,
+    end: custom ? addDay(custom.end) : undefined,
+    spyneToken,
+    spyneEnv,
+    enabled: !sampleMode && dept !== "service" && hasTeam,
+  });
+  // Only claim the layout slot once there's something to show (or while the first fetch is in flight) —
+  // otherwise a rooftop with no scored conversations would leave an empty animated row in the Live stack.
+  const outcomesReady = outcomesFeed.loading || Object.values(outcomesFeed.data).some((o) => (o?.scored ?? 0) > 0);
+
   const ctrl = useCustomize("overview", { teamId, enterpriseId, spyneToken }, OVERVIEW_SECTION_IDS);
   const liveCtrl = useCustomize("overview-live", { teamId, enterpriseId, spyneToken }, LIVE_SECTION_IDS);
   const liveGroups: CustomizeGroup[] = LIVE_SECTIONS.map((s) => ({ id: s.id, label: s.label }));
@@ -590,6 +610,15 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   onViewActionItems={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)}
                   onViewConversations={() => goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`)}
                   onBackToTraining={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                  outcomes={
+                    dept === "service" || !outcomesReady ? null : (
+                      <OutcomesSection
+                        data={outcomesFeed.data}
+                        loading={outcomesFeed.loading}
+                        callsByDir={{ inbound: split.inbound.calls, outbound: split.outbound.calls }}
+                      />
+                    )
+                  }
                   ctrl={liveCtrl}
                 />
               )}

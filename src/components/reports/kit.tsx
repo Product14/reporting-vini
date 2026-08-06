@@ -24,7 +24,7 @@ export function Portal({ children }: { children: React.ReactNode }) {
 }
 
 /* ── tabs ── */
-export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting";
+export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting" | "library";
 
 export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamId?: string; query?: string }) {
   // keep the rooftop scope AND the selected date window across tab navigation. `query` (built by the
@@ -50,6 +50,7 @@ export function ReportTabs({ active, teamId, query }: { active: ReportTab; teamI
     { id: "agents", label: "By agent", href: `/reports/agents${q}` },
     { id: "campaigns", label: "Campaigns", href: `/reports/campaigns${q}` },
     { id: "reporting", label: "Reporting", href: `/reports/reporting${q}` },
+    { id: "library", label: "Reports", href: `/reports/library${q}` },
   ] as const;
   return (
     <div className="no-print mx-auto max-w-[1400px] mt-4 flex flex-wrap items-center gap-1">

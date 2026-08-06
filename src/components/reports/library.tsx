@@ -1,0 +1,1123 @@
+"use client";
+
+/* THE REPORT LIBRARY — a catalog of ready-made reports a dealer can open, each answering one question
+ * they actually ask, each built from data already flowing through this app. No mock rows: every report
+ * declares the live source it reads and hides itself when that source has nothing for the window.
+ *
+ * The catalog is data, not markup — one entry per report, with the question it answers, who it's for, and
+ * a renderer. That shape is deliberate: the custom report builder that comes later can enumerate the same
+ * entries (and their `source` metadata) instead of a second, divergent list.
+ *
+ * ADDING A REPORT: append one REPORTS entry. It shows up in the library, gets a card, an availability
+ * gate and an export automatically. */
+
+import React from "react";
+import { Card, fmtInt, StepFunnel, TrendBars, Th } from "@/components/reports/kit";
+import { fmtRate, fmtSecs, fmtDuration, NamedApptsTable, WarmLeadChips, RankedOutcomeTable, MetricTile } from "@/components/reports/kitV3";
+import { CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
+import type { EvalOutcomes, EvalDirection } from "@/lib/spyne/evalPipeline";
+import type { AgentData, NamedAppt, WarmLeadItem } from "@/components/reports/data";
+import type { FetchResult, FleetLive, ActionItem, ActionItemStats, ReportMetrics } from "@/components/reports/liveData";
+import type { InsightsPayload } from "@/app/api/reports/insights/route";
+
+// ───────────────────────── context ─────────────────────────
+
+/** Everything the library has loaded for the selected rooftop + window. Reports read what they need. */
+export interface ReportCtx {
+  teamId: string;
+  enterpriseId: string;
+  periodLabel: string;
+  timezone?: string | null;
+  feed: FetchResult | null;
+  fleet: FleetLive;
+  agents: AgentData[];
+  metrics: ReportMetrics | null;
+  actionStats: ActionItemStats | null;
+  actionItems: ActionItem[];
+  outcomes: Partial<Record<EvalDirection, EvalOutcomes>>;
+  warmLeads: WarmLeadItem[];
+  namedAppts: NamedAppt[];
+  /** ClickHouse-only datasets (/api/reports/insights): CRM outcome, vehicles, routing, texts, coverage. */
+  insights: InsightsPayload | null;
+}
+
+export interface ReportDef {
+  id: string;
+  title: string;
+  /** The question a dealer would ask out loud. This is the card's subtitle — not a feature description. */
+  question: string;
+  category: "Appointments" | "Speed & response" | "Lead quality" | "Conversations" | "Team" | "Outbound";
+  /** Who reads it — helps a manager pick fast, and gives the future builder a facet to filter on. */
+  who: string;
+  /** Live source, shown on the report so a number can always be traced back. */
+  source: string;
+  /* One plain sentence telling the reader what this period's numbers actually mean — computed from the
+   * data, not canned copy, so it changes with the figures. Rendered at the top of the report. */
+  takeaway?: (c: ReportCtx) => string | null;
+  /** False → the card renders as "no data for this window" rather than an empty report. */
+  available: (c: ReportCtx) => boolean;
+  render: (c: ReportCtx) => React.ReactNode;
+}
+
+// ───────────────────────── small shared primitives ─────────────────────────
+
+const salesAgents = (c: ReportCtx) => c.agents.filter((a) => a.dept === "Sales");
+const inboundAgent = (c: ReportCtx) => salesAgents(c).find((a) => a.dir === "Inbound");
+const outboundAgent = (c: ReportCtx) => salesAgents(c).find((a) => a.dir === "Outbound");
+/* report_objections carries two kinds of row. `theme` = what customers actually pushed back on.
+ * `outbound_outcome` = why an outbound lead ended (Opt Out, Not Interested, Already Purchased…). Most
+ * rooftops today only have the latter, and it answers a real question, so the report falls back to it
+ * rather than hiding. Rows are aggregated by label because the same label appears once per channel —
+ * summing also avoids duplicate React keys downstream. */
+function objectionRows(c: ReportCtx): { rows: { label: string; count: number }[]; kind: "theme" | "outcome" | null } {
+  const all = c.metrics?.objections ?? [];
+  for (const kind of ["theme", "outbound_outcome"] as const) {
+    const byLabel = new Map<string, number>();
+    for (const o of all) if (o.kind === kind && o.count > 0) byLabel.set(o.label, (byLabel.get(o.label) ?? 0) + o.count);
+    if (byLabel.size) {
+      return {
+        rows: [...byLabel.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count),
+        kind: kind === "theme" ? "theme" : "outcome",
+      };
+    }
+  }
+  return { rows: [], kind: null };
+}
+const apptTotals = (c: ReportCtx) =>
+  (c.metrics?.appt_status ?? []).reduce(
+    (acc, r) => ({
+      booked: acc.booked + r.booked, showed: acc.showed + r.showed,
+      no_show: acc.no_show + r.no_show, cancelled: acc.cancelled + r.cancelled, upcoming: acc.upcoming + r.upcoming,
+    }),
+    { booked: 0, showed: 0, no_show: 0, cancelled: 0, upcoming: 0 },
+  );
+
+/* HOW A CALL ENDED → whether a person was needed.
+ *
+ * `NEVER_CONNECTED` are the reasons where nobody was ever on the line, so they belong in neither the
+ * numerator nor the denominator of a handling rate — counting an unanswered dial as "not handled" would
+ * make an outbound rooftop look broken when it is simply dialling.
+ * `HANDED_OFF` is the canonical completed-transfer pair used everywhere else in this app. Everything
+ * else that connected is a call the AI carried to the end itself. */
+const NEVER_CONNECTED = new Set(["voicemail", "voicemail_full", "no_answer", "customer_declined", "number_not_found", "busy", "machine_ivr", "(unknown)"]);
+const HANDED_OFF = new Set(["transferred", "assistant-forwarded-call"]);
+
+function handlingTotals(c: ReportCtx): {
+  connected: number; solo: number; transferred: number; transferFailed: number; unreached: number; minutesSaved: number;
+} | null {
+  const rows = c.insights?.handling;
+  if (!rows?.length) return null;
+  let connected = 0, solo = 0, transferred = 0, transferFailed = 0, unreached = 0, minutesSaved = 0;
+  for (const r of rows) {
+    const reason = (r.reason || "").trim();
+    if (NEVER_CONNECTED.has(reason)) { unreached += r.calls; continue; }
+    connected += r.calls;
+    if (HANDED_OFF.has(reason)) { transferred += r.calls; continue; }
+    if (reason === "transfer_failed") { transferFailed += r.calls; continue; }
+    solo += r.calls;
+    // Minutes are claimed ONLY for calls a person never joined — see the note on the card.
+    minutesSaved += r.minutes;
+  }
+  return connected ? { connected, solo, transferred, transferFailed, unreached, minutesSaved } : null;
+}
+
+/* Intents that are a request to be put through, not a question. Their "resolution" is really a transfer
+ * outcome (covered by the hand-offs report), so folding them into a question-resolution rate drags it
+ * down and measures the wrong thing. */
+const ROUTING_INTENT = /talk to|speak (to|with)|live agent|human|reach |transfer|no intent|^others$/i;
+
+function resolutionSplit(c: ReportCtx): { rows: { intent: string; raised: number; resolved: number }[]; raised: number; resolved: number } | null {
+  const rows = (c.insights?.resolution ?? []).filter((r) => r.raised > 0 && !ROUTING_INTENT.test(r.intent));
+  if (!rows.length) return null;
+  return {
+    rows: rows.sort((a, b) => b.raised - a.raised),
+    raised: rows.reduce((s, r) => s + r.raised, 0),
+    resolved: rows.reduce((s, r) => s + r.resolved, 0),
+  };
+}
+
+/** Minutes as a phrase a manager reads without converting: "3h 20m", "45 min". */
+function fmtHours(mins: number): string {
+  if (mins < 60) return `${Math.round(mins)} min`;
+  const h = Math.floor(mins / 60);
+  const m = Math.round(mins % 60);
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+const anyOutcome = (c: ReportCtx) => c.outcomes.inbound ?? c.outcomes.outbound ?? null;
+const pct = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
+
+/** A row of headline numbers. Keeps every report opening the same way. */
+function Stats({ items }: { items: { label: string; value: string; sub?: string; accent?: string }[] }) {
+  return (
+    <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+      {items.map((s) => (
+        <div key={s.label} className="rounded-xl border border-[#e5e7eb] bg-white px-3.5 py-3">
+          <p className="text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">{s.label}</p>
+          <p className="mt-0.5 text-[22px] font-extrabold leading-none tabular-nums" style={{ color: s.accent ?? "#111" }}>{s.value}</p>
+          {s.sub && <p className="mt-1 text-[10.5px] leading-snug text-[#6b7280]">{s.sub}</p>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Compact data table — the shape most of these reports want. */
+function Table({ head, rows }: { head: { label: string; align?: "left" | "right" }[]; rows: React.ReactNode[][] }) {
+  if (!rows.length) return <p className="px-6 py-5 text-[12px] text-[#9ca3af]">Nothing recorded for this period.</p>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[560px]">
+        <thead className="bg-[#fafafa]">
+          <tr>{head.map((h) => <Th key={h.label} align={h.align ?? "left"}>{h.label}</Th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} className="border-t border-[#f4f4f6]">
+              {r.map((cell, j) => (
+                <td key={j} className={`px-4 py-2.5 text-[12.5px] ${head[j]?.align === "right" ? "text-right tabular-nums" : "text-left"} text-[#374151]`}>
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Horizontal ranked bars — one measure across categories. */
+function RankBars({ rows, accent = "#813fed" }: { rows: { label: string; value: number; note?: string }[]; accent?: string }) {
+  const max = Math.max(1, ...rows.map((r) => r.value));
+  if (!rows.length) return <p className="text-[12px] text-[#9ca3af]">Nothing recorded for this period.</p>;
+  return (
+    <div className="flex flex-col gap-2">
+      {rows.map((r) => (
+        <div key={r.label} className="grid grid-cols-[minmax(120px,190px)_1fr_auto] items-center gap-3">
+          <span className="truncate text-[12px] font-medium text-[#374151]">{r.label}</span>
+          <span className="h-4 overflow-hidden rounded-md bg-[#f1f2f5]">
+            <span className="block h-full rounded-md" style={{ width: `${Math.max(2, (r.value / max) * 100)}%`, background: accent }} />
+          </span>
+          <span className="text-right text-[12px] font-bold tabular-nums text-[#111]">
+            {fmtInt(r.value)}
+            {r.note && <span className="ml-1.5 font-medium text-[#9ca3af]">{r.note}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Note({ children }: { children: React.ReactNode }) {
+  return <p className="text-[11px] leading-snug text-[#9ca3af]">{children}</p>;
+}
+
+// ───────────────────────── the catalog ─────────────────────────
+
+export const REPORTS: ReportDef[] = [
+  // 1 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "appointments",
+    title: "Appointment performance",
+    question: "How many appointments did the AI book, and who is coming in?",
+    category: "Appointments",
+    who: "Sales manager · GM",
+    source: "Appointments booked by the AI (report_appointments) + the lead funnel",
+    available: (c) => c.fleet.appointments > 0 || c.namedAppts.length > 0,
+    render: (c) => {
+      const byAgent = salesAgents(c).map((a) => ({ label: `${a.report.summary.person || a.name} · ${a.dir}`, value: a.metrics.appointments }));
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Booked by the AI", value: fmtInt(c.fleet.appointments), sub: "confirmed in your CRM", accent: "#15803d" },
+              { label: "Also booked after an AI touch", value: fmtInt(c.fleet.appointmentsAssisted), sub: "your team closed these" },
+              { label: "Qualified leads", value: fmtInt(c.fleet.qualified), sub: "showed buying intent" },
+              { label: "Close rate", value: fmtRate(c.fleet.appointments, c.fleet.qualified), sub: "appointments ÷ qualified leads", accent: "#813fed" },
+            ]}
+          />
+          <Card title="Who booked them" sub="Appointments by agent">
+            <RankBars rows={byAgent} accent="#15803d" />
+          </Card>
+          <Card title="Booked appointments" sub={`${c.namedAppts.length} named customers · ${c.periodLabel}`} pad={false}>
+            <NamedApptsTable items={c.namedAppts} teamId={c.teamId} />
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 2 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "speed-to-lead",
+    title: "Speed to lead",
+    question: "How fast is a new lead getting its first touch — and does speed win appointments?",
+    category: "Speed & response",
+    who: "Sales manager · BDC",
+    source: "First-response times on new CRM leads (Sales Inbound)",
+    available: (c) => !!inboundAgent(c)?.report.speedToLead,
+    render: (c) => {
+      const stl = inboundAgent(c)!.report.speedToLead!;
+      const f = stl.openFunnel;
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Average first touch", value: stl.avg, sub: "from lead arriving to first contact", accent: "#813fed" },
+              { label: "Within 5 minutes", value: `${stl.pctWithin5}%`, sub: `${fmtInt(stl.instantlyTouched)} of ${fmtInt(stl.crmLeadsNew)} new leads` },
+              { label: "Booked from an instant touch", value: `${stl.instantApptRate}%`, sub: `${fmtInt(stl.instantAppts)} appointments`, accent: "#15803d" },
+              { label: "Caught after hours", value: fmtInt(stl.afterHoursInstant), sub: "answered outside opening hours", accent: "#0891b2" },
+            ]}
+          />
+          {f && (
+            <Card title="Does responding instantly pay?" sub="Instant first touch vs. a later follow-up, same period">
+              <div className="grid gap-5 sm:grid-cols-2">
+                {[
+                  { t: "Answered instantly", leads: f.stlLeadsHandled, appts: f.stlAppts, rate: f.stlRate, color: "#15803d" },
+                  { t: "Followed up later", leads: f.followupLeadsHandled, appts: f.followupAppts, rate: f.followupRate, color: "#9ca3af" },
+                ].map((b) => (
+                  <div key={b.t} className="rounded-xl border border-[#e5e7eb] px-4 py-3.5">
+                    <p className="text-[11.5px] font-bold text-[#374151]">{b.t}</p>
+                    <p className="mt-1 text-[26px] font-extrabold leading-none tabular-nums" style={{ color: b.color }}>{b.rate}%</p>
+                    <p className="mt-1 text-[11px] text-[#6b7280]">{fmtInt(b.appts)} appointments from {fmtInt(b.leads)} leads</p>
+                  </div>
+                ))}
+              </div>
+              <Note>{stl.note}</Note>
+            </Card>
+          )}
+          <Card title="Missed calls returned" sub="Inbound calls that went unanswered and were called back">
+            <Stats items={[{ label: "Called back", value: fmtInt(stl.missedCalledBack), sub: "recovered by the AI" }, { label: "Leads touched", value: `${stl.pctTouched}%`, sub: "of new CRM leads" }]} />
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 3 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "lead-sources",
+    title: "Lead source performance",
+    question: "Which lead sources actually turn into appointments?",
+    category: "Lead quality",
+    who: "GM · marketing",
+    source: "Leads by source, with the hand-offs and appointments each produced",
+    available: (c) => (inboundAgent(c)?.report.leadsBySource?.length ?? 0) > 0,
+    render: (c) => {
+      const rows = [...(inboundAgent(c)!.report.leadsBySource ?? [])].sort((a, b) => b.total - a.total);
+      const tot = rows.reduce((s, r) => s + r.total, 0);
+      const appts = rows.reduce((s, r) => s + r.appts, 0);
+      const best = [...rows].filter((r) => r.total >= 3).sort((a, b) => b.appts / (b.total || 1) - a.appts / (a.total || 1))[0];
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Leads", value: fmtInt(tot), sub: `${rows.length} sources` },
+              { label: "Appointments", value: fmtInt(appts), sub: "booked from these leads", accent: "#15803d" },
+              { label: "Overall booking rate", value: fmtRate(appts, tot) },
+              ...(best ? [{ label: "Best converting source", value: best.source, sub: `${pct(best.appts, best.total)}% booked`, accent: "#813fed" }] : []),
+            ]}
+          />
+          {/* No hand-offs column: `leadsBySource.handoffs` is hard-coded to 0 in the ETL (build.ts), so
+              it could only ever render a column of zeros. `engaged` is likewise a copy of `interacted`.
+              Showing only the three fields that carry real values. */}
+          <Card title="By source" sub="Leads worked → engaged → appointments booked" pad={false}>
+            <Table
+              head={[{ label: "Source" }, { label: "Total leads", align: "right" }, { label: "Engaged", align: "right" }, { label: "Appointments", align: "right" }, { label: "Booking rate", align: "right" }]}
+              rows={rows.map((r) => [
+                <span key="s" className="font-semibold text-[#111]">{r.source}</span>,
+                fmtInt(r.total),
+                fmtInt(r.interacted),
+                <b key="a" style={{ color: r.appts ? "#15803d" : "#9ca3af" }}>{fmtInt(r.appts)}</b>,
+                `${pct(r.appts, r.total)}%`,
+              ])}
+            />
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 4 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "what-customers-wanted",
+    title: "What customers asked for",
+    question: "What are people actually calling about, and what came of it?",
+    category: "Conversations",
+    who: "GM · sales manager",
+    source: "Every reviewed sales call, grouped by what the customer wanted",
+    available: (c) => !!anyOutcome(c),
+    render: (c) => (
+      <div className="flex flex-col gap-4">
+        {(["inbound", "outbound"] as EvalDirection[]).map((d) => {
+          const o = c.outcomes[d];
+          if (!o || !o.scored) return null;
+          const agent = salesAgents(c).find((a) => a.dir.toLowerCase() === d);
+          return <CallFlowCard key={d} o={o} calls={agent?.metrics.calls} title={`${d === "inbound" ? "Inbound" : "Outbound"} calls`} />;
+        })}
+      </div>
+    ),
+  },
+
+  // 5 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "appointment-leak",
+    title: "Where appointments are lost",
+    question: "Of the people who wanted to buy, where did we stop short of booking?",
+    category: "Appointments",
+    who: "Sales manager",
+    source: "Step-by-step review of every sales conversation",
+    available: (c) => !!anyOutcome(c)?.funnels.some((f) => f.key === "Appointment" && f.totalEligible > 0),
+    render: (c) => {
+      const o = (["inbound", "outbound"] as EvalDirection[]).map((d) => c.outcomes[d]).filter(Boolean).sort((a, b) => b!.funnelBase - a!.funnelBase)[0]!;
+      return (
+        <div className="flex flex-col gap-4">
+          <AppointmentLeakCard o={o} />
+          <ConversationQualityCard o={o} />
+        </div>
+      );
+    },
+  },
+
+  // 6 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "handoffs",
+    title: "Hand-offs to your team",
+    question: "When a customer asked for a person, did they actually reach one?",
+    category: "Team",
+    who: "Sales manager · receptionist",
+    source: "Transfer attempts and connections, plus call-backs requested",
+    available: (c) => !!anyOutcome(c) || c.fleet.handoffs > 0,
+    render: (c) => {
+      const o = anyOutcome(c);
+      const failed = c.fleet.transfersFailed;
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Hand-offs to your team", value: fmtInt(c.fleet.handoffs), sub: `${fmtInt(c.fleet.transfers)} transfers · ${fmtInt(c.fleet.callbacks)} call-backs` },
+              { label: "Transfers completed", value: fmtInt(c.fleet.transfers), sub: "customer reached a person", accent: "#15803d" },
+              { label: "Transfers that failed", value: fmtInt(failed), sub: "nobody picked up", accent: failed > 0 ? "#dc2626" : undefined },
+              { label: "Call-backs owed", value: fmtInt(c.fleet.callbacks), sub: "customer asked to be called", accent: "#d97706" },
+            ]}
+          />
+          {o && <HandoffsCard o={o} />}
+          {(c.metrics?.calls_by_reason?.length ?? 0) > 0 && (
+            <Card title="Why people called" sub="Reasons behind this period's calls">
+              <RankBars rows={c.metrics!.calls_by_reason.slice(0, 10).map((r) => ({ label: r.reason, value: r.calls }))} accent="#2563eb" />
+            </Card>
+          )}
+        </div>
+      );
+    },
+  },
+
+  // 7 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "missed-opportunities",
+    title: "Money on the table",
+    question: "Which interested customers have not been booked yet?",
+    category: "Lead quality",
+    who: "Sales manager · BDC",
+    source: "Leads with buying intent and no appointment, plus outbound demand that slipped",
+    available: (c) => c.warmLeads.length > 0 || (c.metrics?.missed?.length ?? 0) > 0,
+    render: (c) => {
+      const hot = c.warmLeads.filter((w) => w.tier === "hot");
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Hot leads waiting", value: fmtInt(hot.length), sub: "buying intent, no appointment", accent: "#dc2626" },
+              { label: "Warm leads", value: fmtInt(c.warmLeads.length - hot.length), sub: "worth a follow-up", accent: "#d97706" },
+              { label: "Qualified this period", value: fmtInt(c.fleet.qualified) },
+              { label: "Booked", value: fmtInt(c.fleet.appointments), sub: fmtRate(c.fleet.appointments, c.fleet.qualified) + " of qualified", accent: "#15803d" },
+            ]}
+          />
+          {c.warmLeads.length > 0 && (
+            <Card title="Work these now" sub="Buying intent on record, no appointment yet">
+              <WarmLeadChips items={c.warmLeads} teamId={c.teamId} maxHot={14} maxWarm={10} />
+            </Card>
+          )}
+          {(c.metrics?.missed?.length ?? 0) > 0 && (
+            <Card title="Demand that slipped" sub="Where outbound attempts fell away">
+              <RankBars rows={c.metrics!.missed.map((m) => ({ label: `${m.category} · ${m.channel}`, value: m.count }))} accent="#dc2626" />
+            </Card>
+          )}
+        </div>
+      );
+    },
+  },
+
+  // 8 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "follow-ups",
+    title: "Follow-up compliance",
+    question: "Is the team closing the follow-ups the AI logged?",
+    category: "Team",
+    who: "Sales manager",
+    source: "Action items created by the AI and their current state",
+    available: (c) => !!c.actionStats,
+    render: (c) => {
+      const s = c.actionStats!;
+      // `overdue` isn't a field on the item — it's derived: a due date in the past on an unfinished item.
+      const isOverdue = (i: ActionItem) => !i.completed && !!i.dueAt && Date.parse(i.dueAt) < Date.now();
+      const overdue = c.actionItems.filter(isOverdue);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Created", value: fmtInt(s.created), sub: "this period" },
+              { label: "Closed", value: fmtInt(s.completed), sub: `${pct(s.completed, s.created || 1)}% of created`, accent: "#15803d" },
+              { label: "Still open", value: fmtInt(s.open), accent: s.open > 0 ? "#d97706" : undefined },
+              { label: "Overdue", value: fmtInt(s.overdue), sub: "past their due date", accent: s.overdue > 0 ? "#dc2626" : undefined },
+            ]}
+          />
+          <Card title="Open follow-ups" sub={`${overdue.length} overdue · oldest first`} pad={false}>
+            <Table
+              head={[{ label: "Customer" }, { label: "What's needed" }, { label: "Due", align: "right" }]}
+              rows={[...c.actionItems]
+                .sort((a, b) => Number(isOverdue(b)) - Number(isOverdue(a)) || (a.dueAt || "").localeCompare(b.dueAt || ""))
+                .slice(0, 20)
+                .map((i) => [
+                  <span key="c" className="font-semibold text-[#111]">{i.customer || i.leadId || "—"}</span>,
+                  i.description || i.intent,
+                  <span key="d" style={{ color: isOverdue(i) ? "#dc2626" : "#6b7280" }}>
+                    {i.dueAt ? new Date(i.dueAt).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—"}
+                  </span>,
+                ])}
+            />
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 9 ─────────────────────────────────────────────────────────────────────────
+  {
+    id: "after-hours",
+    title: "After-hours capture",
+    question: "What would we have missed if nobody answered outside opening hours?",
+    category: "Speed & response",
+    who: "GM · owner",
+    source: "Conversations handled outside this store's working hours",
+    available: (c) => c.fleet.afterHours > 0,
+    render: (c) => {
+      const ib = inboundAgent(c);
+      const stl = ib?.report.speedToLead;
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Handled after hours", value: fmtInt(c.fleet.afterHours), sub: "conversations outside opening hours", accent: "#0891b2" },
+              { label: "Share of all conversations", value: `${pct(c.fleet.afterHours, c.fleet.conversations || 1)}%` },
+              ...(stl ? [{ label: "New leads caught instantly", value: fmtInt(stl.afterHoursInstant), sub: "answered on arrival, after hours" }] : []),
+              { label: "Staff time spent", value: "0 min", sub: "no one had to be on shift", accent: "#15803d" },
+            ]}
+          />
+          {ib && (
+            <Card title="When the calls come in" sub="Activity by hour of day">
+              <TrendBars values={ib.hourly} labels={HOURS} height={96} />
+              <Note>Bars outside your opening hours are conversations that would otherwise have gone to voicemail.</Note>
+            </Card>
+          )}
+        </div>
+      );
+    },
+  },
+
+  // 10 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "outbound-campaigns",
+    title: "Outbound campaign performance",
+    question: "Which outbound campaigns are producing appointments?",
+    category: "Outbound",
+    who: "BDC manager",
+    source: "Active outbound campaigns and how every worked lead ended",
+    available: (c) => (outboundAgent(c)?.report.activeCampaigns?.length ?? 0) > 0 || (outboundAgent(c)?.report.outcomes?.length ?? 0) > 0,
+    render: (c) => {
+      const ob = outboundAgent(c)!;
+      const camps = ob.report.activeCampaigns ?? [];
+      const slices = ob.report.outcomes ?? [];
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Leads dialled", value: fmtInt(ob.metrics.calls) },
+              { label: "Real conversations", value: fmtInt(ob.metrics.conversations), sub: `${pct(ob.metrics.conversations, ob.metrics.calls || 1)}% connected` },
+              { label: "Qualified", value: fmtInt(ob.metrics.qualified), accent: "#0891b2" },
+              { label: "Appointments", value: fmtInt(ob.metrics.appointments), accent: "#15803d" },
+            ]}
+          />
+          {camps.length > 0 && (
+            <Card title="Active campaigns" sub="Enrolled → appointments booked" pad={false}>
+              <Table
+                head={[{ label: "Campaign" }, { label: "Enrolled", align: "right" }, { label: "Appointments", align: "right" }, { label: "Rate", align: "right" }, { label: "Warm leads", align: "right" }, { label: "Opt-outs", align: "right" }]}
+                rows={[...camps].sort((a, b) => b.enrolled - a.enrolled).map((k) => [
+                  <span key="n" className="font-semibold text-[#111]">{k.name}</span>,
+                  fmtInt(k.enrolled),
+                  <b key="a" style={{ color: k.appts ? "#15803d" : "#9ca3af" }}>{fmtInt(k.appts)}</b>,
+                  `${k.apptRate}%`,
+                  fmtInt(k.warmLeads),
+                  <span key="o" style={{ color: k.optOuts ? "#dc2626" : "#9ca3af" }}>{fmtInt(k.optOuts)}</span>,
+                ])}
+              />
+            </Card>
+          )}
+          {slices.length > 0 && (
+            <Card title="Where every worked lead stands" sub="Best outcome first">
+              <RankedOutcomeTable slices={slices} />
+            </Card>
+          )}
+        </div>
+      );
+    },
+  },
+
+  // 11 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "agent-scorecard",
+    title: "Agent scorecard",
+    question: "How do the inbound and outbound agents compare?",
+    category: "Team",
+    who: "GM · sales manager",
+    source: "Per-agent funnel from leads worked through to appointments",
+    available: (c) => salesAgents(c).length > 0,
+    render: (c) => (
+      <div className="flex flex-col gap-4">
+        <Card title="Side by side" sub={c.periodLabel} pad={false}>
+          <Table
+            head={[{ label: "Agent" }, { label: "Leads", align: "right" }, { label: "Conversations", align: "right" }, { label: "Qualified", align: "right" }, { label: "Appointments", align: "right" }, { label: "Close rate", align: "right" }, { label: "Talk time", align: "right" }]}
+            rows={salesAgents(c).map((a) => [
+              <span key="n" className="font-semibold text-[#111]">{a.report.summary.person || a.name} <span className="font-normal text-[#9ca3af]">· {a.dir}</span></span>,
+              fmtInt(a.leadFunnel?.contacted ?? a.report.leadsAttempted),
+              fmtInt(a.metrics.conversations),
+              fmtInt(a.metrics.qualified),
+              <b key="a" style={{ color: a.metrics.appointments ? "#15803d" : "#9ca3af" }}>{fmtInt(a.metrics.appointments)}</b>,
+              fmtRate(a.metrics.appointments, a.metrics.qualified),
+              fmtDuration(a.metrics.talkMinutes),
+            ])}
+          />
+        </Card>
+        {salesAgents(c).map((a) => (
+          <Card key={a.id} title={`${a.report.summary.person || a.name} · ${a.dir}`} sub="Lead → conversation → qualified → appointment">
+            <StepFunnel
+              stages={[
+                { label: a.dir === "Inbound" ? "Leads reached" : "Leads dialled", value: a.leadFunnel?.contacted ?? a.report.leadsAttempted },
+                { label: "Real conversations", value: a.metrics.conversations },
+                { label: "Qualified", value: a.metrics.qualified },
+                { label: "Appointments", value: a.metrics.appointments },
+              ]}
+            />
+          </Card>
+        ))}
+      </div>
+    ),
+  },
+
+  // 12 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "activity-trend",
+    title: "Daily activity",
+    question: "Is activity trending up or down, and which days are strongest?",
+    category: "Conversations",
+    who: "Sales manager",
+    source: "Day-by-day leads touched, qualified and booked",
+    available: (c) => (salesAgents(c)[0]?.report.dayOnDay?.length ?? 0) > 0,
+    render: (c) => (
+      <div className="flex flex-col gap-4">
+        <Stats
+          items={[
+            { label: "Conversations", value: fmtInt(c.fleet.conversations), sub: c.periodLabel },
+            { label: "Calls & texts", value: fmtInt(c.fleet.calls + c.fleet.smsThreads), sub: `${fmtInt(c.fleet.calls)} calls · ${fmtInt(c.fleet.smsThreads)} texts` },
+            { label: "Talk time", value: fmtDuration(c.fleet.talkMinutes), sub: "handled by the AI" },
+            { label: "Response time", value: c.fleet.responseTimeSec != null ? fmtSecs(c.fleet.responseTimeSec) : "—", sub: "average first reply" },
+          ]}
+        />
+        {salesAgents(c).map((a) => (
+          <Card key={a.id} title={`${a.report.summary.person || a.name} · ${a.dir}`} sub="Touched → qualified → appointments, per day">
+            <TrendBars values={a.trend7} labels={["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]} highlightLast height={92} />
+          </Card>
+        ))}
+      </div>
+    ),
+  },
+
+  // 13 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "sold",
+    title: "Did it turn into cars?",
+    question: "Of the leads the AI worked, how many have actually sold?",
+    category: "Lead quality",
+    who: "GM · owner",
+    source: "Every lead the AI called, matched to its status in your CRM",
+    available: (c) => !!c.insights?.soldTotals && c.insights.soldTotals.touched > 0,
+    takeaway: (c) => {
+      const t = c.insights!.soldTotals!;
+      if (!t.sold) return `The AI worked ${fmtInt(t.touched)} leads this period. None are marked sold in the CRM yet — ${fmtInt(t.active)} are still active, so this number typically fills in over the following weeks.`;
+      return `${fmtInt(t.sold)} of the ${fmtInt(t.touched)} leads the AI worked are now marked sold in your CRM — ${pct(t.sold, t.touched)}%. Another ${fmtInt(t.active)} are still live.`;
+    },
+    render: (c) => {
+      const t = c.insights!.soldTotals!;
+      const rows = (c.insights!.sold ?? []).filter((r) => r.leads > 0).slice(0, 12);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Leads the AI worked", value: fmtInt(t.touched), sub: "called at least once this period" },
+              { label: "Now sold", value: fmtInt(t.sold), sub: `${pct(t.sold, t.touched)}% of leads worked`, accent: "#15803d" },
+              { label: "Still active", value: fmtInt(t.active), sub: "in play — keep working these", accent: "#0891b2" },
+              { label: "Closed out", value: fmtInt(t.lost), sub: "duplicate, bad or no intent", accent: "#9ca3af" },
+            ]}
+          />
+          <Card title="Where every worked lead stands today" sub="Current status in your CRM, biggest group first">
+            <RankBars rows={rows.map((r) => ({ label: r.label, value: r.leads }))} accent="#813fed" />
+            <Note>
+              Status is read live from your CRM, so a lead the AI called last month and your team sold last
+              week counts here. Sales take time — expect this to keep filling in after the period closes.
+            </Note>
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 14 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "vehicles",
+    title: "Vehicles customers are asking for",
+    question: "Which makes and models are the leads we spoke to actually shopping?",
+    category: "Lead quality",
+    who: "GM · inventory manager",
+    source: "Vehicle-of-interest records on the leads the AI called",
+    available: (c) => (c.insights?.vehicles?.length ?? 0) > 0,
+    takeaway: (c) => {
+      const v = c.insights!.vehicles!;
+      const top = v[0];
+      const total = v.reduce((s, x) => s + x.leads, 0);
+      return `${top.make} ${top.model} is the most-wanted vehicle among the leads the AI spoke to — ${fmtInt(top.leads)} of ${fmtInt(total)} recorded interests (${pct(top.leads, total)}%). The top three account for ${pct(v.slice(0, 3).reduce((s, x) => s + x.leads, 0), total)}%.`;
+    },
+    render: (c) => {
+      const v = c.insights!.vehicles!;
+      const total = v.reduce((s, x) => s + x.leads, 0);
+      const known = v.reduce((s, x) => s + x.newCount + x.usedCount, 0);
+      const newN = v.reduce((s, x) => s + x.newCount, 0);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Vehicles of interest", value: fmtInt(total), sub: `${v.length} distinct models` },
+              { label: "Most wanted", value: `${v[0].make} ${v[0].model}`, sub: `${fmtInt(v[0].leads)} interested leads`, accent: "#813fed" },
+              ...(known > 0
+                ? [{ label: "New vs used", value: `${pct(newN, known)}% new`, sub: `where recorded (${fmtInt(known)} of ${fmtInt(total)})` }]
+                : []),
+            ]}
+          />
+          <Card title="Demand by model" sub="Leads that named this vehicle — stock against this list" pad={false}>
+            <Table
+              head={[{ label: "Vehicle" }, { label: "Interested leads", align: "right" }, { label: "Share", align: "right" }, { label: "Years", align: "right" }, { label: "New / used", align: "right" }]}
+              rows={v.map((x) => [
+                <span key="v" className="font-semibold text-[#111]">{x.make} {x.model}</span>,
+                <b key="l">{fmtInt(x.leads)}</b>,
+                `${pct(x.leads, total)}%`,
+                x.years || "—",
+                x.newCount + x.usedCount > 0 ? `${fmtInt(x.newCount)} / ${fmtInt(x.usedCount)}` : "—",
+              ])}
+            />
+          </Card>
+          <Note>
+            Taken from the vehicle-of-interest record your CRM holds against each lead. New/used is only
+            recorded on some of them, so that column covers the ones where it is known.
+          </Note>
+        </div>
+      );
+    },
+  },
+
+  // 15 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "transfer-routing",
+    title: "Where transfers go",
+    question: "When the AI puts a customer through, which department picks up?",
+    category: "Team",
+    who: "Sales manager · receptionist",
+    source: "Every transfer the AI placed, by department and destination",
+    available: (c) => (c.insights?.routing?.length ?? 0) > 0,
+    takeaway: (c) => {
+      const r = c.insights!.routing!;
+      const total = r.reduce((s, x) => s + x.transfers, 0);
+      const top = r[0];
+      return `${fmtInt(total)} transfers were placed. Most went to ${top.department} (${pct(top.transfers, total)}%). If a department here looks busier than you expect, that is where your phone load actually is.`;
+    },
+    render: (c) => {
+      const r = c.insights!.routing!;
+      const total = r.reduce((s, x) => s + x.transfers, 0);
+      const byDept = Object.entries(
+        r.reduce<Record<string, number>>((acc, x) => ({ ...acc, [x.department]: (acc[x.department] ?? 0) + x.transfers }), {}),
+      ).sort((a, b) => b[1] - a[1]);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Transfers placed", value: fmtInt(total), sub: c.periodLabel },
+              { label: "Departments involved", value: fmtInt(byDept.length) },
+              { label: "Busiest", value: byDept[0][0], sub: `${pct(byDept[0][1], total)}% of transfers`, accent: "#2563eb" },
+            ]}
+          />
+          <Card title="By department" sub="Where the calls were sent">
+            <RankBars rows={byDept.map(([d, n]) => ({ label: d, value: n }))} accent="#2563eb" />
+          </Card>
+          <Card title="Detail" sub="Department and how the destination was addressed" pad={false}>
+            <Table
+              head={[{ label: "Department" }, { label: "Destination type" }, { label: "Transfers", align: "right" }, { label: "Share", align: "right" }]}
+              rows={r.map((x) => [
+                <span key="d" className="font-semibold text-[#111]">{x.department}</span>,
+                x.destinationType,
+                fmtInt(x.transfers),
+                `${pct(x.transfers, total)}%`,
+              ])}
+            />
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 16 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "texts",
+    title: "Text message performance",
+    question: "Are customers replying to our texts?",
+    category: "Conversations",
+    who: "BDC manager",
+    source: "Text conversations handled by the AI and the replies they drew",
+    available: (c) => (c.insights?.sms?.threads ?? 0) > 0,
+    takeaway: (c) => {
+      const s = c.insights!.sms!;
+      return `${fmtInt(s.repliedThreads)} of ${fmtInt(s.threads)} text conversations got a reply — ${pct(s.repliedThreads, s.threads)}%. ${fmtInt(s.outbound)} messages went out and ${fmtInt(s.inbound)} came back.`;
+    },
+    render: (c) => {
+      const s = c.insights!.sms!;
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Conversations", value: fmtInt(s.threads), sub: "text threads handled" },
+              { label: "Replied", value: `${pct(s.repliedThreads, s.threads)}%`, sub: `${fmtInt(s.repliedThreads)} customers wrote back`, accent: "#15803d" },
+              { label: "Messages sent", value: fmtInt(s.outbound) },
+              { label: "Messages received", value: fmtInt(s.inbound), accent: "#0891b2" },
+            ]}
+          />
+          <Card title="Reply rate" sub="Threads that drew at least one customer reply">
+            <RankBars
+              rows={[
+                { label: "Replied", value: s.repliedThreads },
+                { label: "No reply", value: Math.max(0, s.threads - s.repliedThreads) },
+              ]}
+              accent="#0891b2"
+            />
+            <Note>
+              A reply means a real person wrote back — the strongest signal a text campaign is landing.
+              Threads with no reply are worth a different opening message or a call instead.
+            </Note>
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 17 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "coverage",
+    title: "When the calls come in",
+    question: "What hours and days is the phone actually busy?",
+    category: "Speed & response",
+    who: "GM · sales manager",
+    source: "Inbound calls by hour and weekday, in your store's timezone",
+    available: (c) => (c.insights?.hours?.length ?? 0) > 0,
+    takeaway: (c) => {
+      const h = c.insights!.hours!;
+      const total = h.reduce((s, x) => s + x.calls, 0);
+      const byHour = new Map<number, number>();
+      h.forEach((x) => byHour.set(x.hour, (byHour.get(x.hour) ?? 0) + x.calls));
+      const peak = [...byHour.entries()].sort((a, b) => b[1] - a[1])[0];
+      const early = h.filter((x) => x.hour < 8 || x.hour >= 19).reduce((s, x) => s + x.calls, 0);
+      return `Your busiest hour is ${hourLabel(peak[0])}. ${fmtInt(early)} of ${fmtInt(total)} calls (${pct(early, total)}%) landed before 8am or after 7pm — outside a typical shift.`;
+    },
+    render: (c) => {
+      const h = c.insights!.hours!;
+      const byHour = new Map<number, number>();
+      h.forEach((x) => byHour.set(x.hour, (byHour.get(x.hour) ?? 0) + x.calls));
+      const hours = Array.from({ length: 24 }, (_, i) => byHour.get(i) ?? 0);
+      const max = Math.max(1, ...h.map((x) => x.calls));
+      const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      const cell = (d: number, hr: number) => h.find((x) => x.weekday === d + 1 && x.hour === hr)?.calls ?? 0;
+      return (
+        <div className="flex flex-col gap-4">
+          <Card title="Calls by hour of day" sub="All weekdays combined">
+            <TrendBars values={hours.slice(6, 21)} labels={Array.from({ length: 15 }, (_, i) => hourLabel(i + 6))} height={100} />
+          </Card>
+          <Card title="Hour by weekday" sub="Darker means busier — plan cover around the dark blocks">
+            <div className="overflow-x-auto">
+              <table className="min-w-[560px] border-separate" style={{ borderSpacing: 2 }}>
+                <thead>
+                  <tr>
+                    <th />
+                    {Array.from({ length: 15 }, (_, i) => (
+                      <th key={i} className="pb-1 text-[9px] font-semibold text-[#9ca3af]">{i + 6}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {days.map((d, di) => (
+                    <tr key={d}>
+                      <td className="pr-2 text-right text-[10.5px] font-semibold text-[#6b7280]">{d}</td>
+                      {Array.from({ length: 15 }, (_, i) => {
+                        const n = cell(di, i + 6);
+                        return (
+                          <td key={i} title={`${d} ${hourLabel(i + 6)} · ${n} calls`}
+                              className="h-6 w-6 rounded text-center text-[9px] font-bold"
+                              style={{ background: n ? `rgba(129,63,237,${0.12 + 0.78 * (n / max)})` : "#f4f5f7", color: n / max > 0.55 ? "#fff" : "#6b7280" }}>
+                            {n || ""}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Note>Hours shown in your store&apos;s local time. Use this to line staffing up with the real call pattern.</Note>
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 18 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "objections",
+    title: "Why leads don't convert",
+    question: "What do customers push back on, and why do leads end?",
+    category: "Conversations",
+    who: "Sales manager · trainer",
+    source: "Objections raised by customers during calls",
+    // report_objections holds two kinds of row: `theme` (what customers actually pushed back on) and
+    // `outbound_outcome` (dispositions). Only the themes are objections.
+    available: (c) => objectionRows(c).rows.length > 0,
+    takeaway: (c) => {
+      const { rows, kind } = objectionRows(c);
+      const total = rows.reduce((s, x) => s + x.count, 0);
+      const top = rows[0];
+      return kind === "theme"
+        ? `"${top.label}" is what your customers push back on most — ${fmtInt(top.count)} of ${fmtInt(total)} recorded (${pct(top.count, total)}%). Worth building an answer into your team's script.`
+        : `"${top.label}" is the most common reason a lead ended — ${fmtInt(top.count)} of ${fmtInt(total)} (${pct(top.count, total)}%). The reasons below are where outreach stops converting.`;
+    },
+    render: (c) => {
+      const { rows, kind } = objectionRows(c);
+      const total = rows.reduce((s, x) => s + x.count, 0);
+      const theme = kind === "theme";
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: theme ? "Objections recorded" : "Leads ended", value: fmtInt(total) },
+              { label: "Distinct reasons", value: fmtInt(rows.length) },
+              { label: "Most common", value: rows[0].label, accent: "#d97706" },
+            ]}
+          />
+          <Card
+            title={theme ? "What customers push back on" : "Why leads ended"}
+            sub={theme ? "Times raised across this period's calls" : "Recorded outcome on outbound leads that stopped"}
+          >
+            <RankBars rows={rows.map((x) => ({ label: x.label, value: x.count, note: `${pct(x.count, total)}%` }))} accent="#d97706" />
+            <Note>
+              {theme
+                ? "Each of these is a coaching opportunity — the top one or two are where a better answer moves the most deals."
+                : "Opt-outs and wrong numbers point at list quality; \u201cnot interested\u201d and \u201calready purchased\u201d point at timing. Both are fixable before the next campaign."}
+            </Note>
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 19 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "appt-status",
+    title: "Did the appointments show?",
+    question: "Of the appointments booked, how many actually turned up?",
+    category: "Appointments",
+    who: "Sales manager",
+    source: "Appointment records and their current status",
+    available: (c) => apptTotals(c).booked > 0,
+    takeaway: (c) => {
+      const t = apptTotals(c);
+      const settled = t.showed + t.no_show;
+      if (!settled) return `${fmtInt(t.booked)} appointments were booked and ${fmtInt(t.upcoming)} are still to come, so show rate fills in as those dates pass.`;
+      return `${fmtInt(t.showed)} of the ${fmtInt(settled)} appointments whose date has passed actually showed — ${pct(t.showed, settled)}%. ${fmtInt(t.no_show)} did not turn up${t.cancelled ? ` and ${fmtInt(t.cancelled)} cancelled ahead of time` : ""}.`;
+    },
+    render: (c) => {
+      const t = apptTotals(c);
+      const settled = t.showed + t.no_show;
+      const rows = (c.metrics?.appt_status ?? []).filter((r) => r.booked > 0);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Booked", value: fmtInt(t.booked), sub: c.periodLabel },
+              { label: "Showed up", value: fmtInt(t.showed), sub: settled ? `${pct(t.showed, settled)}% of those due` : "none due yet", accent: "#15803d" },
+              { label: "No-shows", value: fmtInt(t.no_show), accent: t.no_show > 0 ? "#dc2626" : undefined },
+              { label: "Still to come", value: fmtInt(t.upcoming), sub: "dates in the future", accent: "#0891b2" },
+            ]}
+          />
+          <Card title="Outcome of every booking" sub="Cancellations are counted separately from no-shows">
+            <RankBars
+              rows={[
+                { label: "Showed up", value: t.showed },
+                { label: "No-show", value: t.no_show },
+                { label: "Cancelled", value: t.cancelled },
+                { label: "Still upcoming", value: t.upcoming },
+              ].filter((r) => r.value > 0)}
+              accent="#15803d"
+            />
+          </Card>
+          {rows.length > 1 && (
+            <Card title="By how it was booked" sub="Phone call vs text" pad={false}>
+              <Table
+                head={[{ label: "Booked via" }, { label: "Booked", align: "right" }, { label: "Showed", align: "right" }, { label: "No-show", align: "right" }, { label: "Show rate", align: "right" }]}
+                rows={rows.map((r) => [
+                  <span key="v" className="font-semibold text-[#111]">{r.booked_via || "—"}</span>,
+                  fmtInt(r.booked),
+                  fmtInt(r.showed),
+                  fmtInt(r.no_show),
+                  r.showed + r.no_show ? `${pct(r.showed, r.showed + r.no_show)}%` : "—",
+                ])}
+              />
+            </Card>
+          )}
+        </div>
+      );
+    },
+  },
+
+  // 20 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "best-calls",
+    title: "Best conversations",
+    question: "Which calls went really well — worth listening to?",
+    category: "Conversations",
+    who: "Sales manager · trainer",
+    source: "The period's standout booked calls",
+    available: (c) => (c.metrics?.highlights?.length ?? 0) > 0,
+    takeaway: (c) => `${fmtInt(c.metrics!.highlights!.length)} calls stood out this period — these are the ones worth playing back to the team.`,
+    render: (c) => (
+      <Card title="Worth a listen" sub="Standout calls that ended in a booking" pad={false}>
+        <Table
+          head={[{ label: "What happened" }, { label: "Direction" }, { label: "When", align: "right" }]}
+          rows={c.metrics!.highlights!.slice(0, 25).map((h) => [
+            <span key="t" className="text-[#374151]">{h.title || "—"}</span>,
+            <span key="d" className="text-[#9ca3af]">{h.direction || "—"}</span>,
+            h.occurred_on ?? "",
+          ])}
+        />
+      </Card>
+    ),
+  },
+
+  // 21 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "end-to-end",
+    title: "Handled without your team",
+    question: "How many calls did the AI finish on its own — and how much phone time did that save?",
+    category: "Team",
+    who: "GM · owner",
+    source: "Every sales call, by how it ended and how long it ran",
+    available: (c) => handlingTotals(c) !== null,
+    takeaway: (c) => {
+      const h = handlingTotals(c)!;
+      if (!h.connected) return "No connected sales calls in this period yet.";
+      return `${fmtInt(h.solo)} of ${fmtInt(h.connected)} connected calls (${pct(h.solo, h.connected)}%) were finished by the AI without anyone on your team picking up — ${fmtHours(h.minutesSaved)} of phone time your staff did not spend. The other ${fmtInt(h.transferred)} reached a person.`;
+    },
+    render: (c) => {
+      const h = handlingTotals(c)!;
+      const shiftDays = h.minutesSaved / 480; // an 8-hour shift
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Handled end to end", value: `${pct(h.solo, h.connected)}%`, sub: `${fmtInt(h.solo)} of ${fmtInt(h.connected)} connected calls`, accent: "#15803d" },
+              { label: "Phone time saved", value: fmtHours(h.minutesSaved), sub: shiftDays >= 0.5 ? `about ${shiftDays.toFixed(1)} full shifts` : "of staff time on the phone", accent: "#813fed" },
+              { label: "Needed a person", value: fmtInt(h.transferred), sub: `${pct(h.transferred, h.connected)}% were put through`, accent: "#2563eb" },
+              { label: "Never connected", value: fmtInt(h.unreached), sub: "voicemail, no answer or declined" },
+            ]}
+          />
+
+          <Card title="What happened on every call" sub="Connected calls only — the ones where someone was actually on the line">
+            <RankBars
+              rows={[
+                { label: "AI finished the call", value: h.solo, note: `${pct(h.solo, h.connected)}%` },
+                { label: "Put through to a person", value: h.transferred, note: `${pct(h.transferred, h.connected)}%` },
+                ...(h.transferFailed ? [{ label: "Transfer didn't connect", value: h.transferFailed }] : []),
+              ]}
+              accent="#15803d"
+            />
+            <Note>
+              &ldquo;Handled end to end&rdquo; means the call ended without being transferred to your team. Time
+              saved is the talk time on those calls — the minutes someone at the store would otherwise have
+              been on the phone. Calls that reached a person are excluded entirely, even though the AI did
+              the intake first, so this figure is deliberately on the low side.
+            </Note>
+          </Card>
+
+          {resolutionSplit(c) && (
+            <Card title="Did customers get their answer?" sub="Questions raised on calls, and how many were resolved">
+              <div className="mb-3">
+                <Stats
+                  items={[
+                    { label: "Question resolution rate", value: `${pct(resolutionSplit(c)!.resolved, resolutionSplit(c)!.raised)}%`, sub: `${fmtInt(resolutionSplit(c)!.resolved)} of ${fmtInt(resolutionSplit(c)!.raised)} questions answered`, accent: "#0891b2" },
+                    { label: "Questions asked", value: fmtInt(resolutionSplit(c)!.raised), sub: "excludes plain requests to reach a person" },
+                  ]}
+                />
+              </div>
+              <Table
+                head={[{ label: "What they asked about" }, { label: "Times asked", align: "right" }, { label: "Answered", align: "right" }, { label: "Rate", align: "right" }]}
+                rows={resolutionSplit(c)!.rows.map((r) => [
+                  <span key="i" className="font-semibold text-[#111]">{r.intent}</span>,
+                  fmtInt(r.raised),
+                  <b key="r" style={{ color: r.resolved ? "#15803d" : "#9ca3af" }}>{fmtInt(r.resolved)}</b>,
+                  <span key="p" style={{ color: r.raised >= 3 && r.resolved / r.raised < 0.34 ? "#dc2626" : "#374151" }}>
+                    {pct(r.resolved, r.raised)}%
+                  </span>,
+                ])}
+              />
+              <Note>
+                A low rate on a question your customers ask often is the most useful line here — it is
+                usually a missing answer the AI can be taught, not a lost customer.
+              </Note>
+            </Card>
+          )}
+        </div>
+      );
+    },
+  },
+];
+
+const hourLabel = (h: number) => (h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`);
+
+const HOURS = ["8a", "9a", "10a", "11a", "12p", "1p", "2p", "3p", "4p", "5p", "6p", "7p"];
+
+/** Reports that have live data for this rooftop + window, in catalog order. */
+export function availableReports(c: ReportCtx): ReportDef[] {
+  return REPORTS.filter((r) => {
+    try {
+      return r.available(c);
+    } catch {
+      return false; // a malformed feed must never take the whole library down
+    }
+  });
+}
+
+export const REPORT_CATEGORIES = ["Appointments", "Speed & response", "Lead quality", "Conversations", "Team", "Outbound"] as const;
+
+export { Stats as ReportStats, Table as ReportTable, RankBars as ReportRankBars, MetricTile };

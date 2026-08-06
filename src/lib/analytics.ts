@@ -16,7 +16,7 @@ import { track as vercelTrack } from "@vercel/analytics";
  *   • Vercel only accepts flat string | number | boolean | null props (no nesting).
  * ───────────────────────────────────────────────────────────────────────────── */
 
-export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting";
+export type ReportTab = "overview" | "appointments" | "calls" | "actions" | "customers" | "agents" | "campaigns" | "reporting" | "library";
 
 /** The full event catalogue: event name → its property shape. Add new events here. */
 export interface ReportEvents {
@@ -32,6 +32,8 @@ export interface ReportEvents {
   appointments_drilldown_opened: { tab: ReportTab; team_id: string; agent?: string };
   appointments_drilldown_result: { team_id: string; status: "ok" | "empty" | "error"; count: number };
   agent_opened: { team_id: string; agent: string }; // overview leaderboard → agent report
+  library_report_opened: { team_id: string; report: string }; // report library → one report opened
+  library_report_requested: { team_id: string }; // custom-report request submitted
   agent_switched: { team_id: string; agent: string }; // agents-tab picker
   agent_detail_toggled: { team_id: string; agent: string; shown: boolean }; // show/hide detailed metrics
   campaign_opened: { team_id: string; campaign_id: string };

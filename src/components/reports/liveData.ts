@@ -498,6 +498,10 @@ export interface ReportMetrics {
   calls_by_reason: Array<{ direction: string | null; reason: string; calls: number; booked: number }>;
   missed: Array<{ service_type: string | null; channel: string; category: string; count: number }>;
   highlights: Array<{ direction: string | null; service_type: string | null; use_case: string | null; score: number | null; title: string | null; occurred_on: string | null }>;
+  // Also pushed by the ETL and returned by GET /api/reports/metrics — carried through for the report
+  // library (show-rate and objection reports). Absent sections degrade to [] like the rest.
+  appt_status: Array<{ service_type: string | null; booked_via: string | null; booked: number; showed: number; no_show: number; cancelled: number; upcoming: number }>;
+  objections: Array<{ kind: string; label: string; channel: string | null; count: number }>;
 }
 
 export async function fetchReportMetrics(teamId: string, spyneToken?: string): Promise<ReportMetrics | null> {
@@ -515,6 +519,8 @@ export async function fetchReportMetrics(teamId: string, spyneToken?: string): P
       calls_by_reason: Array.isArray(j.calls_by_reason) ? j.calls_by_reason : [],
       missed: Array.isArray(j.missed) ? j.missed : [],
       highlights: Array.isArray(j.highlights) ? j.highlights : [],
+      appt_status: Array.isArray(j.appt_status) ? j.appt_status : [],
+      objections: Array.isArray(j.objections) ? j.objections : [],
     };
   } catch {
     return null;

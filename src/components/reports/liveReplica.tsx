@@ -742,6 +742,9 @@ export interface LiveOverviewProps {
   onViewActionItems: () => void;
   onViewConversations: () => void;
   onBackToTraining?: () => void; // legacy hook; Training is no longer surfaced, so unused on Live
+  /* Conversation-outcome panels (eval pipeline, SALES only). Omitted / null on a Service-scoped report,
+   * which drops the "live.outcomes" section entirely rather than showing sales evals under Service. */
+  outcomes?: React.ReactNode;
   headerControls?: React.ReactNode; // date filter + customize, rendered inside the hero (this IS the header)
   ctrl?: CustomizeCtrl; // Customize: hide + reorder the sections below (omit → default order, all shown)
   serviceMode: boolean; // department SKIN, from the URL serviceType scope — NOT inferred from the agent
@@ -755,6 +758,9 @@ export const LIVE_SECTIONS: { id: string; label: string }[] = [
   { id: "live.hero", label: "Hero metric tiles" },
   { id: "live.agents", label: "Agent performance" },
   { id: "live.funnel", label: "Lead-to-sale funnel" },
+  // Sales-only (conversation evals are requested for agentType=sales); on a Service-scoped report the
+  // node is absent, so the section silently drops out of the layout instead of rendering empty.
+  { id: "live.outcomes", label: "Where your calls went" },
   { id: "live.hotleads", label: "Hot Leads" },
   { id: "live.appts", label: "Appointments" },
   { id: "live.actions", label: "Action Items" },
@@ -766,7 +772,7 @@ const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
 
 export function LiveOverview({
   account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
-  onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, headerControls, ctrl, serviceMode,
+  onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, outcomes, headerControls, ctrl, serviceMode,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
@@ -789,6 +795,8 @@ export function LiveOverview({
         <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />
       </div>
     ),
+    // Sales-only, and only once it has something to say (the section renderer skips undefined ids).
+    ...(outcomes ? { "live.outcomes": outcomes } : {}),
     "live.hotleads": <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />,
     "live.appts": <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
     "live.actions": <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,

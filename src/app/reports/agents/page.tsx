@@ -37,6 +37,7 @@ import { useDateRange, useDept, reportNavQuery } from "@/components/reports/date
 import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
+import { useOutcomes, OutcomeKpis, CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
@@ -202,6 +203,28 @@ function AgentReportsView() {
   // they're shown only on outbound agents.
   const agentDir = inbound ? "inbound" : "outbound";
   const agentSvc = a.id.startsWith("service") ? "service" : "sales";
+  /* Conversation-outcome evals for THIS agent — SALES only (the eval pipeline's sales cohort is the one
+   * this report models), scoped to this agent's direction. A Service agent skips the fetch entirely, so
+   * its report never shows sales evals. Independent of the main feed: an eval outage just hides the
+   * panels. */
+  const outcomesFeed = useOutcomes({
+    teamId,
+    enterpriseId,
+    dirs: [agentDir],
+    bucket: custom ? undefined : bucket,
+    start: custom?.start,
+    end: custom ? addDay(custom.end) : undefined,
+    spyneToken,
+    spyneEnv,
+    enabled: hasTeam && agentSvc === "sales",
+  });
+  const outcomes = outcomesFeed.data[agentDir] ?? null;
+  // Drives the swap below: when the scorer has this agent's window, its flow REPLACES the older
+  // intent/outcome table; otherwise that table stays as the fallback.
+  const hasOutcomes = !!outcomes && outcomes.scored > 0;
+  /* The rebuilt page is for the two SALES agents only. Every restructured block below is gated on this,
+   * so a Service agent renders exactly the page it always did — no reordering, no removed cards. */
+  const isSales = agentSvc === "sales";
   // Match the agent's direction AND service — a Sales agent must not show Service wins/misses and vice-versa
   // (RETCONVAI-4150). KEEP rows whose direction/service_type is null/blank (legacy rows before 0020, or
   // rooftops that don't populate it) so real wins never silently vanish from the card.
@@ -931,13 +954,20 @@ function AgentReportsView() {
             </div>
           </div>
 
-          {/* day-on-day chart (full width) */}
-          <Card title="Day-on-day" sub="Touched → Qualified → Appointments, per day">
-            <DayTrend points={r.dayOnDay} />
-          </Card>
+          {/* Day-on-day sits with the other trends for a SALES agent (see the Trends block lower down) —
+              on Service it stays here, where it has always been. */}
+          {!isSales && (
+            <Card title="Day-on-day" sub="Touched → Qualified → Appointments, per day">
+              <DayTrend points={r.dayOnDay} />
+            </Card>
+          )}
 
-          {/* ── conversations & outcomes ── */}
-          {inbound && (r.intentOutcomes?.length ?? 0) > 0 && (
+          {/* ── conversations & outcomes ──
+              SUPERSEDED by the eval-pipeline flow below, which answers the same question ("what did the
+              customer want, and how was it handled") with the intent → outcome drill-down instead of a
+              flat table. Kept as the FALLBACK for a rooftop the scorer hasn't reached yet, or an outage —
+              those rooftops would otherwise lose the section entirely. */}
+          {inbound && (r.intentOutcomes?.length ?? 0) > 0 && !hasOutcomes && (
             <>
               <SectionLabel hint="call conversations · totals tie to the funnel">Conversations &amp; outcomes</SectionLabel>
               <Card
@@ -946,6 +976,31 @@ function AgentReportsView() {
               >
                 <IntentOutcomeTable rows={r.intentOutcomes!} totalConversations={leadConnected} />
               </Card>
+            </>
+          )}
+
+          {/* ── THE CONVERSATION STORY (sales agents only — Service is untouched) ──
+              The spine of the rebuilt sales page, in the order a dealer reads it:
+                1. what came out of the conversations   (headline numbers)
+                2. what each customer wanted, and what happened   (the flow)
+                3. where appointments are won and lost   (the leak funnel)
+                4. what happened when they asked for a person   (hand-offs)
+                5. how interested those customers were
+              Tool plumbing, the missed-better-outcome count and the AI/system evidence badges are
+              deliberately absent — this page is read by the dealer. */}
+          {isSales && hasOutcomes && outcomes && (
+            <>
+              <SectionLabel hint={periodLabel}>What came out of the conversations</SectionLabel>
+              <OutcomeKpis o={outcomes} />
+              <CallFlowCard
+                o={outcomes}
+                calls={m.calls}
+                title={`What your ${inbound ? "callers" : "customers"} wanted`}
+                sub={`Every conversation ${r.summary.person || a.name} had, and what came of it · click a row to drill in`}
+              />
+              <AppointmentLeakCard o={outcomes} />
+              <HandoffsCard o={outcomes} />
+              <ConversationQualityCard o={outcomes} calls={m.calls} />
             </>
           )}
 
@@ -1087,23 +1142,34 @@ function AgentReportsView() {
             </div>
           )}
 
-          <SectionLabel>Quality &amp; trend</SectionLabel>
+          <SectionLabel>{isSales ? "Trends" : "Quality & trend"}</SectionLabel>
 
-          {/* quality health — only the live-backed cells; nothing fabricated, no placeholders */}
-          <Card title="Conversation quality" sub="From live calls — the metrics we can measure today">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} />
-              <QCell label="Avg handle time" value={a.quality.handleTime} />
-              <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
-              {showTransferQuality && tq && (
-                <QCell
-                  label={a.quality.fourthLabel}
-                  value={fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)}
-                  status={tq.success_rate! >= 0.8 ? "green" : tq.success_rate! >= 0.6 ? "amber" : "red"}
-                />
-              )}
-            </div>
-          </Card>
+          {/* Service keeps its quality card verbatim. On a SALES agent the same ground is covered better
+              by the conversation panels above (connect rate lives in hand-offs, interest in the quality
+              card), so this drops out rather than repeating half of it in different words. */}
+          {!isSales && (
+            <Card title="Conversation quality" sub="From live calls — the metrics we can measure today">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} />
+                <QCell label="Avg handle time" value={a.quality.handleTime} />
+                <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
+                {showTransferQuality && tq && (
+                  <QCell
+                    label={a.quality.fourthLabel}
+                    value={fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)}
+                    status={tq.success_rate! >= 0.8 ? "green" : tq.success_rate! >= 0.6 ? "amber" : "red"}
+                  />
+                )}
+              </div>
+            </Card>
+          )}
+
+          {/* Sales: day-on-day joins the other two trends here, so every "over time" view is together. */}
+          {isSales && (
+            <Card title="Day by day" sub="Customers reached → buying intent → appointments">
+              <DayTrend points={r.dayOnDay} />
+            </Card>
+          )}
 
           {/* hourly + 7-day trend */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
