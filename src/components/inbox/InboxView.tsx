@@ -215,6 +215,7 @@ const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 1
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
 const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Svg>;
 const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></Svg>;
+const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Root
@@ -446,7 +447,7 @@ function Inbox() {
   return (
     <div className="flex h-[100dvh] flex-col bg-white" style={{ color: C.dark }}>
       {/* Header bar */}
-      <header className="flex shrink-0 items-center justify-between border-b bg-white px-8 py-3" style={{ borderColor: C.border }}>
+      <header className="flex shrink-0 items-center justify-between gap-2 border-b bg-white px-4 py-3 lg:px-8" style={{ borderColor: C.border }}>
         <div className="flex items-center gap-2.5">
           <span className="flex size-7 items-center justify-center rounded-lg text-white" style={{ background: C.primary }}>
             <IconList size={16} />
@@ -486,8 +487,8 @@ function Inbox() {
 
       {/* Two panes */}
       <div className="flex min-h-0 flex-1">
-        {/* LEFT — list */}
-        <aside className="flex w-[360px] shrink-0 flex-col border-r bg-white" style={{ borderColor: C.border }}>
+        {/* LEFT — list. Mobile is single-pane: the list is full-width and hides once a customer is opened. */}
+        <aside className={`${selected ? "hidden lg:flex" : "flex"} w-full shrink-0 flex-col border-r bg-white lg:w-[360px]`} style={{ borderColor: C.border }}>
           <div className="relative flex h-[68px] shrink-0 items-center px-4">
             <div className="flex flex-1 items-center gap-2.5 rounded-[5px] border px-4 py-2.5"
               style={{ borderColor: showSuggest ? C.primary : C.border }}>
@@ -566,13 +567,15 @@ function Inbox() {
           </div>
         </aside>
 
-        {/* MIDDLE — chat (messages + calls only; milestones live in the right panel) */}
-        <section className="flex min-w-0 flex-1 flex-col" style={{ background: C.bg }}>
+        {/* MIDDLE — chat. Mobile single-pane: shown only once a customer is opened. */}
+        <section className={`${selected ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`} style={{ background: C.bg }}>
           {selected ? (
             <ThreadPane
               key={selected.customer_id}
               auth={auth}
               customer={selected}
+              onBack={() => setSelected(null)}
+              onDetails={() => setDetailsOpen(true)}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-[13px]" style={{ color: C.sub }}>
@@ -581,7 +584,7 @@ function Inbox() {
           )}
         </section>
 
-        {/* RIGHT — lead status, engagement, journey timeline, appointments, action items (guide §7C-E) */}
+        {/* RIGHT — lead details. Hidden < lg (mobile opens it via the header ⓘ → DetailsDrawer). */}
         {selected && (
           <RightPanel key={`rp-${selected.customer_id}`} auth={auth} customer={selected} onExpand={() => setDetailsOpen(true)} />
         )}
@@ -700,7 +703,7 @@ type ThreadNode =
 const EVENT_GRADIENT =
   "linear-gradient(90deg, rgba(91,109,246,0.10) 1%, rgba(127,106,242,0.10) 23%, rgba(182,81,215,0.10) 66%, rgba(232,62,84,0.10) 86%, rgba(237,137,57,0.10) 113%)";
 
-function ThreadPane({ auth, customer }: { auth: InboxAuth; customer: InboxCustomer }) {
+function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   // §7A purple summary box — persona.conversationMemory.summaryShort, shown at the top of the chat.
   const [summary, setSummary] = useState<string>("");
@@ -876,18 +879,28 @@ function ThreadPane({ auth, customer }: { auth: InboxAuth; customer: InboxCustom
     <>
       {/* header */}
       <div className="shrink-0 border-b bg-white px-5 py-5 shadow-[0px_1px_1px_rgba(0,0,0,0.06)]" style={{ borderColor: C.border }}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <span className="flex size-8 items-center justify-center rounded-full text-[14px] font-medium text-white" style={{ background: avatarColor(customer.customer_id || customer.customer_name) }}>
+        <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-center gap-2.5">
+            {/* mobile: back to the list (single-pane on small screens) */}
+            {onBack && (
+              <button onClick={onBack} title="Back to list" className="-ml-1 shrink-0 lg:hidden" style={{ color: C.sub }}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+              </button>
+            )}
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-full text-[14px] font-medium text-white" style={{ background: avatarColor(customer.customer_id || customer.customer_name) }}>
               {initials(customer.customer_name || phone)}
             </span>
-            <div className="flex flex-col gap-1.5">
-              <p className="text-[16px] font-semibold leading-none" style={{ color: C.dark }}>{customer.customer_name || "Unknown"}</p>
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <p className="truncate text-[16px] font-semibold leading-none" style={{ color: C.dark }}>{customer.customer_name || "Unknown"}</p>
               {phone && <a href={`tel:${phone}`} className="text-[14px] font-medium leading-none hover:underline" style={{ color: C.sub }}>{phone}</a>}
             </div>
             {lead?.temperature && <TempBadge temp={lead.temperature} />}
             {engagementStopped && (
               <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold" style={{ background: "#f1f5f9", color: "#64748b" }}>AI paused</span>
+            )}
+            {/* mobile: open Lead Details (right panel is hidden < lg) */}
+            {onDetails && (
+              <button onClick={onDetails} title="Lead details" className="ml-auto shrink-0 lg:hidden" style={{ color: C.sub }}><IconInfo size={20} /></button>
             )}
           </div>
           <div className="flex items-center gap-2.5">
@@ -1844,7 +1857,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   }
 
   return (
-    <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto border-l bg-white" style={{ borderColor: C.border }}>
+    <aside className="hidden w-[320px] shrink-0 flex-col overflow-y-auto border-l bg-white lg:flex" style={{ borderColor: C.border }}>
       <div className="flex shrink-0 items-center justify-between border-b px-4 py-3" style={{ borderColor: C.border }}>
         <span className="text-[13px] font-semibold" style={{ color: C.dark }}>Lead Details</span>
         <button onClick={onExpand} title="Expand" className="flex size-6 items-center justify-center rounded-md transition-colors hover:bg-[#f2f2f4]" style={{ color: C.sub }}>
