@@ -383,7 +383,10 @@ function Inbox() {
           return p.customers.find((x) => x.customer_id === initialCustomerId)
             ?? { customer_id: initialCustomerId, customer_name: "", email_id: null, mobile_number: null, createdAt: "", lastInteractionTime: null };
         }
-        return p.customers[0] ?? null;
+        // Desktop opens the first conversation automatically (3-pane); mobile starts on the LIST so it
+        // isn't dropped straight into a thread with no way back to browse.
+        const isDesktop = typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches;
+        return isDesktop ? (p.customers[0] ?? null) : null;
       });
     });
     return () => { on = false; };
