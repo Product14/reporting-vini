@@ -455,7 +455,7 @@ function Inbox() {
           <span className="flex size-7 items-center justify-center rounded-lg text-white" style={{ background: C.primary }}>
             <IconList size={16} />
           </span>
-          <h1 className="text-[16px] font-semibold" style={{ color: C.dark }}>Inbox</h1>
+          <h1 className="text-[16px] font-semibold" style={{ color: C.dark }}>Conversations</h1>
           {/* Department SPACE from the ?serviceType= embed param — this iframe is scoped to Sales or Service. */}
           <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: C.primaryAccent, color: C.primary }}>{serviceType}</span>
           {account?.name && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
@@ -2244,7 +2244,7 @@ function NoScope({ hasTeam }: { hasTeam: boolean }) {
   return (
     <div className="flex h-[100dvh] items-center justify-center bg-[#fafafa] px-6 text-center">
       <div>
-        <p className="text-[15px] font-semibold" style={{ color: C.dark }}>Inbox unavailable</p>
+        <p className="text-[15px] font-semibold" style={{ color: C.dark }}>Conversations unavailable</p>
         <p className="mt-1 text-[13px]" style={{ color: C.sub }}>
           {hasTeam ? "This rooftop is missing an enterprise_id in the embed URL." : "No rooftop selected — the host must pass ?team_id= and ?enterprise_id=."}
         </p>
