@@ -22,7 +22,6 @@ import {
   fetchInboxAgents,
   type OnboardedAgent,
   fetchInboxPersona,
-  fetchInboxFeedback,
   postInboxFeedback,
   stopInboxEngagement,
   fetchInboxTranscript,
@@ -231,10 +230,10 @@ export default function InboxView() {
 type Tab = "all" | "unread";
 
 function Inbox() {
-  const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType, account } = useScenario();
+  const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, account } = useScenario();
   const auth: InboxAuth = useMemo(
-    () => ({ teamId, enterpriseId, spyneToken, spyneEnv, serviceType }),
-    [teamId, enterpriseId, spyneToken, spyneEnv, serviceType],
+    () => ({ teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, teamName: account.name }),
+    [teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, account.name],
   );
 
   // Optional deep-link: ?c=<customer_id> opens straight into that conversation (the console can link
@@ -724,18 +723,11 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     fetchInboxPersona(auth, customer.customer_id).then((p) => {
       if (on && p?.conversationMemory?.summaryShort) setSummary(p.conversationMemory.summaryShort);
     });
-    fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then(async (data) => {
-      if (!on) return;
-      setConv(data);
-      // Load any existing feedback for every conversation (SMS + call) so thumbs reflect prior votes.
-      const lists = await Promise.all(data.conversations.map((r) => fetchInboxFeedback(auth, r.conversationId)));
-      if (!on) return;
-      const map: Record<string, "up" | "down"> = {};
-      lists.flat().forEach((f) => {
-        const r = f.metadata?.rating;
-        if (r === "up" || r === "down") map[`${f.conversationId}#${f.messageIndex}`] = r;
-      });
-      if (Object.keys(map).length) setFbMap(map);
+    // NOTE: prior feedback state is NOT pre-loaded — the new feedbacks/entries API has no per-conversation
+    // GET (it's team-scoped for reporting), and pre-fetching per conversation was also a needless per-open
+    // cost. Thumb state is in-session/optimistic (fbMap), and each vote POSTs to the reporting endpoint.
+    fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((data) => {
+      if (on) setConv(data);
     });
     return () => { on = false; };
   }, [auth, customer.customer_id]);
@@ -2299,10 +2291,16 @@ function formatArgs(argsIn: unknown): { k: string; v: string }[] {
   if (typeof argsIn === "string") { try { obj = JSON.parse(argsIn) as Record<string, unknown>; } catch { obj = null; } }
   else if (argsIn && typeof argsIn === "object") obj = argsIn as Record<string, unknown>;
   if (!obj) return [];
+  // Render a value human-readably: arrays as comma-separated values (not JSON ["a","b"]), objects as
+  // compact JSON, scalars as-is. So DealerVins ["5FRY…"] → "5FRY…" and Tags → "test drive, 2017 Acura MDX".
+  const fmt = (val: unknown): string => {
+    if (Array.isArray(val)) return val.map((x) => (x != null && typeof x === "object" ? JSON.stringify(x) : String(x))).filter(Boolean).join(", ");
+    return typeof val === "object" ? JSON.stringify(val) : String(val);
+  };
   const rows: { k: string; v: string }[] = [];
   for (const [k, val] of Object.entries(obj)) {
-    if (val == null || val === "") continue;
-    rows.push({ k: prettify(k), v: typeof val === "object" ? JSON.stringify(val) : String(val) });
+    if (val == null || val === "" || (Array.isArray(val) && val.length === 0)) continue;
+    rows.push({ k: prettify(k), v: fmt(val) });
   }
   return rows.slice(0, 8);
 }

@@ -66,6 +66,8 @@ interface Ctx {
   enterpriseId: string; // host-forwarded ?enterprise_id= (scopes the live meetings API); "" → decode from token
   spyneEnv: string; // host-forwarded ?env=uat|stag|prod — which Spyne backend our API routes should call; "" → prod
   serviceType: "sales" | "service"; // host-forwarded ?serviceType= — the department SPACE this iframe is scoped to
+  userEmail: string; // host-forwarded ?userEmail= — the logged-in operator (attributes feedback reports)
+  userName: string;  // host-forwarded ?userName= — display name of the operator (else derived from email)
 }
 const ScenarioCtx = createContext<Ctx | null>(null);
 
@@ -94,6 +96,8 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
   const [enterpriseId, setEnterpriseId] = useState("");
   const [spyneEnv, setSpyneEnv] = useState("");
   const [serviceType, setServiceType] = useState<"sales" | "service">("sales");
+  const [userEmail, setUserEmail] = useState("");
+  const [userName, setUserName] = useState("");
   useEffect(() => {
     // intentional: read the browser-only URL after mount, then render children for the first time
     const sp = new URLSearchParams(window.location.search);
@@ -123,11 +127,15 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
     } catch { /* no / cross-origin-stripped referrer → ignore */ }
     const rawDept = (sp.get("serviceType") || sp.get("service_type") || sp.get("department") || refDept || "").trim().toLowerCase();
     setServiceType(rawDept === "service" ? "service" : "sales");
+    // Operator identity for feedback attribution — the console forwards the logged-in user as
+    // ?userEmail=/?email= (+ optional ?userName=/?name=), same as the action-items-console contract.
+    setUserEmail((sp.get("userEmail") || sp.get("email") || sp.get("user_email") || "").trim());
+    setUserName((sp.get("userName") || sp.get("user_name") || sp.get("name") || "").trim());
     setAccount(resolveAccount(sp.get("team_id") || sp.get("teamId")));
   }, []);
 
   if (account === null) return <ScenarioResolving />;
-  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId, spyneEnv, serviceType }}>{children}</ScenarioCtx.Provider>;
+  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId, spyneEnv, serviceType, userEmail, userName }}>{children}</ScenarioCtx.Provider>;
 }
 
 export function useScenario(): {
@@ -138,6 +146,8 @@ export function useScenario(): {
   enterpriseId: string;
   spyneEnv: string;
   serviceType: "sales" | "service";
+  userEmail: string;
+  userName: string;
   view: ScenarioView;
 } {
   const c = useContext(ScenarioCtx);
@@ -151,6 +161,8 @@ export function useScenario(): {
     enterpriseId: c?.enterpriseId ?? "",
     spyneEnv: c?.spyneEnv ?? "",
     serviceType: c?.serviceType ?? "sales",
+    userEmail: c?.userEmail ?? "",
+    userName: c?.userName ?? "",
     view: scenarioView(scenario),
   };
 }
