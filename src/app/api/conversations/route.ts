@@ -2,11 +2,15 @@
  *
  * Recent AI conversations for a rooftop. channel=call (default) = per-call rows from
  * dealer_leads.endcallreports; channel=sms = per-thread SMS rows from dealer_leads.smsMessages
- * (scoped via dealer_leads.conversations, with the day's message bubbles); channel=both = union.
+ * (scoped via dealer_leads.conversations, with the day's message bubbles); channel=chat = website
+ * chatbot threads (conversations type='chat' — the bubbles live in the SAME smsMessages table, so
+ * the thread mechanics are shared; the row is enriched from the chat's conversationAnalytics /
+ * report summary); channel=both = call+sms union (pre-chat callers rely on this exact meaning).
  * The poll pass asks for channel=call every few minutes (emailed instantly); the EOD pass asks for
- * channel=sms with since=local-midnight (emailed once at end of day, since the thread runs all day).
+ * channel=sms with since=local-midnight (emailed once at end of day, since the thread runs all day);
+ * the chat pass polls channel=chat back to local midnight and emails per settled session.
  *
- *   /api/conversations?team_id=&serviceType=sales|service|both[&channel=call|sms|both][&minutes=15][&since=ISO][&limit=50][&actionableOnly=1]
+ *   /api/conversations?team_id=&serviceType=sales|service|both[&channel=call|sms|chat|both][&minutes=15][&since=ISO][&limit=50][&actionableOnly=1]
  *
  * Degrades to an empty list — never 502s the pipeline.
  */
@@ -55,12 +59,16 @@ export async function GET(request: Request): Promise<Response> {
   const limit = Math.max(1, Math.min(200, Number(searchParams.get("limit")) || 50));
   const actionableOnly = searchParams.get("actionableOnly") === "1";
   // CHANNEL — 'call' (default; endcallreports, the original behaviour) | 'sms' (per-thread SMS from
-  // smsMessages) | 'both'. SMS post-conversation is emailed ONCE at end-of-day (the thread runs all
-  // day), so the poll asks for channel=sms with a since=local-midnight window. SMS has no agent-type,
-  // so it is NOT split by sales/service (returns the team's threads regardless of serviceType).
+  // smsMessages) | 'chat' (website-chatbot threads; same bubble store, conversations type='chat') |
+  // 'both'. SMS post-conversation is emailed ONCE at end-of-day (the thread runs all day), so the
+  // poll asks for channel=sms with a since=local-midnight window. SMS/chat have no agent-type, so
+  // they are NOT split by sales/service (returns the team's threads regardless of serviceType).
+  // 'both' stays call+sms (its pre-chat meaning) — chat is only returned when asked for explicitly,
+  // so no existing caller suddenly double-reports chat threads.
   const channel = (searchParams.get("channel") || "call").toLowerCase();
   const wantCall = channel === "call" || channel === "both";
   const wantSms = channel === "sms" || channel === "both";
+  const wantChat = channel === "chat";
   // Optional lead scope: when set, return THIS lead's calls/SMS (its full recent history) regardless of
   // the time window — used by the "review conversation" drill-down on named leads. Validated like team_id.
   const leadId = (searchParams.get("leadId") || "").trim();
@@ -160,36 +168,50 @@ export async function GET(request: Request): Promise<Response> {
     }
   }
 
+  // Shared thread-row shape for the two smsMessages-backed channels (SMS + chat): one row per
+  // conversationId with the message bubbles. smsMessages has no teamId, so both scope through
+  // dealer_leads.conversations (conversationId → teamId/leadId), then lead→customer for the
+  // name/phone. authorType 'human' = the customer's reply, 'ai' = the agent. `convType` MUST be
+  // pinned ('sms' | 'chat') — the bubble store is shared, so an unscoped join returns BOTH and
+  // chat threads leak into the SMS EOD digest mislabeled as texts (they did, until chat landed).
+  const threadSql = (convType: "sms" | "chat", extraOuter = "", extraInner = "") =>
+    "SELECT t.id AS id, t.leadId AS leadId, ifNull(c.name,'') AS customer," +
+    " coalesce(nullIf(c.mobile_number,''), t.phone) AS phone, t.inboundMsgs AS inboundMsgs, t.msgs AS msgs, t.at AS at," +
+    extraOuter +
+    " t.atypes AS atypes, t.bodies AS bodies, t.statuses AS statuses, t.ats AS ats FROM (" +
+    "SELECT s.conversationId AS id, any(cv.leadId) AS leadId, any(s.fromNumberE164) AS phone," +
+    extraInner +
+    " countIf(lower(ifNull(s.authorType,''))='human') AS inboundMsgs, count() AS msgs," +
+    " formatDateTime(max(s.createdAt),'%Y-%m-%dT%H:%i:%SZ') AS at," +
+    " groupArray(lower(ifNull(s.authorType,''))) AS atypes, groupArray(substring(ifNull(s.body,''),1,240)) AS bodies," +
+    " groupArray(lower(ifNull(s.status,''))) AS statuses, groupArray(formatDateTime(s.createdAt,'%Y-%m-%dT%H:%i:%SZ')) AS ats" +
+    " FROM dealer_leads.smsMessages s" +
+    ` INNER JOIN (SELECT conversationId, any(teamId) teamId, any(leadId) leadId,` +
+    ` anyIf(number, notEmpty(ifNull(number,''))) number,` +
+    ` argMax(ifNull(status,''), ifNull(updatedAt, toDateTime(0))) convStatus,` +
+    ` argMax(ifNull(summary,''), ifNull(updatedAt, toDateTime(0))) summaryJson,` +
+    ` argMax(ifNull(conversationAnalytics,''), ifNull(updatedAt, toDateTime(0))) analyticsJson` +
+    ` FROM dealer_leads.conversations WHERE type='${convType}' AND ifNull(isTest,0)=0 GROUP BY conversationId) cv ON s.conversationId=cv.conversationId` +
+    ` WHERE cv.teamId='${chEsc(teamId)}' AND s.__deleted=0 AND ${leadScoped ? `cv.leadId='${chEsc(leadId)}'` : sinceClause("s.createdAt")}` +
+    ` GROUP BY s.conversationId ORDER BY at DESC LIMIT ${limit}` +
+    ") t" +
+    " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON t.leadId=l.lead_id" +
+    " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+  const bubblesOf = (r: Record<string, unknown>) => {
+    const atypes = (Array.isArray(r.atypes) ? r.atypes : []) as string[];
+    const bodies = (Array.isArray(r.bodies) ? r.bodies : []) as string[];
+    const statuses = (Array.isArray(r.statuses) ? r.statuses : []) as string[];
+    const ats = (Array.isArray(r.ats) ? r.ats : []) as string[];
+    return atypes.map((authorType, i) => ({
+      authorType, body: bodies[i] || "", status: statuses[i] || "", at: ats[i] || "",
+      direction: (statuses[i] || "") === "received" ? "inbound" : "outbound",
+    })).sort((a, b) => (a.at || "").localeCompare(b.at || "")).slice(-12);
+  };
+
   if (wantSms) {
-    // One row per SMS thread (conversationId) with the message bubbles. smsMessages has no teamId,
-    // so we scope through dealer_leads.conversations (conversationId → teamId/leadId), then lead→customer
-    // for the name/phone. authorType 'human' = the customer's reply, 'ai' = the agent.
-    const smsSql =
-      "SELECT t.id AS id, t.leadId AS leadId, ifNull(c.name,'') AS customer," +
-      " coalesce(nullIf(c.mobile_number,''), t.phone) AS phone, t.inboundMsgs AS inboundMsgs, t.msgs AS msgs, t.at AS at," +
-      " t.atypes AS atypes, t.bodies AS bodies, t.statuses AS statuses, t.ats AS ats FROM (" +
-      "SELECT s.conversationId AS id, any(cv.leadId) AS leadId, any(s.fromNumberE164) AS phone," +
-      " countIf(lower(ifNull(s.authorType,''))='human') AS inboundMsgs, count() AS msgs," +
-      " formatDateTime(max(s.createdAt),'%Y-%m-%dT%H:%i:%SZ') AS at," +
-      " groupArray(lower(ifNull(s.authorType,''))) AS atypes, groupArray(substring(ifNull(s.body,''),1,240)) AS bodies," +
-      " groupArray(lower(ifNull(s.status,''))) AS statuses, groupArray(formatDateTime(s.createdAt,'%Y-%m-%dT%H:%i:%SZ')) AS ats" +
-      " FROM dealer_leads.smsMessages s" +
-      " INNER JOIN (SELECT conversationId, any(teamId) teamId, any(leadId) leadId FROM dealer_leads.conversations GROUP BY conversationId) cv ON s.conversationId=cv.conversationId" +
-      ` WHERE cv.teamId='${chEsc(teamId)}' AND s.__deleted=0 AND ${leadScoped ? `cv.leadId='${chEsc(leadId)}'` : sinceClause("s.createdAt")}` +
-      ` GROUP BY s.conversationId ORDER BY at DESC LIMIT ${limit}` +
-      ") t" +
-      " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON t.leadId=l.lead_id" +
-      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
-    const rows = await runClickhouse<Record<string, unknown>>(smsSql);
+    const rows = await runClickhouse<Record<string, unknown>>(threadSql("sms"));
     for (const r of rows) {
-      const atypes = (Array.isArray(r.atypes) ? r.atypes : []) as string[];
-      const bodies = (Array.isArray(r.bodies) ? r.bodies : []) as string[];
-      const statuses = (Array.isArray(r.statuses) ? r.statuses : []) as string[];
-      const ats = (Array.isArray(r.ats) ? r.ats : []) as string[];
-      const bubbles = atypes.map((authorType, i) => ({
-        authorType, body: bodies[i] || "", status: statuses[i] || "", at: ats[i] || "",
-        direction: (statuses[i] || "") === "received" ? "inbound" : "outbound",
-      })).sort((a, b) => (a.at || "").localeCompare(b.at || "")).slice(-12);
+      const bubbles = bubblesOf(r);
       const inbound = Number(r.inboundMsgs) || 0;
       out.push({
         id: String(r.id || ""), leadId: (r.leadId as string) || null,
@@ -200,6 +222,60 @@ export async function GET(request: Request): Promise<Response> {
         appointmentScheduled: false, queryResolved: false, hasActionItem: false,
         hasReply: inbound > 0, msgs: Number(r.msgs) || 0,
         sms: bubbles, smsFailed: bubbles.filter((b) => ["failed", "undelivered", "error"].includes(b.status)).length,
+        at: (r.at as string) || "",
+      });
+    }
+  }
+
+  if (wantChat) {
+    // Chat threads carry their own analysis on the conversations row — either the widget's
+    // conversationAnalytics blob (chatSummary bullets, customerSentiment, outcome, dispositions,
+    // dealerActionItems, appointmentDetails) or, for some rooftops, a full endcallreports-style
+    // report JSON in `summary`. Both are optional and parsed defensively; the thread bubbles are
+    // always there. Identity falls back lead→customer, then the conversation's own captured
+    // `number` (many chats have a number but no lead row yet).
+    const jparse = (s: unknown): Record<string, unknown> => {
+      if (typeof s !== "string" || !s.trim()) return {};
+      try { const v = JSON.parse(s); return v && typeof v === "object" ? v as Record<string, unknown> : {}; } catch { return {}; }
+    };
+    const joinLines = (v: unknown): string =>
+      Array.isArray(v) ? v.filter((x) => x && String(x).trim()).map(String).join(" ") : typeof v === "string" ? v.trim() : "";
+    const rows = await runClickhouse<Record<string, unknown>>(threadSql("chat",
+      " t.number AS number, t.convStatus AS convStatus, t.summaryJson AS summaryJson, t.analyticsJson AS analyticsJson,",
+      " any(cv.number) AS number, any(cv.convStatus) AS convStatus, any(cv.summaryJson) AS summaryJson, any(cv.analyticsJson) AS analyticsJson,"));
+    for (const r of rows) {
+      const bubbles = bubblesOf(r);
+      const inbound = Number(r.inboundMsgs) || 0;
+      const analytics = jparse(r.analyticsJson);
+      const report = jparse(r.summaryJson);
+      const overview = (report.overview && typeof report.overview === "object" ? report.overview : {}) as Record<string, unknown>;
+      const sentimentRaw = (analytics.customerSentiment as Record<string, unknown> | undefined)?.sentiment
+        ?? (overview.overall as Record<string, unknown> | undefined)?.sentiment;
+      const summary = joinLines(report.summary) || joinLines(analytics.chatSummary);
+      const outcome = String(analytics.outcome || report.Outcome || overview.callOutcome || "");
+      // Booked = the widget confirmed it (status confirmed/booked/scheduled) or the report says Yes.
+      // 'pending_confirmation' is NOT booked — counting it would announce appointments that never land.
+      const apptStatus = String((analytics.appointmentDetails as Record<string, unknown> | undefined)?.status || "").toLowerCase();
+      const appointmentScheduled = ["confirmed", "booked", "scheduled"].includes(apptStatus) ||
+        String(overview.appointmentScheduled || "").toLowerCase() === "yes";
+      const actionItems = [
+        ...(Array.isArray(analytics.dealerActionItems) ? analytics.dealerActionItems : []),
+        ...(Array.isArray(report.actionItems) ? report.actionItems : []),
+      ].map(String).filter((x) => x.trim());
+      out.push({
+        id: String(r.id || ""), leadId: (r.leadId as string) || null,
+        phone: (r.phone as string) || (r.number as string) || null, customer: (r.customer as string) || null,
+        channel: "chat", dept: "other",
+        // A widget chat is always customer-initiated on the dealer's own site.
+        direction: "inbound",
+        title: String(report.title || "") || (outcome ? outcome : ""), summary,
+        sentiment: sentimentRaw ? String(sentimentRaw) : null,
+        outcome, status: (r.convStatus as string) || "",
+        appointmentScheduled,
+        queryResolved: String(report.queryResolved || "").toLowerCase() === "yes",
+        hasActionItem: actionItems.length > 0, actionItems,
+        hasReply: inbound > 0, msgs: Number(r.msgs) || 0,
+        sms: bubbles, smsFailed: 0,
         at: (r.at as string) || "",
       });
     }
