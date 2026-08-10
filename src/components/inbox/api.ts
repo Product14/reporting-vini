@@ -8,6 +8,9 @@ export interface InboxAuth {
   spyneToken?: string;
   spyneEnv?: string;
   serviceType?: "sales" | "service"; // department space this iframe is scoped to (?serviceType=)
+  userEmail?: string; // logged-in operator — attributes feedback (submittedByEmail)
+  userName?: string;  // operator display name (else derived from the email)
+  teamName?: string;  // rooftop display name (feedback teamName)
 }
 
 function authHeaders(a: InboxAuth): HeadersInit | undefined {
@@ -409,6 +412,13 @@ export async function fetchInboxFeedback(a: InboxAuth, conversationId: string): 
   }
 }
 
+// Derive a display name from an email local-part ("donald.blanchat@x.com" → "Donald Blanchat").
+function nameFromEmail(email?: string): string {
+  const local = (email || "").split("@")[0];
+  if (!local) return "";
+  return local.split(/[._-]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
 export async function postInboxFeedback(
   a: InboxAuth,
   body: {
@@ -419,22 +429,34 @@ export async function postInboxFeedback(
     rating: "up" | "down";
     note?: string;
     reason?: string; // thumbs-down report category, e.g. "Gave wrong Information"
+    callId?: string;
+    conversationTitle?: string;
+    agentName?: string;
   },
 ): Promise<boolean> {
   if (!a.teamId || !body.conversationId) return false;
   const p = new URLSearchParams({ team_id: a.teamId });
   withEnv(p, a);
+  // New feedback contract: POST /conversation/feedbacks/entries. The reporter (submittedByEmail), the
+  // enterprise, and the team are attached HERE (from the iframe scope) so the reporting table has them.
+  const perTurn = body.channel !== "call"; // SMS thumbs are per-message; a call report is conversation-level
+  const comment = [body.reason ? `[${body.reason}]` : "", (body.note || "").trim()].filter(Boolean).join(" ").trim();
   const payload = {
+    conversationType: body.channel === "call" ? "voice_call" : "sms",
     conversationId: body.conversationId,
-    channel: body.channel,
-    messageIndex: body.messageIndex,
-    message: body.message.slice(0, 2000),
-    // Upstream requires a non-empty `feedback` — use the note if given, else a default from the rating.
-    feedback: (body.note || "").trim() || (body.rating === "up" ? "Marked as a good reply" : "Marked as a poor reply"),
-    status: "pending",
-    priority: "medium",
-    reportedBy: a.teamId,
-    metadata: { rating: body.rating, reason: body.reason || undefined, source: "inbox" },
+    callId: body.callId || undefined,
+    conversationTitle: body.conversationTitle || (!perTurn ? (body.message || undefined) : undefined),
+    agentName: body.agentName || undefined,
+    feedbackScope: perTurn ? "per_turn" : "conversation_level",
+    turnIndex: perTurn ? body.messageIndex : -1,
+    messageText: perTurn ? body.message.slice(0, 2000) : undefined,
+    rating: body.rating,
+    comment: comment || undefined,
+    submittedByEmail: a.userEmail || undefined,
+    submittedByName: a.userName || nameFromEmail(a.userEmail) || undefined,
+    enterpriseId: a.enterpriseId || undefined,
+    teamId: a.teamId,
+    teamName: a.teamName || undefined,
   };
   try {
     const r = await fetch(`/api/inbox/feedback?${p}`, {
