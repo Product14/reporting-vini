@@ -696,7 +696,7 @@ function ListSkeleton() {
  * Thread pane
  * ════════════════════════════════════════════════════════════════════════════ */
 type ThreadNode =
-  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; fb?: { conversationId: string; messageIndex: number } }
+  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
   | { t: number; kind: "event"; emoji: string; title: string; detail: string; subtle?: boolean; dateOnly?: boolean } // lead-journey milestone, interleaved in the chat
@@ -767,7 +767,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   const aiAgentName = conv?.conversations.map((c) => c.callData?.agentName).find((n) => n && n.trim()) || AI_AGENT.name || "Vini";
   const custFirst = (customer.customer_name || "Customer").trim().split(/\s+/)[0];
 
-  // §13 — one chronological, day-grouped stream: every SMS bubble + call + journey milestone interleaved.
+  // §13 — one chronological, day-grouped stream: every SMS/chat bubble + call + journey milestone interleaved.
   const nodes = useMemo<ThreadNode[]>(() => {
     if (!conv) return [];
     const out: ThreadNode[] = [];
@@ -775,7 +775,10 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
       // Direction filter — skip conversations that don't match the selected inbound/outbound view.
       if (dir !== "all" && convDirection(rec) !== dir) continue;
       const base = +new Date(rec.createdAt) || 0;
-      if (rec.type === "sms" && Array.isArray(rec.smsMessages)) {
+      if ((rec.type === "sms" || rec.type === "chat") && Array.isArray(rec.smsMessages)) {
+        // Website-chat conversations reuse the SMS message array (same roles + JSON envelope); only the
+        // channel tag on the bubble differs. Email records also arrive now but carry no bodies yet — skipped.
+        const isChat = rec.type === "chat";
         const msgs = rec.smsMessages;
         // Pair each tool CALL (assistant msg w/ toolCalls) with its RESULT (role:"tool", toolCallId).
         const resultByCallId: Record<string, { text: string; extra?: string }> = {};
@@ -802,7 +805,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           if (!parsed.text) return;
           const side = role === "user" ? "in" : "out";
           out.push({
-            t, kind: "msg", side, text: parsed.text,
+            t, kind: "msg", side, text: parsed.text, chat: isChat || undefined,
             sender: side === "out" ? aiAgentName : custFirst,
             // Feedback attaches to AI messages only, keyed by conversation + message index (§03).
             fb: side === "out" ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
@@ -1088,7 +1091,7 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
       </div>
     );
   }
-  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
+  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
 }
 
 /* §03 — a tool-use "behind the scenes" step: action + query params + result, expandable. Modeled on
@@ -1147,12 +1150,13 @@ function DayDivider({ label }: { label: string }) {
 
 /* §02 — one SMS entry. AI (out) = right/blue; customer (in) = left/white. AI messages carry a
  * thumbs-up / report feedback control; tool activity renders as its own ToolStepCard. */
-function MessageBubble({ side, sender, text, at, fbNode, fb, custName, custSeed }: {
+function MessageBubble({ side, sender, text, at, chat, fbNode, fb, custName, custSeed }: {
   side: "in" | "out"; sender: string; text: string; at: string;
+  chat?: boolean; // website-chat message → "Web chat" tag distinguishes it from a text
   fbNode?: { conversationId: string; messageIndex: number }; fb?: FbCtx;
   custName?: string; custSeed?: string; // full customer name + seed → customer avatar matches the header
 }) {
-  const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)}</span>;
+  const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)}{chat && <> · Web chat</>}</span>;
   if (side === "out") {
     const rating = fbNode && fb ? fb.map[`${fbNode.conversationId}#${fbNode.messageIndex}`] : undefined;
     return (
@@ -2345,6 +2349,9 @@ function apptLabel(a: AppointmentItem): string {
 // Direction of a conversation for the inbound/outbound filter + appointment attribution.
 // Calls: from callData.callType. SMS: inferred from who sent the earliest message (user = inbound).
 function convDirection(rec: ConvRecord): "in" | "out" | "unknown" {
+  // Website chat is always customer-initiated (widget on the dealer site) — inbound even when the
+  // stored thread opens with the assistant's greeting.
+  if (rec.type === "chat") return "in";
   if (rec.type === "call") {
     const t = (rec.callData?.callType || "").toLowerCase();
     if (t.includes("inbound")) return "in";

@@ -34,7 +34,7 @@ export async function GET(request: Request): Promise<Response> {
   up.set("page", String(Math.max(1, Number(searchParams.get("page")) || 1)));
   up.set("limit", String(Math.max(1, Math.min(100, Number(searchParams.get("limit")) || 20))));
   const type = (searchParams.get("type") || "").toLowerCase();
-  if (type === "call" || type === "sms") up.set("type", type);
+  if (type === "call" || type === "sms" || type === "chat" || type === "email") up.set("type", type);
   // Forward serviceType: conversations/v2 DEFAULTS to sales when it's absent, so Service customers come
   // back empty ("No conversation history") without it. Sales space → sales thread, Service → service.
   const dept = (searchParams.get("serviceType") || "").toLowerCase();

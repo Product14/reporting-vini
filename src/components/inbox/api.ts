@@ -141,7 +141,7 @@ export interface CallData {
 }
 export interface ConvRecord {
   conversationId: string;
-  type: "call" | "sms";
+  type: "call" | "sms" | "chat" | "email"; // chat = website widget (messages in smsMessages); email = records only, bodies not yet populated upstream
   status: string;
   createdAt: string;
   updatedAt: string;
@@ -152,7 +152,8 @@ export interface ConvRecord {
   callId?: string | null;
   callTitle?: string | null;
   callData?: CallData;
-  smsMessages?: SmsMessage[];
+  smsMessages?: SmsMessage[]; // sms AND chat conversations both carry their bubbles here
+  emailMessages?: unknown[]; // shape unverified — every UAT email record so far is empty
   serviceNumberE164?: string | null;
   customerDetails?: { customerId: string; name: string; email?: string[]; phone?: string; createdAt?: string };
   stats?: { message_count: number; email_count: number; sms_count: number; last_activity: string; duration_days: number };
@@ -228,7 +229,7 @@ const EMPTY_CONV: ConversationsV2 = {
 export async function fetchInboxConversations(
   a: InboxAuth,
   customerId: string,
-  opts: { type?: "call" | "sms"; page?: number; limit?: number } = {},
+  opts: { type?: "call" | "sms" | "chat" | "email"; page?: number; limit?: number } = {},
 ): Promise<ConversationsV2> {
   if (!a.teamId || !a.enterpriseId || !customerId) return EMPTY_CONV;
   const p = new URLSearchParams({ team_id: a.teamId, enterprise_id: a.enterpriseId, customer_id: customerId });
