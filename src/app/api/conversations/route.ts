@@ -153,6 +153,7 @@ export async function GET(request: Request): Promise<Response> {
       title: String(r.title || ""), summary: String(r.summary || ""),
       vehicle: r.vehicle ? String(r.vehicle) : null,
       durationSec: Number(r.durationSec) || 0,
+      connected: (Number(r.durationSec) || 0) > 0,  // true if customer answered; false for voicemail/no-answer
       recordingUrl: r.recordingUrl ? String(r.recordingUrl) : null,
       score: Number(r.score10) || 0,
       sentiment: frustrated ? "Negative" : "Neutral",
