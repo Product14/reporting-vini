@@ -173,6 +173,23 @@ export async function GET(request: Request): Promise<Response> {
       appointmentScheduled: r.apptScheduled === "true",
       queryResolved: resolved,
       hasActionItem: !!(r.actionItems && !["", "[]", "{}"].includes(String(r.actionItems))),
+      // The action items THEMSELVES, not just the boolean. report_actionItems is a JSON array of plain
+      // strings ("Prepare the GLS for Victor's visit tomorrow at noon."). Only the flag was returned
+      // before, so the post-conversation email could say a call needed follow-up but never show WHAT —
+      // the chat branch has always returned the array, calls never did. Parsed defensively: anything
+      // unexpected yields [], which renders no section rather than breaking the email.
+      actionItems: ((): string[] => {
+        try {
+          const parsed: unknown = JSON.parse(String(r.actionItems || "[]"));
+          if (!Array.isArray(parsed)) return [];
+          return parsed
+            .map((x) => (typeof x === "string" ? x : typeof (x as { description?: unknown })?.description === "string" ? String((x as { description: string }).description) : ""))
+            .map((s) => s.trim())
+            .filter(Boolean);
+        } catch {
+          return [];
+        }
+      })(),
       aiScore: r.aiScore != null && r.aiScore !== "" ? Number(r.aiScore) : null,
       grade: r.grade ? String(r.grade) : null,
       frustrated,
