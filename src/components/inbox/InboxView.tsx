@@ -215,6 +215,7 @@ const IconFlag = (p: IconProps) => <Svg {...p}><path d="M4 21V4M4 4h13l-2 5 2 5H
 const IconThumbUp = (p: IconProps) => <Svg {...p}><path d="M7 10v11H3V10zM7 10l5-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1.3 7A2 2 0 0 1 16.7 21H7" /></Svg>;
 const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 14l-5 7a2 2 0 0 1-2-2v-3H5a2 2 0 0 1-2-2.3l1.3-7A2 2 0 0 1 7.3 3H17" /></Svg>;
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
+const IconMail = (p: IconProps) => <Svg {...p}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m22 7-10 6L2 7" /></Svg>;
 const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Svg>;
 const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></Svg>;
 const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
@@ -890,6 +891,7 @@ function ListSkeleton() {
  * ════════════════════════════════════════════════════════════════════════════ */
 type ThreadNode =
   | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; fb?: { conversationId: string; messageIndex: number } }
+  | { t: number; kind: "email"; side: "in" | "out"; sender: string; subject?: string; text: string; status?: string }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
   | { t: number; kind: "event"; emoji: string; title: string; detail: string; subtle?: boolean; dateOnly?: boolean } // lead-journey milestone, interleaved in the chat
@@ -926,7 +928,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   }, [auth, customer.customer_id]);
 
   const voteFeedback = useCallback(
-    (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call", note?: string, reason?: string) => {
+    (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call" | "chat", note?: string, reason?: string) => {
       const key = `${conversationId}#${messageIndex}`;
       setFbMap((m) => ({ ...m, [key]: rating }));
       void postInboxFeedback(auth, { conversationId, channel, messageIndex, message, rating, note, reason });
@@ -935,7 +937,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   );
 
   // §Report-modal (Figma 9842-21472) — thumbs-down opens a report form; submit posts a "down" vote.
-  const [reportTarget, setReportTarget] = useState<{ conversationId: string; messageIndex: number; message: string; channel: "sms" | "call" } | null>(null);
+  const [reportTarget, setReportTarget] = useState<{ conversationId: string; messageIndex: number; message: string; channel: "sms" | "call" | "chat" } | null>(null);
   const fbCtx = useMemo<FbCtx>(
     () => ({ map: fbMap, vote: voteFeedback, openReport: (conversationId, messageIndex, message, channel) => setReportTarget({ conversationId, messageIndex, message, channel }) }),
     [fbMap, voteFeedback],
@@ -1004,6 +1006,21 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
             fb: side === "out" ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
           });
         });
+      } else if (rec.type === "email" && Array.isArray(rec.emailMessages)) {
+        // Email conversations carry full messages (subject + HTML body + per-message status).
+        for (const m of rec.emailMessages) {
+          const text = stripHtml(m.body || "");
+          if (!text && !m.subject) continue;
+          const side = (m.direction || "").toLowerCase() === "inbound" ? "in" : "out";
+          out.push({
+            t: +new Date(m.sentAt || m.createdAt || rec.createdAt) || base,
+            kind: "email", side, text,
+            subject: m.subject || undefined,
+            // "received" on inbound is implicit; sent/opened/replied on outbound is worth showing.
+            status: side === "out" ? m.status || undefined : undefined,
+            sender: side === "out" ? aiAgentName : custFirst,
+          });
+        }
       } else if (rec.type === "call") {
         out.push({ t: base, kind: "call", rec });
       }
@@ -1216,8 +1233,8 @@ function ReportModal({ onClose, onSubmit }: { onClose: () => void; onSubmit: (re
 
 interface FbCtx {
   map: Record<string, "up" | "down">;
-  vote: (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call", note?: string, reason?: string) => void;
-  openReport: (conversationId: string, messageIndex: number, message: string, channel: "sms" | "call") => void;
+  vote: (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call" | "chat", note?: string, reason?: string) => void;
+  openReport: (conversationId: string, messageIndex: number, message: string, channel: "sms" | "call" | "chat") => void;
 }
 
 /* Insert TODAY/date dividers between nodes on day boundaries (§13). */
@@ -1247,6 +1264,9 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
     );
   }
   if (node.kind === "toolstep") return <ToolStepCard node={node} />;
+  if (node.kind === "email") {
+    return <EmailBubble side={node.side} sender={node.sender} subject={node.subject} text={node.text} status={node.status} at={new Date(node.t).toISOString()} custName={customerName} custSeed={customerSeed} />;
+  }
   if (node.kind === "created") {
     // Inline system event — appointment / action item created.
     return (
@@ -1343,6 +1363,46 @@ function DayDivider({ label }: { label: string }) {
 
 /* §02 — one SMS entry. AI (out) = right/blue; customer (in) = left/white. AI messages carry a
  * thumbs-up / report feedback control; tool activity renders as its own ToolStepCard. */
+// Email bodies arrive as HTML (composed sends) or plain text (replies) — flatten to text for the bubble.
+function stripHtml(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#0?39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/* An email in the thread — bubble-aligned like messages, with subject + delivery status. No feedback
+ * buttons (the feedback API's conversationType enum has no email). */
+function EmailBubble({ side, sender, subject, text, status, at, custName, custSeed }: {
+  side: "in" | "out"; sender: string; subject?: string; text: string; status?: string; at: string;
+  custName?: string; custSeed?: string;
+}) {
+  const statusTag = status && status !== "received" ? ` · ${status.charAt(0).toUpperCase()}${status.slice(1)}` : "";
+  const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)} · Email{statusTag}</span>;
+  const card = (
+    <div className={`rounded-[15px] ${side === "out" ? "rounded-br-none" : "rounded-bl-none border"} px-5 py-3.5 text-[12px] leading-[18px]`}
+      style={side === "out" ? { background: C.blueAccent, color: C.dark } : { borderColor: C.border, background: "#fff", color: C.dark }}>
+      {subject && <p className="mb-1.5 flex items-center gap-1.5 font-semibold"><IconMail size={12} /><span>{subject}</span></p>}
+      {text && <p className="whitespace-pre-line">{text}</p>}
+    </div>
+  );
+  if (side === "out") {
+    return (
+      <div className="flex justify-end gap-2">
+        <div className="flex max-w-[70%] flex-col items-end gap-1.5">{card}<div className="flex items-center gap-2 px-0.5">{meta}</div></div>
+        <Avatar kind="agent" name={sender} />
+      </div>
+    );
+  }
+  return (
+    <div className="flex justify-start gap-2">
+      <Avatar kind="customer" name={custName || sender} seed={custSeed} />
+      <div className="flex max-w-[70%] flex-col items-start gap-1.5">{card}{meta}</div>
+    </div>
+  );
+}
+
 function MessageBubble({ side, sender, text, at, chat, fbNode, fb, custName, custSeed }: {
   side: "in" | "out"; sender: string; text: string; at: string;
   chat?: boolean; // website-chat message → "Web chat" tag distinguishes it from a text
@@ -1363,9 +1423,9 @@ function MessageBubble({ side, sender, text, at, chat, fbNode, fb, custName, cus
           <div className="flex items-center gap-2 px-0.5">
             {fbNode && fb && text && (
               <span className={`flex items-center gap-2 transition-opacity ${rating ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
-                <button onClick={() => fb.vote(fbNode.conversationId, fbNode.messageIndex, text, "up", "sms")}
+                <button onClick={() => fb.vote(fbNode.conversationId, fbNode.messageIndex, text, "up", chat ? "chat" : "sms")}
                   title="Good reply" style={{ color: rating === "up" ? C.primary : C.sub }}><IconThumbUp size={13} /></button>
-                <button onClick={() => fb.openReport(fbNode.conversationId, fbNode.messageIndex, text, "sms")}
+                <button onClick={() => fb.openReport(fbNode.conversationId, fbNode.messageIndex, text, chat ? "chat" : "sms")}
                   title="Report this message" style={{ color: rating === "down" ? C.red : C.sub }}><IconThumbDown size={13} /></button>
               </span>
             )}
@@ -2545,6 +2605,12 @@ function convDirection(rec: ConvRecord): "in" | "out" | "unknown" {
   // Website chat is always customer-initiated (widget on the dealer site) — inbound even when the
   // stored thread opens with the assistant's greeting.
   if (rec.type === "chat") return "in";
+  if (rec.type === "email") {
+    const ms = rec.emailMessages ?? [];
+    if (!ms.length) return "unknown";
+    const first = [...ms].sort((a, b) => +new Date(a.sentAt || a.createdAt || 0) - +new Date(b.sentAt || b.createdAt || 0))[0];
+    return (first.direction || "").toLowerCase() === "inbound" ? "in" : "out";
+  }
   if (rec.type === "call") {
     const t = (rec.callData?.callType || "").toLowerCase();
     if (t.includes("inbound")) return "in";

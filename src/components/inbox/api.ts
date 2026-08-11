@@ -188,9 +188,22 @@ export interface CallData {
   endedReason?: string; // "customer_hangup", "voicemail", …
   interestedVehicles?: unknown[];
 }
+export interface EmailMessage {
+  emailMessageId?: string;
+  direction?: string; // "outbound" | "inbound"
+  role?: string; // "ai" | "human"
+  status?: string; // outbound: sent | opened | replied; inbound: received
+  subject?: string | null;
+  body?: string | null; // HTML on composed sends, plain text on replies
+  from?: string | null;
+  to?: string | null;
+  sentAt?: string | null; // null on inbound replies — fall back to createdAt
+  openedAt?: string | null;
+  createdAt?: string | null;
+}
 export interface ConvRecord {
   conversationId: string;
-  type: "call" | "sms" | "chat" | "email"; // chat = website widget (messages in smsMessages); email = records only, bodies not yet populated upstream
+  type: "call" | "sms" | "chat" | "email"; // chat = website widget (messages in smsMessages); email = bodies in emailMessages
   status: string;
   createdAt: string;
   updatedAt: string;
@@ -202,7 +215,7 @@ export interface ConvRecord {
   callTitle?: string | null;
   callData?: CallData;
   smsMessages?: SmsMessage[]; // sms AND chat conversations both carry their bubbles here
-  emailMessages?: unknown[]; // shape unverified — every UAT email record so far is empty
+  emailMessages?: EmailMessage[]; // email conversations only
   serviceNumberE164?: string | null;
   customerDetails?: { customerId: string; name: string; email?: string[]; phone?: string; createdAt?: string };
   stats?: { message_count: number; email_count: number; sms_count: number; last_activity: string; duration_days: number };
@@ -473,7 +486,7 @@ export async function postInboxFeedback(
   a: InboxAuth,
   body: {
     conversationId: string;
-    channel: "sms" | "call";
+    channel: "sms" | "call" | "chat";
     messageIndex: number;
     message: string;
     rating: "up" | "down";
@@ -492,7 +505,7 @@ export async function postInboxFeedback(
   const perTurn = body.channel !== "call"; // SMS thumbs are per-message; a call report is conversation-level
   const comment = [body.reason ? `[${body.reason}]` : "", (body.note || "").trim()].filter(Boolean).join(" ").trim();
   const payload = {
-    conversationType: body.channel === "call" ? "voice_call" : "sms",
+    conversationType: body.channel === "call" ? "voice_call" : body.channel, // enum: voice_call | sms | chat
     conversationId: body.conversationId,
     callId: body.callId || undefined,
     conversationTitle: body.conversationTitle || (!perTurn ? (body.message || undefined) : undefined),
