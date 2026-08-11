@@ -277,6 +277,59 @@ export async function fetchInboxConversations(
   });
 }
 
+/* ── Team-wide flat conversation feed ("Group by: None") ────────────────────── */
+// GET /customers/conversations/team — one row per conversation, latest first, customer resolved.
+// Calls carry `transcript` (last 10 turns); sms/chat carry `smsMessages` (10 newest-first);
+// email rows carry no content on this endpoint (bodies live on conversations/v2 only).
+export interface TeamFeedRow {
+  conversationId: string;
+  type: "call" | "sms" | "chat" | "email";
+  status?: string | null;
+  isUnread?: boolean;
+  leadId?: string | null;
+  callId?: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
+  summary?: string | null; // not projected by the backend yet — shown the day it ships
+  customer?: { customerId?: string | null; name?: string | null; mobileNumber?: string | null } | null;
+  smsMessages?: SmsMessage[];
+  transcript?: { role?: string; message?: string | null; content?: string | null; toolCalls?: unknown }[];
+}
+export interface TeamFeedPage {
+  conversations: TeamFeedRow[];
+  pagination: { total: number; page: number; limit: number; totalPages: number; hasNext: boolean; hasPrev: boolean };
+}
+const EMPTY_FEED: TeamFeedPage = { conversations: [], pagination: { total: 0, page: 1, limit: 30, totalPages: 1, hasNext: false, hasPrev: false } };
+
+export async function fetchInboxTeamFeed(
+  a: InboxAuth,
+  opts: { page?: number; limit?: number; unreadOnly?: boolean; type?: "call" | "sms" | "chat" | "email" } = {},
+): Promise<TeamFeedPage> {
+  if (!a.teamId || !a.enterpriseId) return EMPTY_FEED;
+  const p = new URLSearchParams({ team_id: a.teamId, enterprise_id: a.enterpriseId });
+  p.set("page", String(opts.page ?? 1));
+  p.set("limit", String(opts.limit ?? 30));
+  if (opts.unreadOnly) p.set("unreadOnly", "true");
+  if (opts.type) p.set("type", opts.type);
+  withEnv(p, a);
+  const key = `teamfeed:${p.toString()}`;
+  return coalesce(key, async () => {
+    try {
+      const r = await fetch(`/api/inbox/team-conversations?${p}`, { cache: "no-store", headers: authHeaders(a) });
+      const j = (await r.json().catch(() => null)) as { data?: Partial<TeamFeedPage>; pagination?: TeamFeedPage["pagination"] } & Partial<TeamFeedPage> | null;
+      if (!r.ok || !j) return EMPTY_FEED;
+      const d = (j.data ?? j) as Partial<TeamFeedPage>;
+      return {
+        conversations: Array.isArray(d.conversations) ? d.conversations : [],
+        // Pagination sits BESIDE data in the upstream envelope, not inside it.
+        pagination: j.pagination ?? d.pagination ?? EMPTY_FEED.pagination,
+      };
+    } catch {
+      return EMPTY_FEED;
+    }
+  });
+}
+
 /* ── Call transcript ────────────────────────────────────────────────────────── */
 // A tool invocation as it appears on a `bot`/assistant turn. Real UAT payloads nest the name under
 // `function.name` (OpenAI shape); the doc's flat `name` is kept as a fallback.

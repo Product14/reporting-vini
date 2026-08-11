@@ -26,6 +26,8 @@ import {
   stopInboxEngagement,
   fetchInboxTranscript,
   fetchInboxCall,
+  fetchInboxTeamFeed,
+  type TeamFeedRow,
   resolveInboxActionItem,
   parseSmsText,
   parseCallTranscript,
@@ -213,6 +215,7 @@ const IconThumbUp = (p: IconProps) => <Svg {...p}><path d="M7 10v11H3V10zM7 10l5
 const IconThumbDown = (p: IconProps) => <Svg {...p}><path d="M17 14V3h4v11zM17 14l-5 7a2 2 0 0 1-2-2v-3H5a2 2 0 0 1-2-2.3l1.3-7A2 2 0 0 1 7.3 3H17" /></Svg>;
 const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 1.9.6 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2Z" /></Svg>;
 const IconMail = (p: IconProps) => <Svg {...p}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m22 7-10 6L2 7" /></Svg>;
+const IconBubble = (p: IconProps) => <Svg {...p}><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.3 8.6 8.6 0 0 1-3.7-.8L3 20l1.1-5.2a8 8 0 0 1-.9-3.7A8.4 8.4 0 0 1 11.7 3a8.4 8.4 0 0 1 9.3 8.5Z" /></Svg>;
 const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Svg>;
 const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></Svg>;
 const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
@@ -244,8 +247,21 @@ function Inbox() {
     const sp = new URLSearchParams(window.location.search);
     return (sp.get("c") || sp.get("customer_id") || "").trim();
   }, []);
+  // Optional ?group=none opens the list as a flat per-conversation feed instead of grouped-by-customer.
+  const initialGroup = useMemo<"customer" | "none">(() => {
+    if (typeof window === "undefined") return "customer";
+    return new URLSearchParams(window.location.search).get("group") === "none" ? "none" : "customer";
+  }, []);
 
   const [tab, setTab] = useState<Tab>("all");
+  // List grouping: "customer" = one row per customer (leads/v2, the default); "none" = one row per
+  // CONVERSATION, latest first (conversations/team) — call/sms/chat/email rows with per-type snippets.
+  const [groupBy, setGroupBy] = useState<"customer" | "none">(initialGroup);
+  const [feedRows, setFeedRows] = useState<TeamFeedRow[]>([]);
+  const [feedTotal, setFeedTotal] = useState(0);
+  const [feedHasNext, setFeedHasNext] = useState(false);
+  const [feedLoading, setFeedLoading] = useState(false);
+  const feedPageRef = useRef(1);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [leadType, setLeadType] = useState<string[]>([]);
@@ -393,6 +409,49 @@ function Inbox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, enterpriseId, spyneToken, spyneEnv, listQuery]);
 
+  // Flat feed ("Group by: None") — one row per conversation, latest first. Page 1 on entry/tab switch.
+  useEffect(() => {
+    if (groupBy !== "none" || !teamId || !enterpriseId) return;
+    let on = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFeedLoading(true);
+    feedPageRef.current = 1;
+    fetchInboxTeamFeed(auth, { page: 1, limit: 30, unreadOnly: tab === "unread" }).then((p) => {
+      if (!on) return;
+      setFeedRows(p.conversations);
+      setFeedTotal(p.pagination.total);
+      setFeedHasNext(p.pagination.hasNext);
+      setFeedLoading(false);
+    });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupBy, tab, teamId, enterpriseId, spyneToken, spyneEnv]);
+
+  const loadMoreFeed = useCallback(() => {
+    if (feedLoading || !feedHasNext) return;
+    setFeedLoading(true);
+    const next = feedPageRef.current + 1;
+    fetchInboxTeamFeed(auth, { page: next, limit: 30, unreadOnly: tab === "unread" }).then((p) => {
+      feedPageRef.current = next;
+      setFeedRows((prev) => {
+        const seen = new Set(prev.map((r) => r.conversationId));
+        return [...prev, ...p.conversations.filter((r) => !seen.has(r.conversationId))];
+      });
+      setFeedHasNext(p.pagination.hasNext);
+      setFeedLoading(false);
+    });
+  }, [auth, feedLoading, feedHasNext, tab]);
+
+  // Open a flat-feed row: reuse the customer thread (synthesize the row's customer if it isn't loaded).
+  const openFeedRow = useCallback((row: TeamFeedRow) => {
+    const cid = row.customer?.customerId || "";
+    if (!cid) return;
+    openCustomer(
+      customers.find((x) => x.customer_id === cid)
+        ?? { customer_id: cid, customer_name: row.customer?.name || "", email_id: null, mobile_number: row.customer?.mobileNumber ?? null, createdAt: row.createdAt, lastInteractionTime: row.updatedAt ?? row.createdAt },
+    );
+  }, [customers, openCustomer]);
+
   // Append the next page (infinite scroll). Deduped by customer_id (page boundaries can repeat a row).
   const loadMore = useCallback(() => {
     if (loadingMore || !pageInfo?.hasNext) return;
@@ -535,10 +594,51 @@ function Inbox() {
             )}
           </div>
           <div className="flex shrink-0" style={{ borderColor: C.border }}>
-            <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={`All(${totalAll})`} />
-            <TabBtn active={tab === "unread"} onClick={() => setTab("unread")} label={`Unread(${totalUnread})`} />
-            <div className="flex-1 border-b" style={{ borderColor: C.border }} />
+            <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={groupBy === "none" ? `All(${feedTotal})` : `All(${totalAll})`} />
+            <TabBtn active={tab === "unread"} onClick={() => setTab("unread")} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
+            <div className="flex flex-1 items-center justify-end gap-1 border-b pr-3" style={{ borderColor: C.border }}>
+              {/* Group by: Customer (default, one row per customer) | None (flat per-conversation feed) */}
+              <span className="text-[10px]" style={{ color: C.sub }}>Group</span>
+              {(["customer", "none"] as const).map((g) => (
+                <button key={g} onClick={() => setGroupBy(g)}
+                  className="rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize"
+                  style={groupBy === g ? { background: C.primaryAccent, color: C.primary } : { color: C.sub }}>
+                  {g === "customer" ? "Customer" : "None"}
+                </button>
+              ))}
+            </div>
           </div>
+          {groupBy === "none" ? (
+            /* FLAT feed — one row per conversation (latest first): channel chip + status + per-type snippet. */
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {feedLoading && feedRows.length === 0 ? (
+                <ListSkeleton />
+              ) : feedRows.length === 0 ? (
+                <div className="px-5 py-10 text-center text-[12px]" style={{ color: C.sub }}>
+                  No conversations {tab === "unread" ? "unread" : "found"}.
+                </div>
+              ) : (
+                <>
+                  {feedRows
+                    .filter((r) => {
+                      if (!debounced) return true;
+                      const q = debounced.toLowerCase();
+                      return (r.customer?.name || "").toLowerCase().includes(q) || (r.customer?.mobileNumber || "").includes(debounced);
+                    })
+                    .map((r) => (
+                      <FeedRowView key={r.conversationId} row={r}
+                        active={selected?.customer_id === r.customer?.customerId}
+                        onClick={() => openFeedRow(r)} />
+                    ))}
+                  {feedHasNext && (
+                    <button onClick={loadMoreFeed} className="w-full py-3 text-center text-[11px] font-semibold" style={{ color: C.primary }}>
+                      {feedLoading ? "Loading…" : "Load more"}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
           <div className="min-h-0 flex-1 overflow-y-auto">
             {loadingList ? (
               <ListSkeleton />
@@ -568,6 +668,7 @@ function Inbox() {
               </>
             )}
           </div>
+          )}
         </aside>
 
         {/* MIDDLE — chat. Mobile single-pane: shown only once a customer is opened. */}
@@ -615,6 +716,74 @@ function TabBtn({ active, onClick, label }: { active: boolean; onClick: () => vo
       }}
     >
       {label}
+    </button>
+  );
+}
+
+// Per-type one-line preview for a flat-feed row: sms/chat → newest customer-facing text;
+// call → summary when the backend provides one, else the last spoken transcript line.
+function feedSnippet(r: TeamFeedRow): string {
+  if (r.type === "sms" || r.type === "chat") {
+    for (const m of r.smsMessages ?? []) { // newest-first per the API
+      if ((m.role || "").toLowerCase() === "tool" || m.toolCalls) continue;
+      const parsed = parseSmsText(m.content || "");
+      if (parsed.kind === "text" && parsed.text) return parsed.text;
+    }
+    return "";
+  }
+  if (r.type === "call") {
+    if (r.summary) return r.summary;
+    const turns = r.transcript ?? [];
+    for (let i = turns.length - 1; i >= 0; i--) { // chronological → walk back to the last spoken line
+      const t = turns[i];
+      if ((t.role || "").toLowerCase() === "tool" || t.toolCalls) continue;
+      const text = (t.message || t.content || "").trim();
+      if (text) return text;
+    }
+    return "";
+  }
+  return ""; // email rows carry no content on this endpoint (bodies live on conversations/v2)
+}
+
+const FEED_CHIP: Record<TeamFeedRow["type"], { label: string; icon: React.ReactNode }> = {
+  call: { label: "Call", icon: <IconPhone size={10} /> },
+  sms: { label: "SMS", icon: <IconBubble size={10} /> },
+  chat: { label: "Chat", icon: <IconBubble size={10} /> },
+  email: { label: "Email", icon: <IconMail size={10} /> },
+};
+
+/* A flat-feed row ("Group by: None") — customer + channel chip + status, then the per-type snippet. */
+function FeedRowView({ row, active, onClick }: { row: TeamFeedRow; active: boolean; onClick: () => void }) {
+  const name = row.customer?.name || row.customer?.mobileNumber || "Unknown";
+  const chip = FEED_CHIP[row.type] ?? FEED_CHIP.sms;
+  const snippet = feedSnippet(row);
+  return (
+    <button
+      onClick={onClick}
+      className="flex w-full flex-col gap-1.5 border-b px-5 py-2.5 text-left transition-colors hover:bg-[#fafafa]"
+      style={{
+        borderColor: C.border,
+        background: active ? "#fafafa" : "#fff",
+        borderLeft: active ? `4px solid ${C.primary}` : "4px solid transparent",
+      }}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(row.customer?.customerId || name) }}>
+            {initials(name)}
+          </span>
+          <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{name}</span>
+        </div>
+        <span className="shrink-0 text-[11px]" style={{ color: C.sub }}>{fmtListStamp(row.updatedAt || row.createdAt)}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold" style={{ background: C.primaryAccent, color: C.primary }}>
+          {chip.icon} {chip.label}
+        </span>
+        {row.status && <span className="shrink-0 text-[11px]" style={{ color: C.sub }}>{prettify(row.status)}</span>}
+        {row.isUnread && <span className="ml-auto size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
+      </div>
+      {snippet && <p className="line-clamp-1 text-[12px]" style={{ color: C.sub }}>{snippet}</p>}
     </button>
   );
 }
