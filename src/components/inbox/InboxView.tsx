@@ -257,6 +257,9 @@ function Inbox() {
   // List grouping: "customer" = one row per customer (leads/v2, the default); "none" = one row per
   // CONVERSATION, latest first (conversations/team) — call/sms/chat/email rows with per-type snippets.
   const [groupBy, setGroupBy] = useState<"customer" | "none">(initialGroup);
+  // Channel filter for the flat feed (None mode): filters BOTH the list (API `type` param) and the
+  // opened thread (records of other channels are hidden while it's active).
+  const [feedType, setFeedType] = useState<"" | "call" | "sms" | "email" | "chat">("");
   const [feedRows, setFeedRows] = useState<TeamFeedRow[]>([]);
   const [feedTotal, setFeedTotal] = useState(0);
   const [feedHasNext, setFeedHasNext] = useState(false);
@@ -416,7 +419,7 @@ function Inbox() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFeedLoading(true);
     feedPageRef.current = 1;
-    fetchInboxTeamFeed(auth, { page: 1, limit: 30, unreadOnly: tab === "unread" }).then((p) => {
+    fetchInboxTeamFeed(auth, { page: 1, limit: 30, unreadOnly: tab === "unread", type: feedType || undefined }).then((p) => {
       if (!on) return;
       setFeedRows(p.conversations);
       setFeedTotal(p.pagination.total);
@@ -425,13 +428,13 @@ function Inbox() {
     });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupBy, tab, teamId, enterpriseId, spyneToken, spyneEnv]);
+  }, [groupBy, tab, feedType, teamId, enterpriseId, spyneToken, spyneEnv]);
 
   const loadMoreFeed = useCallback(() => {
     if (feedLoading || !feedHasNext) return;
     setFeedLoading(true);
     const next = feedPageRef.current + 1;
-    fetchInboxTeamFeed(auth, { page: next, limit: 30, unreadOnly: tab === "unread" }).then((p) => {
+    fetchInboxTeamFeed(auth, { page: next, limit: 30, unreadOnly: tab === "unread", type: feedType || undefined }).then((p) => {
       feedPageRef.current = next;
       setFeedRows((prev) => {
         const seen = new Set(prev.map((r) => r.conversationId));
@@ -440,7 +443,7 @@ function Inbox() {
       setFeedHasNext(p.pagination.hasNext);
       setFeedLoading(false);
     });
-  }, [auth, feedLoading, feedHasNext, tab]);
+  }, [auth, feedLoading, feedHasNext, tab, feedType]);
 
   // Open a flat-feed row: reuse the customer thread (synthesize the row's customer if it isn't loaded).
   const openFeedRow = useCallback((row: TeamFeedRow) => {
@@ -521,6 +524,29 @@ function Inbox() {
           {tz && <span className="ml-1 hidden text-[11px] lg:inline" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
         <div className="relative flex items-center gap-3.5">
+          {/* Group by: Customer (one row per customer) | None (flat per-conversation feed). */}
+          <div className="flex items-center gap-1 rounded-[15px] border px-2 py-1.5" style={{ borderColor: C.border }}>
+            <span className="pl-1 text-[10px]" style={{ color: C.sub }}>Group</span>
+            {(["customer", "none"] as const).map((g) => (
+              <button key={g} onClick={() => setGroupBy(g)}
+                className="rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                style={groupBy === g ? { background: C.primaryAccent, color: C.primary } : { color: C.sub }}>
+                {g === "customer" ? "Customer" : "None"}
+              </button>
+            ))}
+          </div>
+          {/* Channel filter — flat feed only. Filters the list (API `type`) and the opened thread. */}
+          {groupBy === "none" && (
+            <div className="hidden items-center gap-1 rounded-[15px] border px-2 py-1.5 md:flex" style={{ borderColor: C.border }}>
+              {([["", "All"], ["call", "Call"], ["sms", "SMS"], ["email", "Email"], ["chat", "Chat"]] as const).map(([v, label]) => (
+                <button key={label} onClick={() => setFeedType(v)}
+                  className="rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                  style={feedType === v ? { background: C.primaryAccent, color: C.primary } : { color: C.sub }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           <button
             onClick={() => exportCsv(customers)}
             className="flex items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
@@ -596,17 +622,7 @@ function Inbox() {
           <div className="flex shrink-0" style={{ borderColor: C.border }}>
             <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={groupBy === "none" ? `All(${feedTotal})` : `All(${totalAll})`} />
             <TabBtn active={tab === "unread"} onClick={() => setTab("unread")} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
-            <div className="flex flex-1 items-center justify-end gap-1 border-b pr-3" style={{ borderColor: C.border }}>
-              {/* Group by: Customer (default, one row per customer) | None (flat per-conversation feed) */}
-              <span className="text-[10px]" style={{ color: C.sub }}>Group</span>
-              {(["customer", "none"] as const).map((g) => (
-                <button key={g} onClick={() => setGroupBy(g)}
-                  className="rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize"
-                  style={groupBy === g ? { background: C.primaryAccent, color: C.primary } : { color: C.sub }}>
-                  {g === "customer" ? "Customer" : "None"}
-                </button>
-              ))}
-            </div>
+            <div className="flex-1 border-b" style={{ borderColor: C.border }} />
           </div>
           {groupBy === "none" ? (
             /* FLAT feed — one row per conversation (latest first): channel chip + status + per-type snippet. */
@@ -678,6 +694,7 @@ function Inbox() {
               key={selected.customer_id}
               auth={auth}
               customer={selected}
+              typeFilter={groupBy === "none" ? feedType : ""}
               onBack={() => setSelected(null)}
               onDetails={() => setDetailsOpen(true)}
             />
@@ -876,7 +893,7 @@ type ThreadNode =
 const EVENT_GRADIENT =
   "linear-gradient(90deg, rgba(91,109,246,0.10) 1%, rgba(127,106,242,0.10) 23%, rgba(182,81,215,0.10) 66%, rgba(232,62,84,0.10) 86%, rgba(237,137,57,0.10) 113%)";
 
-function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; onBack?: () => void; onDetails?: () => void }) {
+function ThreadPane({ auth, customer, typeFilter = "", onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; typeFilter?: "" | ConvRecord["type"]; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   // §7A purple summary box — persona.conversationMemory.summaryShort, shown at the top of the chat.
   const [summary, setSummary] = useState<string>("");
@@ -926,11 +943,12 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   const dirCounts = useMemo(() => {
     const c = { in: 0, out: 0 };
     for (const rec of conv?.conversations ?? []) {
+      if (typeFilter && rec.type !== typeFilter) continue;
       const d = convDirection(rec);
       if (d === "in") c.in++; else if (d === "out") c.out++;
     }
     return c;
-  }, [conv]);
+  }, [conv, typeFilter]);
 
   // The AI agent's display name: a call's own agentName if present, else the team's onboarded agent
   // (e.g. "Emily Carter"), else "Vini". Plain const (not memoized) so it reflects the onboarded-agents
@@ -943,6 +961,8 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     if (!conv) return [];
     const out: ThreadNode[] = [];
     for (const rec of conv.conversations) {
+      // Channel filter (flat-feed mode) — show only the selected channel's records in the thread.
+      if (typeFilter && rec.type !== typeFilter) continue;
       // Direction filter — skip conversations that don't match the selected inbound/outbound view.
       if (dir !== "all" && convDirection(rec) !== dir) continue;
       const base = +new Date(rec.createdAt) || 0;
@@ -1046,7 +1066,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
       }
     }
     return out.sort((a, b) => a.t - b.t);
-  }, [conv, dir, aiAgentName, custFirst]);
+  }, [conv, dir, typeFilter, aiAgentName, custFirst]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
