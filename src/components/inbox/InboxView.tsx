@@ -17,6 +17,9 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } fr
 import { useScenario } from "@/components/reports/scenario";
 import {
   fetchInboxCustomers,
+  fetchInboxTeamConversations,
+  type TeamConversation,
+  type TeamConversationsPage,
   fetchInboxConversations,
   fetchInboxTimezone,
   fetchInboxAgents,
@@ -215,6 +218,8 @@ const IconPhone = (p: IconProps) => <Svg {...p}><path d="M22 16.9v3a2 2 0 0 1-2.
 const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Svg>;
 const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></Svg>;
 const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
+const IconMail = (p: IconProps) => <Svg {...p}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></Svg>;
+const IconMessage = (p: IconProps) => <Svg {...p}><path d="M21 11.5a8.5 8.5 0 0 1-12.3 7.6L3 21l1.9-5.7A8.5 8.5 0 1 1 21 11.5Z" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Root
@@ -228,6 +233,20 @@ export default function InboxView() {
 }
 
 type Tab = "all" | "unread";
+
+// A flat team-conversation row carries only a lightweight customer stub. The thread pane loads by
+// customer_id (conversations/v2 is customer-scoped), so map the row's customer onto an InboxCustomer.
+// Falls back to leadId/conversationId for the key when the customer lookup was missing (customerId null).
+function teamConvToCustomer(c: TeamConversation): InboxCustomer {
+  return {
+    customer_id: c.customer.customerId || c.leadId || c.conversationId,
+    customer_name: c.customer.name || "",
+    email_id: null,
+    mobile_number: c.customer.mobileNumber || null,
+    createdAt: c.createdAt,
+    lastInteractionTime: c.updatedAt || c.createdAt,
+  };
+}
 
 function Inbox() {
   const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, account } = useScenario();
@@ -245,6 +264,11 @@ function Inbox() {
   }, []);
 
   const [tab, setTab] = useState<Tab>("all");
+  // Group by CUSTOMER (one row per customer, merged thread — the default) vs NONE (a flat list, one row
+  // per conversation, latest-first, via the team-conversations endpoint). Channel is the None-mode
+  // All/SMS/Calls/Email filter → the team endpoint's exact `type` (undefined = all).
+  const [groupBy, setGroupBy] = useState<"customer" | "none">("customer");
+  const [channel, setChannel] = useState<"all" | "sms" | "call" | "email">("all");
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [leadType, setLeadType] = useState<string[]>([]);
@@ -264,6 +288,15 @@ function Inbox() {
   const [loadingMore, setLoadingMore] = useState(false);
   const listBottomRef = useRef<HTMLDivElement | null>(null);
   const [loadingList, setLoadingList] = useState(true);
+
+  // "Group by: None" — a FLAT conversation list from the team-conversations endpoint. Its own paginated /
+  // infinite-scroll state, kept separate from the customer list so switching modes doesn't clobber either.
+  const [teamConvs, setTeamConvs] = useState<TeamConversation[]>([]);
+  const [teamPage, setTeamPage] = useState<TeamConversationsPage["pagination"] | null>(null);
+  const teamPageRef = useRef(1);
+  const [teamLoadingMore, setTeamLoadingMore] = useState(false);
+  const [teamLoadingList, setTeamLoadingList] = useState(false);
+  const teamBottomRef = useRef<HTMLDivElement | null>(null);
 
   // Resolve the rooftop timezone once per team (same working-hours source the reports use) and publish
   // it to the module-level formatters so every stamp / due-date / "Today" filter renders dealer-local.
@@ -341,6 +374,8 @@ function Inbox() {
     setDetailsOpen(false);
     setReadIds((prev) => (prev.has(c.customer_id) ? prev : new Set(prev).add(c.customer_id)));
   }, []);
+  // Flat-list row → open the conversation's customer in the thread pane (loads their full v2 thread).
+  const openTeamConv = useCallback((c: TeamConversation) => { openCustomer(teamConvToCustomer(c)); }, [openCustomer]);
 
   // Debounce the search box → searchTerm query.
   useEffect(() => {
@@ -418,6 +453,62 @@ function Inbox() {
     return () => io.disconnect();
   }, [loadMore]);
 
+  /* ── "Group by: None" — flat team-conversation list ─────────────────────────── */
+  // Channel tab → the team endpoint's exact `type` ("all" ⇒ omitted). Unread tab → unreadOnly.
+  const teamQuery = useMemo(
+    () => ({ limit: 25, type: channel === "all" ? undefined : channel, unreadOnly: tab === "unread" } as const),
+    [channel, tab],
+  );
+  // Load page 1 (reset) whenever we're in None mode and the scope / channel / unread filter changes.
+  // Gated on groupBy so the endpoint isn't hit until the user actually opens the flat view.
+  useEffect(() => {
+    if (groupBy !== "none") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset when scope/filters change
+    if (!teamId || !enterpriseId) { setTeamConvs([]); setTeamPage(null); setTeamLoadingList(false); return; }
+    let on = true;
+    setTeamLoadingList(true);
+    teamPageRef.current = 1;
+    fetchInboxTeamConversations(auth, { ...teamQuery, page: 1 }).then((p) => {
+      if (!on) return;
+      setTeamConvs(p.conversations);
+      setTeamPage(p.pagination);
+      setTeamLoadingList(false);
+      // Desktop auto-opens the first conversation (3-pane); mobile stays on the list.
+      setSelected((cur) => {
+        if (cur) return cur;
+        const isDesktop = typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches;
+        const first = p.conversations[0];
+        return isDesktop && first ? teamConvToCustomer(first) : cur;
+      });
+    });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupBy, teamId, enterpriseId, spyneToken, spyneEnv, teamQuery]);
+
+  const loadMoreTeam = useCallback(() => {
+    if (teamLoadingMore || !teamPage?.hasNext) return;
+    setTeamLoadingMore(true);
+    const next = teamPageRef.current + 1;
+    fetchInboxTeamConversations(auth, { ...teamQuery, page: next })
+      .then((p) => {
+        teamPageRef.current = next;
+        setTeamConvs((prev) => {
+          const seen = new Set(prev.map((c) => c.conversationId));
+          return [...prev, ...p.conversations.filter((c) => !seen.has(c.conversationId))];
+        });
+        setTeamPage(p.pagination);
+      })
+      .finally(() => setTeamLoadingMore(false));
+  }, [auth, teamLoadingMore, teamPage, teamQuery]);
+
+  useEffect(() => {
+    const el = teamBottomRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) loadMoreTeam(); }, { rootMargin: "400px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loadMoreTeam]);
+
   // Typeahead: a floating dropdown of matching customers (name + phone, query highlighted) while the
   // search box has focus. Suggestions are client-filtered from the already-loaded page for instant
   // feedback; picking one opens that conversation directly.
@@ -460,10 +551,32 @@ function Inbox() {
           {account?.name && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
           {tz && <span className="ml-1 hidden text-[11px] lg:inline" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
-        <div className="relative flex items-center gap-3.5">
+        <div className="relative flex flex-wrap items-center justify-end gap-2.5 lg:gap-3.5">
+          {/* Group by: one row per CUSTOMER (merged thread) vs NONE (flat, one row per conversation). */}
+          <div className="flex items-center gap-1.5">
+            <span className="hidden text-[11px] font-medium lg:inline" style={{ color: C.sub }}>Group by</span>
+            <Segmented
+              value={groupBy}
+              onChange={(v) => setGroupBy(v as "customer" | "none")}
+              options={[{ value: "customer", label: "Customer" }, { value: "none", label: "None" }]}
+            />
+          </div>
+          {/* Channel filter — only meaningful for the flat list (maps to the team endpoint's exact type). */}
+          {groupBy === "none" && (
+            <Segmented
+              value={channel}
+              onChange={(v) => setChannel(v as "all" | "sms" | "call" | "email")}
+              options={[
+                { value: "all", label: "All" },
+                { value: "sms", label: "SMS" },
+                { value: "call", label: "Calls" },
+                { value: "email", label: "Email" },
+              ]}
+            />
+          )}
           <button
             onClick={() => exportCsv(customers)}
-            className="flex items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
+            className="flex items-center gap-2 rounded-[15px] border px-4 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8] lg:px-6"
             style={{ borderColor: C.border, color: C.dark }}
           >
             <IconDownload size={13} /> CSV
@@ -534,12 +647,38 @@ function Inbox() {
             )}
           </div>
           <div className="flex shrink-0" style={{ borderColor: C.border }}>
-            <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={`All(${totalAll})`} />
-            <TabBtn active={tab === "unread"} onClick={() => setTab("unread")} label={`Unread(${totalUnread})`} />
+            {/* In None mode the flat endpoint returns a total but no unread count, so Unread shows no number. */}
+            <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
+            <TabBtn active={tab === "unread"} onClick={() => setTab("unread")} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
             <div className="flex-1 border-b" style={{ borderColor: C.border }} />
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {loadingList ? (
+            {groupBy === "none" ? (
+              /* ── FLAT list — one row per conversation (team-conversations endpoint) ── */
+              teamLoadingList ? (
+                <ListSkeleton />
+              ) : teamConvs.length === 0 ? (
+                <div className="px-5 py-10 text-center text-[12px]" style={{ color: C.sub }}>
+                  No conversations {tab === "unread" ? "unread" : "found"}.
+                </div>
+              ) : (
+                <>
+                  {teamConvs.map((c) => (
+                    <TeamConvRow
+                      key={c.conversationId}
+                      c={c}
+                      active={selected?.customer_id === (c.customer.customerId || c.leadId || c.conversationId)}
+                      onClick={() => openTeamConv(c)}
+                    />
+                  ))}
+                  {teamPage?.hasNext && (
+                    <div ref={teamBottomRef} className="flex items-center justify-center py-4 text-[11px]" style={{ color: C.sub }}>
+                      {teamLoadingMore ? "Loading more…" : ""}
+                    </div>
+                  )}
+                </>
+              )
+            ) : loadingList ? (
               <ListSkeleton />
             ) : displayCustomers.length === 0 ? (
               <div className="px-5 py-10 text-center text-[12px]" style={{ color: C.sub }}>
@@ -614,6 +753,60 @@ function TabBtn({ active, onClick, label }: { active: boolean; onClick: () => vo
       }}
     >
       {label}
+    </button>
+  );
+}
+
+// Compact pill segmented control (Group by · channel filter).
+function Segmented({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
+  return (
+    <div className="flex items-center rounded-[15px] border p-0.5" style={{ borderColor: C.border }}>
+      {options.map((o) => {
+        const on = o.value === value;
+        return (
+          <button
+            key={o.value}
+            onClick={() => onChange(o.value)}
+            className="rounded-[12px] px-3 py-1.5 text-[12px] font-medium transition-colors"
+            style={on ? { background: C.primary, color: "#fff" } : { color: C.sub }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// One row in the FLAT (Group by: None) list — a single conversation. The team endpoint carries no message
+// preview, so the row shows the customer, a channel icon + label, status, and the last-activity time.
+function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: boolean; onClick: () => void }) {
+  const name = c.customer.name || c.customer.mobileNumber || "Unknown";
+  const type = (c.type || "").toLowerCase();
+  const chIcon = type === "call" ? <IconPhone size={11} /> : type === "email" ? <IconMail size={11} /> : <IconMessage size={11} />;
+  const chLabel = type === "call" ? "Call" : type === "email" ? "Email" : type === "chat" ? "Chat" : "SMS";
+  return (
+    <button
+      onClick={onClick}
+      className="flex w-full flex-col gap-2 border-b px-5 py-2.5 text-left transition-colors hover:bg-[#fafafa]"
+      style={{ borderColor: C.border, background: active ? "#fafafa" : "#fff", borderLeft: active ? `4px solid ${C.primary}` : "4px solid transparent" }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(c.customer.customerId || name) }}>
+            {initials(name)}
+          </span>
+          <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{name}</span>
+        </div>
+        <span className="shrink-0 text-[12px] font-medium" style={{ color: C.sub }}>{fmtListStamp(c.updatedAt || c.createdAt)}</span>
+      </div>
+      <div className="flex items-center gap-2.5">
+        <span className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: C.primaryAccent, color: C.primary }}>
+          {chIcon} {chLabel}
+        </span>
+        <p className="min-w-0 flex-1 truncate text-[12px]" style={{ color: C.sub }}>{prettify(c.status) || "—"}</p>
+        {c.isUnread && <span className="size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
+      </div>
     </button>
   );
 }

@@ -120,6 +120,55 @@ export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Pro
   }
 }
 
+/* ── Team conversations — FLAT (ungrouped) list, one row per conversation ─────
+ * GET /conversation/customers/conversations/team — powers the "Group by: None" view and the
+ * channel tabs (All/SMS/Calls/Email). Sorted latest-first; empty/test conversations excluded.
+ * Exact `type` match (sms ≠ chat). customer.* may be null when the lead→customer lookup is missing. */
+export interface TeamConversation {
+  conversationId: string;
+  type: "call" | "sms" | "email" | "chat" | string;
+  status: string;
+  leadId: string | null;
+  isUnread: boolean;
+  createdAt: string;
+  updatedAt: string;
+  customer: { customerId: string | null; name: string | null; mobileNumber: string | null };
+}
+export interface TeamConversationsPage {
+  conversations: TeamConversation[];
+  pagination: { total: number; page: number; limit: number; totalPages: number; hasNext: boolean; hasPrev: boolean };
+}
+export interface TeamConvQuery {
+  page?: number;
+  limit?: number;
+  type?: "call" | "sms" | "email" | "chat";
+  unreadOnly?: boolean;
+}
+const EMPTY_TEAM_PAGE: TeamConversationsPage = {
+  conversations: [],
+  pagination: { total: 0, page: 1, limit: 25, totalPages: 1, hasNext: false, hasPrev: false },
+};
+export async function fetchInboxTeamConversations(a: InboxAuth, q: TeamConvQuery = {}): Promise<TeamConversationsPage> {
+  if (!a.teamId || !a.enterpriseId) return EMPTY_TEAM_PAGE;
+  const p = new URLSearchParams({ team_id: a.teamId, enterprise_id: a.enterpriseId });
+  p.set("page", String(q.page ?? 1));
+  p.set("limit", String(q.limit ?? 25));
+  if (q.type) p.set("type", q.type);
+  if (q.unreadOnly) p.set("unreadOnly", "1");
+  if (a.serviceType) p.set("serviceType", a.serviceType); // department scope (sales|service)
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/conversations-team?${p}`, { cache: "no-store", headers: authHeaders(a) });
+    const j = (await r.json().catch(() => null)) as { data?: { conversations?: unknown }; pagination?: unknown } | null;
+    if (!r.ok || !j) return EMPTY_TEAM_PAGE;
+    const conversations = Array.isArray(j.data?.conversations) ? (j.data!.conversations as TeamConversation[]) : [];
+    const pg = (j.pagination ?? {}) as Partial<TeamConversationsPage["pagination"]>;
+    return { conversations, pagination: { ...EMPTY_TEAM_PAGE.pagination, ...pg } };
+  } catch {
+    return EMPTY_TEAM_PAGE;
+  }
+}
+
 /* ── Conversations V2 — right-pane feed for one customer ────────────────────── */
 // One SMS bubble. The AI side ("assistant") wraps its text in a JSON envelope
 // {text, message_reason}; the customer side ("user") is plain text. `_ts` is epoch-ms.
