@@ -152,6 +152,7 @@ export async function GET(request: Request): Promise<Response> {
   const svcParam = (searchParams.get("serviceType") || "both").toLowerCase();
   const service: ServiceType | "both" = svcParam === "sales" || svcParam === "service" ? svcParam : "both";
   const scope = (searchParams.get("scope") || "window").toLowerCase();
+  const pollMinutes = Math.max(1, Math.min(1440, Number(searchParams.get("minutes")) || 25)); // 1–1440 min, default 25
   // The host scopes the iframe with ?enterprise_id=&team_id=. Honor it; else the lib decodes it from the token.
   const enterpriseId = searchParams.get("enterprise_id") || undefined;
   // Drill-down agent (report slot id). Maps to the agent_type whose booked leads we list, so an inbound
@@ -212,7 +213,17 @@ export async function GET(request: Request): Promise<Response> {
   let bookedEndISO: string | undefined;
   let leadIds: string[] | undefined;
 
-  if (scope === "upcoming") {
+  if (scope === "recent") {
+    // Appointments created in the last N minutes (for event transactional emails).
+    // A wide meeting-time window so booked-in-period appointments (scheduled far ahead) still match.
+    const now = new Date();
+    const recentStart = new Date(now.getTime() - pollMinutes * 60 * 1000);
+    startISO = recentStart.toISOString();
+    endISO = new Date(now.getTime() + BOOKED_LOOKAHEAD_DAYS * 86_400_000).toISOString();
+    bookedStartISO = recentStart.toISOString();
+    bookedEndISO = now.toISOString();
+    sortOrder = "desc"; // newest first
+  } else if (scope === "upcoming") {
     // From now forward — soonest first. (new Date() is fine in a route; not a workflow.)
     const now = new Date();
     const horizon = new Date(now.getTime() + UPCOMING_HORIZON_DAYS * 86_400_000);
