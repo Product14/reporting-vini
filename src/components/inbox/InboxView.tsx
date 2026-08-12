@@ -251,24 +251,34 @@ function teamConvToCustomer(c: TeamConversation): InboxCustomer {
 // Sidebar row's last-message preview. leads/v2 carries NO message text, so we derive it from the
 // customer's most recent conversation (the row-enrichment already fetches it for the appt/action icons).
 function lastMessagePreview(convs: ConvRecord[] | undefined): string {
-  const c = convs?.[0];
-  if (!c) return "";
   const clip = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
-  if (c.type === "call") {
-    return (c.callData?.callType || "").toLowerCase().includes("inbound") ? "Inbound call" : "Outbound call";
+  // Scan newest→older and use the first conversation that carries a REAL message. A campaign-started /
+  // "not connected" / in-progress conversation with no email/sms/call content is skipped so the preview
+  // reflects the last actual email/sms/call — not a campaign event (RETCONVAI-4597/4584).
+  for (const c of convs ?? []) {
+    if (c.type === "call") {
+      // a call record is real content only if it actually happened (has a callId / duration / transcript)
+      if (c.callId || c.callData?.callDuration || c.callData?.transcript) {
+        return (c.callData?.callType || "").toLowerCase().includes("inbound") ? "Inbound call" : "Outbound call";
+      }
+      continue;
+    }
+    if (c.type === "email") {
+      const e = c.emailMessages?.[c.emailMessages.length - 1];
+      if (!e) continue;
+      const who = e.role === "human" || e.direction === "inbound" ? "" : "Vini: ";
+      const body = clip(who + (e.subject || e.body || ""));
+      if (body) return body;
+      continue;
+    }
+    // sms / chat — bubbles are chronological, newest last.
+    const m = c.smsMessages?.[c.smsMessages.length - 1];
+    if (!m) continue;
+    const parsed = parseSmsText(m.content);
+    const text = parsed.text || parsed.summary || "";
+    if (text) return clip((m.role === "user" ? "" : "Vini: ") + text);
   }
-  if (c.type === "email") {
-    const e = c.emailMessages?.[c.emailMessages.length - 1];
-    if (!e) return "Email";
-    const who = e.role === "human" || e.direction === "inbound" ? "" : "Vini: ";
-    return clip(who + (e.subject || e.body || "Email"));
-  }
-  // sms / chat — bubbles are chronological, so the last element is the newest message.
-  const m = c.smsMessages?.[c.smsMessages.length - 1];
-  if (!m) return "";
-  const parsed = parseSmsText(m.content);
-  const text = parsed.text || parsed.summary || "";
-  return text ? clip((m.role === "user" ? "" : "Vini: ") + text) : "";
+  return "";
 }
 
 function Inbox() {
@@ -367,7 +377,9 @@ function Inbox() {
       while (enrichActive.current < 2 && enrichQueue.current.length) {
         const id = enrichQueue.current.shift()!;
         enrichActive.current++;
-        fetchInboxConversations(authRef.current, id, { limit: 1 })
+        // limit 5 (not 1) so the preview can skip content-less campaign/in-progress conversations and
+        // fall back to the last real email/sms/call (RETCONVAI-4597/4584).
+        fetchInboxConversations(authRef.current, id, { limit: 5 })
           .then((d) => {
             rowMetaCache.current[id] = {
               appt: d.nextAppointments.length,
