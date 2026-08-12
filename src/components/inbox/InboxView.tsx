@@ -219,7 +219,6 @@ const IconMail = (p: IconProps) => <Svg {...p}><rect x="2" y="4" width="20" heig
 const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Svg>;
 const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></Svg>;
 const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
-const IconMail = (p: IconProps) => <Svg {...p}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></Svg>;
 const IconMessage = (p: IconProps) => <Svg {...p}><path d="M21 11.5a8.5 8.5 0 0 1-12.3 7.6L3 21l1.9-5.7A8.5 8.5 0 1 1 21 11.5Z" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -247,6 +246,29 @@ function teamConvToCustomer(c: TeamConversation): InboxCustomer {
     createdAt: c.createdAt,
     lastInteractionTime: c.updatedAt || c.createdAt,
   };
+}
+
+// Sidebar row's last-message preview. leads/v2 carries NO message text, so we derive it from the
+// customer's most recent conversation (the row-enrichment already fetches it for the appt/action icons).
+function lastMessagePreview(convs: ConvRecord[] | undefined): string {
+  const c = convs?.[0];
+  if (!c) return "";
+  const clip = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
+  if (c.type === "call") {
+    return (c.callData?.callType || "").toLowerCase().includes("inbound") ? "Inbound call" : "Outbound call";
+  }
+  if (c.type === "email") {
+    const e = c.emailMessages?.[c.emailMessages.length - 1];
+    if (!e) return "Email";
+    const who = e.role === "human" || e.direction === "inbound" ? "" : "Vini: ";
+    return clip(who + (e.subject || e.body || "Email"));
+  }
+  // sms / chat — bubbles are chronological, so the last element is the newest message.
+  const m = c.smsMessages?.[c.smsMessages.length - 1];
+  if (!m) return "";
+  const parsed = parseSmsText(m.content);
+  const text = parsed.text || parsed.summary || "";
+  return text ? clip((m.role === "user" ? "" : "Vini: ") + text) : "";
 }
 
 function Inbox() {
@@ -321,11 +343,11 @@ function Inbox() {
   // Customers opened this session — treated as read (INVAI-4968; no read-state write API exists).
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
 
-  // Per-row appt/action-item icons. leads/v2 doesn't return these, so each needs a conversations/v2
-  // call — but LAZILY, only for rows scrolled into view (a row reports visibility via onVisible), with a
-  // concurrency cap + cache. This restores the icons without the old "fetch for every row on load" flood.
-  const [rowMeta, setRowMeta] = useState<Record<string, { appt: number; actions: number }>>({});
-  const rowMetaCache = useRef<Record<string, { appt: number; actions: number }>>({});
+  // Per-row appt/action-item icons + last-message preview. leads/v2 returns none of these, so each needs a
+  // conversations/v2 call — but LAZILY, only for rows scrolled into view (a row reports visibility via
+  // onVisible), with a concurrency cap + cache. Avoids the old "fetch for every row on load" flood.
+  const [rowMeta, setRowMeta] = useState<Record<string, { appt: number; actions: number; preview?: string }>>({});
+  const rowMetaCache = useRef<Record<string, { appt: number; actions: number; preview?: string }>>({});
   const enrichQueue = useRef<string[]>([]);
   const enrichActive = useRef(0);
   const enrichReady = useRef(false); // gate: enrichment waits until primary content has had a head start
@@ -350,6 +372,7 @@ function Inbox() {
             rowMetaCache.current[id] = {
               appt: d.nextAppointments.length,
               actions: d.nextActionItems.filter((a) => a.is_active && !a.is_completed).length,
+              preview: lastMessagePreview(d.conversations),
             };
             setRowMeta((m) => ({ ...m, [id]: rowMetaCache.current[id] }));
           })
@@ -812,7 +835,7 @@ function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: bool
   );
 }
 
-function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: InboxCustomer; meta?: { appt: number; actions: number }; active: boolean; read?: boolean; onClick: () => void; onVisible?: (customerId: string) => void }) {
+function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: InboxCustomer; meta?: { appt: number; actions: number; preview?: string }; active: boolean; read?: boolean; onClick: () => void; onVisible?: (customerId: string) => void }) {
   const unread = read ? 0 : c.unreadCounts?.totalUnread ?? 0;
   const callUnread = c.unreadCounts?.callUnread ?? 0;
   const name = c.customer_name || c.mobile_number || "Unknown";
@@ -861,8 +884,8 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: Inb
         <span className="shrink-0 text-[12px] font-medium" style={{ color: C.sub }}>{fmtListStamp(c.lastInteractionTime || c.createdAt)}</span>
       </div>
       <div className="flex items-center gap-2.5">
-        <p className="min-w-0 flex-1 truncate text-[12px]" style={{ color: c.lastMessage ? C.dark : C.sub }}>
-          {c.lastMessage || c.email_id || c.mobile_number || "No preview available"}
+        <p className="min-w-0 flex-1 truncate text-[12px]" style={{ color: (meta?.preview || c.lastMessage) ? C.dark : C.sub }}>
+          {meta?.preview || c.lastMessage || c.email_id || c.mobile_number || "No preview available"}
         </p>
         {unread > 0 && <span className="size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
       </div>
