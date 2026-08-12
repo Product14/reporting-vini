@@ -344,6 +344,10 @@ function Inbox() {
   // thousands of customers, so we append the next page as the user scrolls near the bottom.
   const [customers, setCustomers] = useState<InboxCustomer[]>([]);
   const [pageInfo, setPageInfo] = useState<LeadsPage["pagination"] | null>(null);
+  // Stable tab counts (All + Unread). Captured ONLY from the unfiltered (unreadOnly=false) query so that
+  // switching to the Unread tab — which refetches with unreadOnly=true — doesn't collapse the "All" count
+  // to the filtered total (RETCONVAI-4582).
+  const [counts, setCounts] = useState<{ all: number; unread: number } | null>(null);
   const pageRef = useRef(1);
   const [loadingMore, setLoadingMore] = useState(false);
   const listBottomRef = useRef<HTMLDivElement | null>(null);
@@ -471,6 +475,9 @@ function Inbox() {
       if (!on) return;
       setCustomers(p.customers);
       setPageInfo(p.pagination);
+      // Only the unfiltered query knows the true All + Unread totals; the unread query's pagination is
+      // scoped to unread rows, so never overwrite the cached counts from it.
+      if (!listQuery.unreadOnly) setCounts({ all: p.pagination.totalCustomers, unread: p.pagination.unreadCount });
       setLoadingList(false);
       // Auto-select: the deep-linked customer if any (synthesize a stub row if it's not on this page so
       // the thread still loads), else the first conversation. Only when nothing is selected yet.
@@ -589,11 +596,12 @@ function Inbox() {
       .slice(0, 6);
   }, [search, customers]);
   const showSuggest = searchFocused && search.trim().length >= 1 && suggestions.length > 0;
-  const totalAll = pageInfo?.totalCustomers ?? customers.length;
+  // Prefer the cached unfiltered totals so the labels stay correct on the Unread tab (RETCONVAI-4582).
+  const totalAll = counts?.all ?? pageInfo?.totalCustomers ?? customers.length;
   // Customers opened this session count as read immediately (there's no read-state write API), so the
   // Unread count + the row dot update on open instead of staying stale (INVAI-4968).
   const readInSession = customers.filter((c) => readIds.has(c.customer_id) && (c.unreadCounts?.totalUnread ?? 0) > 0).length;
-  const totalUnread = Math.max(0, (pageInfo?.unreadCount ?? 0) - readInSession);
+  const totalUnread = Math.max(0, (counts?.unread ?? pageInfo?.unreadCount ?? 0) - readInSession);
   // On the Unread tab, drop conversations read this session so they leave the list on open (there's no
   // read-state write API, so the server still returns them until a refetch — filter them out here).
   const displayCustomers = tab === "unread" ? customers.filter((c) => !readIds.has(c.customer_id)) : customers;
