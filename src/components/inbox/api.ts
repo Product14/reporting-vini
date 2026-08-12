@@ -124,6 +124,15 @@ export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Pro
  * GET /conversation/customers/conversations/team — powers the "Group by: None" view and the
  * channel tabs (All/SMS/Calls/Email). Sorted latest-first; empty/test conversations excluded.
  * Exact `type` match (sms ≠ chat). customer.* may be null when the lead→customer lookup is missing. */
+// The team endpoint MAY enrich each row with inline message content (newer API revision): calls get
+// `transcript` (last ~10 turns), sms/chat get `smsMessages` (newest-first, ≤10). Both are optional — an
+// older/simpler revision returns metadata only, so everything downstream treats them as best-effort.
+export interface TeamTranscriptTurn {
+  role?: string; // bot | user | tool
+  message?: string | null;
+  content?: string | null;
+  toolCalls?: ToolCall[] | null;
+}
 export interface TeamConversation {
   conversationId: string;
   type: "call" | "sms" | "email" | "chat" | string;
@@ -132,7 +141,10 @@ export interface TeamConversation {
   isUnread: boolean;
   createdAt: string;
   updatedAt: string;
+  callId?: string | null;
   customer: { customerId: string | null; name: string | null; mobileNumber: string | null };
+  transcript?: TeamTranscriptTurn[]; // call rows (chronological)
+  smsMessages?: SmsMessage[]; // sms/chat rows (newest-first)
 }
 export interface TeamConversationsPage {
   conversations: TeamConversation[];

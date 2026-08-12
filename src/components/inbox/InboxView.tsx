@@ -281,6 +281,33 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
   return "";
 }
 
+// Flat-list (None) row preview — uses the team endpoint's INLINE messages when present (newer API
+// revision). sms/chat: smsMessages are newest-first, so the first real text is the latest message.
+// call: transcript is chronological, so the last spoken (non-tool) turn is the latest. Empty → "".
+function teamConvPreview(c: TeamConversation): string {
+  const clip = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
+  const t = (c.type || "").toLowerCase();
+  if (t === "sms" || t === "chat") {
+    for (const m of c.smsMessages ?? []) {
+      const parsed = parseSmsText(m.content ?? "");
+      const text = parsed.text || parsed.summary || "";
+      if (text) return clip((m.role === "user" ? "" : "Vini: ") + text);
+    }
+    return "";
+  }
+  if (t === "call") {
+    const turns = c.transcript ?? [];
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const turn = turns[i];
+      if (turn.role === "tool") continue;
+      const txt = (turn.message ?? turn.content ?? "").toString().trim();
+      if (txt) return clip((turn.role === "user" ? "" : "Vini: ") + txt);
+    }
+    return "";
+  }
+  return "";
+}
+
 function Inbox() {
   const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, account } = useScenario();
   const auth: InboxAuth = useMemo(
@@ -814,13 +841,15 @@ function Segmented({ value, onChange, options }: { value: string; onChange: (v: 
   );
 }
 
-// One row in the FLAT (Group by: None) list — a single conversation. The team endpoint carries no message
-// preview, so the row shows the customer, a channel icon + label, status, and the last-activity time.
+// One row in the FLAT (Group by: None) list — a single conversation. Shows the customer, a channel
+// icon + label, then the last message (from the team endpoint's inline transcript/smsMessages when the
+// API provides them) or the conversation status as a fallback, and the last-activity time.
 function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: boolean; onClick: () => void }) {
   const name = c.customer.name || c.customer.mobileNumber || "Unknown";
   const type = (c.type || "").toLowerCase();
   const chIcon = type === "call" ? <IconPhone size={11} /> : type === "email" ? <IconMail size={11} /> : <IconMessage size={11} />;
   const chLabel = type === "call" ? "Call" : type === "email" ? "Email" : type === "chat" ? "Chat" : "SMS";
+  const preview = teamConvPreview(c) || prettify(c.status) || "—";
   return (
     <button
       onClick={onClick}
@@ -840,7 +869,7 @@ function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: bool
         <span className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: C.primaryAccent, color: C.primary }}>
           {chIcon} {chLabel}
         </span>
-        <p className="min-w-0 flex-1 truncate text-[12px]" style={{ color: C.sub }}>{prettify(c.status) || "—"}</p>
+        <p className="min-w-0 flex-1 truncate text-[12px]" style={{ color: C.sub }}>{preview}</p>
         {c.isUnread && <span className="size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
       </div>
     </button>
