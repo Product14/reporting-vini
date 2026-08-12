@@ -971,6 +971,23 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   // §03 feedback — keyed `${conversationId}#${messageIndex}` → thumb direction.
   const [fbMap, setFbMap] = useState<Record<string, "up" | "down">>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Who is reporting the feedback → submittedByEmail (required by the feedbacks/entries API). Seeded from
+  // the iframe ?userEmail= but ALSO settable in the UI (the console doesn't always forward it), and
+  // remembered in localStorage so the operator types it once. `emailPrompt` holds a deferred vote that
+  // runs after the operator supplies an email.
+  const [feedbackEmail, setFeedbackEmail] = useState("");
+  const [emailPrompt, setEmailPrompt] = useState<null | ((email: string) => void)>(null);
+  useEffect(() => {
+    let stored = "";
+    try { stored = window.localStorage.getItem("inbox_feedback_email") || ""; } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- seed once from storage/URL
+    setFeedbackEmail(stored || auth.userEmail || "");
+  }, [auth.userEmail]);
+  const persistFeedbackEmail = useCallback((email: string) => {
+    const e = email.trim();
+    setFeedbackEmail(e);
+    try { window.localStorage.setItem("inbox_feedback_email", e); } catch { /* ignore */ }
+  }, []);
 
   useEffect(() => {
     let on = true;
@@ -992,12 +1009,19 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   }, [auth, customer.customer_id]);
 
   const voteFeedback = useCallback(
-    (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call" | "chat", note?: string, reason?: string) => {
-      const key = `${conversationId}#${messageIndex}`;
-      setFbMap((m) => ({ ...m, [key]: rating }));
-      void postInboxFeedback(auth, { conversationId, channel, messageIndex, message, rating, note, reason });
+    (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call" | "chat", note?: string, reason?: string, emailOverride?: string) => {
+      const email = (emailOverride || feedbackEmail || auth.userEmail || "").trim();
+      const run = (em: string) => {
+        const key = `${conversationId}#${messageIndex}`;
+        setFbMap((m) => ({ ...m, [key]: rating }));
+        // submittedByEmail is required by /feedbacks/entries — attach the reporter's email.
+        void postInboxFeedback({ ...auth, userEmail: em }, { conversationId, channel, messageIndex, message, rating, note, reason });
+      };
+      // No email yet (console didn't pass ?userEmail= and none stored) → capture it, then record the vote.
+      if (!email) { setEmailPrompt(() => run); return; }
+      run(email);
     },
-    [auth],
+    [auth, feedbackEmail],
   );
 
   // §Report-modal (Figma 9842-21472) — thumbs-down opens a report form; submit posts a "down" vote.
@@ -1235,22 +1259,38 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
 
       {reportTarget && (
         <ReportModal
+          initialEmail={feedbackEmail || auth.userEmail || ""}
           onClose={() => setReportTarget(null)}
-          onSubmit={(reason, note) => {
-            voteFeedback(reportTarget.conversationId, reportTarget.messageIndex, reportTarget.message, "down", reportTarget.channel, note, reason);
+          onSubmit={(reason, note, email) => {
+            persistFeedbackEmail(email);
+            voteFeedback(reportTarget.conversationId, reportTarget.messageIndex, reportTarget.message, "down", reportTarget.channel, note, reason, email);
             setReportTarget(null);
           }}
+        />
+      )}
+      {emailPrompt && (
+        <FeedbackEmailModal
+          initial={feedbackEmail || auth.userEmail || ""}
+          onClose={() => setEmailPrompt(null)}
+          onSave={(email) => { const run = emailPrompt; persistFeedbackEmail(email); setEmailPrompt(null); run(email); }}
         />
       )}
     </>
   );
 }
 
-/* §Report-this-message modal — Figma 9842-21472. Reason chips + optional note → a "down" vote. */
+// Basic email shape check — enough to keep an empty/typo'd submittedByEmail out of the reporting table.
+function isEmail(s: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((s || "").trim());
+}
+
+/* §Report-this-message modal — Figma 9842-21472. Reporter email + reason chips + optional note → a "down" vote. */
 const REPORT_REASONS = ["Gave wrong Information", "Tone was off", "Missed the ask", "Shouldn't have sent this message", "Other"];
-function ReportModal({ onClose, onSubmit }: { onClose: () => void; onSubmit: (reason: string, note: string) => void }) {
+function ReportModal({ initialEmail, onClose, onSubmit }: { initialEmail: string; onClose: () => void; onSubmit: (reason: string, note: string, email: string) => void }) {
   const [reason, setReason] = useState<string>("");
   const [note, setNote] = useState("");
+  const [email, setEmail] = useState(initialEmail);
+  const emailOk = isEmail(email);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
       <div className="absolute inset-0 bg-black/30" />
@@ -1280,14 +1320,59 @@ function ReportModal({ onClose, onSubmit }: { onClose: () => void; onSubmit: (re
           className="mt-4 w-full resize-none rounded-[12px] border px-4 py-3 text-[13px] outline-none focus:border-[#4600f2]"
           style={{ borderColor: C.border, color: C.dark }}
         />
+        <label className="mt-4 block text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Your email</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@dealership.com"
+          className="mt-1.5 w-full rounded-[12px] border px-4 py-2.5 text-[13px] outline-none focus:border-[#4600f2]"
+          style={{ borderColor: C.border, color: C.dark }}
+        />
+        <p className="mt-1 text-[11px]" style={{ color: C.sub }}>Attributes who reported it. Saved on this device for next time.</p>
         <div className="mt-5 flex items-center justify-end gap-4">
           <button onClick={onClose} className="text-[13px] font-medium" style={{ color: C.dark }}>Cancel</button>
           <button
-            disabled={!reason}
-            onClick={() => onSubmit(reason, note.trim())}
+            disabled={!reason || !emailOk}
+            onClick={() => onSubmit(reason, note.trim(), email.trim())}
             className="rounded-full px-6 py-2.5 text-[13px] font-semibold text-white transition-opacity disabled:opacity-40"
             style={{ background: C.red }}>
             Submit Report
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Lightweight email capture — shown when a thumbs-up is given but no reporter email is known yet. */
+function FeedbackEmailModal({ initial, onClose, onSave }: { initial: string; onClose: () => void; onSave: (email: string) => void }) {
+  const [email, setEmail] = useState(initial);
+  const emailOk = isEmail(email);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/30" />
+      <div className="animate-dropdown-in relative w-full max-w-[440px] rounded-[16px] bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-[16px] font-semibold" style={{ color: C.dark }}>Your email</h2>
+        <p className="mt-1 text-[12px]" style={{ color: C.sub }}>So we can attribute your feedback. Saved on this device for next time.</p>
+        <input
+          type="email"
+          autoFocus
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && emailOk) onSave(email.trim()); }}
+          placeholder="you@dealership.com"
+          className="mt-4 w-full rounded-[12px] border px-4 py-2.5 text-[13px] outline-none focus:border-[#4600f2]"
+          style={{ borderColor: C.border, color: C.dark }}
+        />
+        <div className="mt-5 flex items-center justify-end gap-4">
+          <button onClick={onClose} className="text-[13px] font-medium" style={{ color: C.dark }}>Cancel</button>
+          <button
+            disabled={!emailOk}
+            onClick={() => onSave(email.trim())}
+            className="rounded-full px-6 py-2.5 text-[13px] font-semibold text-white transition-opacity disabled:opacity-40"
+            style={{ background: C.primary }}>
+            Save & submit
           </button>
         </div>
       </div>
