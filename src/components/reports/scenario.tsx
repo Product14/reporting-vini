@@ -66,6 +66,7 @@ interface Ctx {
   enterpriseId: string; // host-forwarded ?enterprise_id= (scopes the live meetings API); "" → decode from token
   spyneEnv: string; // host-forwarded ?env=uat|stag|prod — which Spyne backend our API routes should call; "" → prod
   serviceType: "sales" | "service"; // host-forwarded ?serviceType= — the department SPACE this iframe is scoped to
+  serviceTypeExplicit: boolean; // did the URL / referrer actually specify it? false ⇒ we defaulted to sales
   userEmail: string; // host-forwarded ?userEmail= — the logged-in operator (attributes feedback reports)
   userName: string;  // host-forwarded ?userName= — display name of the operator (else derived from email)
 }
@@ -96,6 +97,7 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
   const [enterpriseId, setEnterpriseId] = useState("");
   const [spyneEnv, setSpyneEnv] = useState("");
   const [serviceType, setServiceType] = useState<"sales" | "service">("sales");
+  const [serviceTypeExplicit, setServiceTypeExplicit] = useState(false);
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
   useEffect(() => {
@@ -127,6 +129,9 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
     } catch { /* no / cross-origin-stripped referrer → ignore */ }
     const rawDept = (sp.get("serviceType") || sp.get("service_type") || sp.get("department") || refDept || "").trim().toLowerCase();
     setServiceType(rawDept === "service" ? "service" : "sales");
+    // Was the department actually specified anywhere (URL or referrer)? If not, we're defaulting to sales
+    // blind — the app shows an in-UI Sales/Service switcher so the operator isn't stuck on the wrong space.
+    setServiceTypeExplicit(rawDept === "sales" || rawDept === "service");
     // Operator identity for feedback attribution — the console forwards the logged-in user as
     // ?userEmail=/?email= (+ optional ?userName=/?name=), same as the action-items-console contract.
     setUserEmail((sp.get("userEmail") || sp.get("email") || sp.get("user_email") || "").trim());
@@ -135,7 +140,7 @@ export function ScenarioProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   if (account === null) return <ScenarioResolving />;
-  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId, spyneEnv, serviceType, userEmail, userName }}>{children}</ScenarioCtx.Provider>;
+  return <ScenarioCtx.Provider value={{ account, spyneToken, enterpriseId, spyneEnv, serviceType, serviceTypeExplicit, userEmail, userName }}>{children}</ScenarioCtx.Provider>;
 }
 
 export function useScenario(): {
@@ -146,6 +151,7 @@ export function useScenario(): {
   enterpriseId: string;
   spyneEnv: string;
   serviceType: "sales" | "service";
+  serviceTypeExplicit: boolean;
   userEmail: string;
   userName: string;
   view: ScenarioView;
@@ -161,6 +167,7 @@ export function useScenario(): {
     enterpriseId: c?.enterpriseId ?? "",
     spyneEnv: c?.spyneEnv ?? "",
     serviceType: c?.serviceType ?? "sales",
+    serviceTypeExplicit: c?.serviceTypeExplicit ?? false,
     userEmail: c?.userEmail ?? "",
     userName: c?.userName ?? "",
     view: scenarioView(scenario),

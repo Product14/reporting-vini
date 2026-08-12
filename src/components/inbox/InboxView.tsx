@@ -309,7 +309,25 @@ function teamConvPreview(c: TeamConversation): string {
 }
 
 function Inbox() {
-  const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, account } = useScenario();
+  const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType: scopeServiceType, serviceTypeExplicit, userEmail, userName, account } = useScenario();
+  // FALLBACK department switcher — only when the host didn't specify serviceType (URL/referrer). Without
+  // it we'd blindly default to "sales" and the Service space would show sales conversations (RETCONVAI-4580).
+  // When the host DID specify it, the space is fixed and no switcher shows. Choice persists per-team.
+  const deptKey = `inbox_dept_${teamId}`;
+  const [deptChoice, setDeptChoice] = useState<"sales" | "service">("sales");
+  useEffect(() => {
+    if (serviceTypeExplicit) return;
+    let stored = "";
+    try { stored = window.localStorage.getItem(deptKey) || ""; } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- seed the fallback choice from storage
+    setDeptChoice(stored === "service" ? "service" : "sales");
+  }, [deptKey, serviceTypeExplicit]);
+  const pickDept = useCallback((d: "sales" | "service") => {
+    setDeptChoice(d);
+    try { window.localStorage.setItem(deptKey, d); } catch { /* ignore */ }
+  }, [deptKey]);
+  // The effective department: host value when specified, else the operator's fallback choice.
+  const serviceType = serviceTypeExplicit ? scopeServiceType : deptChoice;
   const auth: InboxAuth = useMemo(
     () => ({ teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, teamName: account.name }),
     [teamId, enterpriseId, spyneToken, spyneEnv, serviceType, userEmail, userName, account.name],
@@ -495,7 +513,7 @@ function Inbox() {
     });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId, enterpriseId, spyneToken, spyneEnv, listQuery]);
+  }, [teamId, enterpriseId, spyneToken, spyneEnv, serviceType, listQuery]);
 
   // Append the next page (infinite scroll). Deduped by customer_id (page boundaries can repeat a row).
   const loadMore = useCallback(() => {
@@ -553,7 +571,7 @@ function Inbox() {
     });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupBy, teamId, enterpriseId, spyneToken, spyneEnv, teamQuery]);
+  }, [groupBy, teamId, enterpriseId, spyneToken, spyneEnv, serviceType, teamQuery]);
 
   const loadMoreTeam = useCallback(() => {
     if (teamLoadingMore || !teamPage?.hasNext) return;
@@ -618,7 +636,18 @@ function Inbox() {
           </span>
           <h1 className="text-[16px] font-semibold" style={{ color: C.dark }}>Conversations</h1>
           {/* Department SPACE from the ?serviceType= embed param — this iframe is scoped to Sales or Service. */}
-          <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: C.primaryAccent, color: C.primary }}>{serviceType}</span>
+          {serviceTypeExplicit ? (
+            <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: C.primaryAccent, color: C.primary }}>{serviceType}</span>
+          ) : (
+            // Department wasn't passed by the console → let the operator choose (fallback for RETCONVAI-4580).
+            <span className="ml-1 inline-flex" title="Department wasn't set by the console — choose it here">
+              <Segmented
+                value={serviceType}
+                onChange={(v) => pickDept(v as "sales" | "service")}
+                options={[{ value: "sales", label: "Sales" }, { value: "service", label: "Service" }]}
+              />
+            </span>
+          )}
           {account?.name && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
           {tz && <span className="ml-1 hidden text-[11px] lg:inline" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
