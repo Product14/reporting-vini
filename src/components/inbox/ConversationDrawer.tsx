@@ -21,8 +21,8 @@ import {
 } from "./api";
 
 export type DrawerTarget =
-  | { kind: "call"; title: string; sub?: string; conversationId: string; callId?: string | null; recordingUrl?: string | null; inlineTranscript?: (TranscriptTurn | TeamTranscriptTurn)[] }
-  | { kind: "sms" | "chat"; title: string; sub?: string; conversationId: string; messages: SmsMessage[] };
+  | { kind: "call"; title: string; sub?: string; agentName?: string; conversationId: string; callId?: string | null; recordingUrl?: string | null; inlineTranscript?: (TranscriptTurn | TeamTranscriptTurn)[] }
+  | { kind: "sms" | "chat"; title: string; sub?: string; agentName?: string; conversationId: string; messages: SmsMessage[] };
 
 interface Turn { role: "ai" | "customer"; text: string; atSec: number | null; atMs: number | null }
 
@@ -79,7 +79,15 @@ const D_CLOSE = "M18 6 6 18M6 6l12 12";
 const D_CLOCK = "M12 7v5l3 2M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18Z";
 const D_FILE = "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6";
 
+// Two-letter avatar initials for the AI agent name (e.g. "Emily Carter" → "EC").
+function agentInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "AI";
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
+}
+
 export function ConversationDrawer({ auth, target, tz, onClose }: { auth: InboxAuth; target: DrawerTarget; tz?: string; onClose: () => void }) {
+  const agentName = target.agentName || "Vini";
   const [turns, setTurns] = useState<Turn[] | null>(target.kind === "call" ? null : smsTurns(target.messages));
   const [recordingUrl, setRecordingUrl] = useState<string | null | undefined>(target.kind === "call" ? target.recordingUrl : null);
   const [audioTime, setAudioTime] = useState(0);
@@ -174,7 +182,7 @@ export function ConversationDrawer({ auth, target, tz, onClose }: { auth: InboxA
               {list.map((m, i) => {
                 const active = i === activeIndex;
                 const clickable = isCall && m.atSec != null;
-                const badge = m.role === "ai" ? { label: "AI", cls: "bg-purple-200 text-purple-700" } : { label: "CU", cls: "bg-green-200 text-green-700" };
+                const badge = m.role === "ai" ? { label: agentInitials(agentName), cls: "bg-purple-200 text-purple-700" } : { label: "CU", cls: "bg-green-200 text-green-700" };
                 return (
                   <div key={i} ref={(el) => { turnRefs.current.set(i, el); }}>
                     <div
@@ -186,7 +194,7 @@ export function ConversationDrawer({ auth, target, tz, onClose }: { auth: InboxA
                         <div className={`flex size-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-semibold ${active ? "bg-[#4600f2] text-white" : badge.cls}`}>{badge.label}</div>
                         <div className="min-w-0 flex-1">
                           <div className="mb-2 flex items-baseline gap-3">
-                            <span className={`font-semibold ${active ? "text-[#4600f2]" : "text-gray-900"}`}>{m.role === "ai" ? "Agent" : "Customer"}</span>
+                            <span className={`font-semibold ${active ? "text-[#4600f2]" : "text-gray-900"}`}>{m.role === "ai" ? agentName : "Customer"}</span>
                             {m.atSec != null ? (
                               <span className={`text-xs hover:underline ${active ? "font-medium text-[#4600f2]" : "text-[#4600f2]"}`}>{fmtClock(m.atSec)}</span>
                             ) : m.atMs ? (

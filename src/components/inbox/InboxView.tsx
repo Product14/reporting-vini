@@ -110,6 +110,11 @@ export function setInboxAgents(agents: OnboardedAgent[], serviceType: "sales" | 
 function aiAgentImage(name?: string): string | null {
   return (name && AI_AGENT.imageByName[name.trim()]) || AI_AGENT.imageUrl;
 }
+// The team's onboarded AI agent display name (e.g. "Emily Carter"); falls back to "Vini" only when the
+// onboarded-agents lookup hasn't resolved a name. Used wherever we'd otherwise show a generic "AI"/"Vini".
+function currentAgentName(): string {
+  return AI_AGENT.name || "Vini";
+}
 
 // Leads whose engagement was stopped THIS session. Module-level so the "stopped" state survives
 // navigating away and back (both the panel and the drawer read it). It resets on a full reload — until
@@ -267,7 +272,7 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
     if (c.type === "email") {
       const e = c.emailMessages?.[c.emailMessages.length - 1];
       if (!e) continue;
-      const who = e.role === "human" || e.direction === "inbound" ? "" : "Vini: ";
+      const who = e.role === "human" || e.direction === "inbound" ? "" : currentAgentName() + ": ";
       const body = clip(who + (e.subject || e.body || ""));
       if (body) return body;
       continue;
@@ -277,7 +282,7 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
     if (!m) continue;
     const parsed = parseSmsText(m.content);
     const text = parsed.text || parsed.summary || "";
-    if (text) return clip((m.role === "user" ? "" : "Vini: ") + text);
+    if (text) return clip((m.role === "user" ? "" : currentAgentName() + ": ") + text);
   }
   return "";
 }
@@ -292,7 +297,7 @@ function teamConvPreview(c: TeamConversation): string {
     for (const m of c.smsMessages ?? []) {
       const parsed = parseSmsText(m.content ?? "");
       const text = parsed.text || parsed.summary || "";
-      if (text) return clip((m.role === "user" ? "" : "Vini: ") + text);
+      if (text) return clip((m.role === "user" ? "" : currentAgentName() + ": ") + text);
     }
     return "";
   }
@@ -302,7 +307,7 @@ function teamConvPreview(c: TeamConversation): string {
       const turn = turns[i];
       if (turn.role === "tool") continue;
       const txt = (turn.message ?? turn.content ?? "").toString().trim();
-      if (txt) return clip((turn.role === "user" ? "" : "Vini: ") + txt);
+      if (txt) return clip((turn.role === "user" ? "" : currentAgentName() + ": ") + txt);
     }
     return "";
   }
@@ -488,7 +493,7 @@ function Inbox() {
     // Only CALLS open the expanded Listen/Transcript drawer. SMS/chat/email open the normal thread (the
     // bubble view already reads well; a modal for messages was unwanted).
     if (t === "call") {
-      setTeamDrawer({ kind: "call", title: name, sub: "Call", conversationId: c.conversationId, callId: c.callId, inlineTranscript: c.transcript });
+      setTeamDrawer({ kind: "call", title: name, sub: "Call", agentName: currentAgentName(), conversationId: c.conversationId, callId: c.callId, inlineTranscript: c.transcript });
     } else {
       openCustomer(teamConvToCustomer(c));
     }
@@ -1799,7 +1804,7 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
           {/* Open the expanded Listen/Transcript drawer (waveform + click-to-seek). */}
           {fb.openDrawer && (
             <button
-              onClick={() => fb.openDrawer!({ kind: "call", title: V.title, sub: dur ? `Duration ${dur}` : undefined, conversationId: rec.conversationId, callId: rec.callId, recordingUrl: recording, inlineTranscript: turns ?? undefined })}
+              onClick={() => fb.openDrawer!({ kind: "call", title: V.title, sub: dur ? `Duration ${dur}` : undefined, agentName: cd.agentName || currentAgentName(), conversationId: rec.conversationId, callId: rec.callId, recordingUrl: recording, inlineTranscript: turns ?? undefined })}
               className="flex shrink-0 items-center justify-center rounded-md p-1 transition-colors hover:bg-[#f2f2f4]" title="Open expanded view">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: C.sub }}><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg>
             </button>
