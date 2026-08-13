@@ -86,6 +86,7 @@ export function ConversationDrawer({ auth, target, tz, onClose }: { auth: InboxA
   const [audioPlaying, setAudioPlaying] = useState(false);
   const waveRef = useRef<WaveformHandle>(null);
   const turnRefs = useRef<Map<number, HTMLDivElement | null>>(new Map());
+  const scrollRef = useRef<HTMLDivElement>(null);
   const isCall = target.kind === "call";
 
   useEffect(() => {
@@ -120,6 +121,10 @@ export function ConversationDrawer({ auth, target, tz, onClose }: { auth: InboxA
   useEffect(() => {
     if (activeIndex >= 0) turnRefs.current.get(activeIndex)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [activeIndex]);
+  // Always open at the TOP of the transcript/conversation (start), not scrolled to the end.
+  useEffect(() => {
+    if (turns) scrollRef.current?.scrollTo({ top: 0 });
+  }, [turns]);
 
   const seek = useCallback((sec: number | null) => { if (sec != null) { waveRef.current?.seek(sec); waveRef.current?.play(); } }, []);
   const list = turns ?? [];
@@ -153,7 +158,7 @@ export function ConversationDrawer({ auth, target, tz, onClose }: { auth: InboxA
         )}
 
         {/* Transcript / conversation */}
-        <div className="flex-1 overflow-y-auto bg-gray-50/50 px-6 py-6">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto bg-gray-50/50 px-6 py-6">
           <h3 className="mb-4 flex items-center gap-2 text-sm font-medium text-gray-900">
             <Svg d={isCall ? D_FILE : D_CHAT} size={16} stroke className="text-gray-400" /> {isCall ? "Transcript" : "Conversation"}
           </h3>

@@ -485,10 +485,10 @@ function Inbox() {
   const openTeamConv = useCallback((c: TeamConversation) => {
     const t = (c.type || "").toLowerCase();
     const name = c.customer.name || c.customer.mobileNumber || "Unknown";
+    // Only CALLS open the expanded Listen/Transcript drawer. SMS/chat/email open the normal thread (the
+    // bubble view already reads well; a modal for messages was unwanted).
     if (t === "call") {
       setTeamDrawer({ kind: "call", title: name, sub: "Call", conversationId: c.conversationId, callId: c.callId, inlineTranscript: c.transcript });
-    } else if (t === "sms" || t === "chat") {
-      setTeamDrawer({ kind: t, title: name, sub: t === "chat" ? "Chat" : "SMS", conversationId: c.conversationId, messages: c.smsMessages ?? [] });
     } else {
       openCustomer(teamConvToCustomer(c));
     }
