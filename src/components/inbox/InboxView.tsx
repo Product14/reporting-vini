@@ -724,15 +724,19 @@ function Inbox() {
           >
             <IconDownload size={13} /> CSV
           </button>
-          <button
-            data-filters-toggle
-            onClick={() => setFiltersOpen((v) => !v)}
-            className="flex items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
-            style={{ borderColor: filtersOpen ? C.primary : C.border, color: filtersOpen ? C.primary : C.dark }}
-          >
-            <IconFilter size={13} /> Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}
-          </button>
-          {filtersOpen && (
+          {/* Lead-type / date filters only apply to the Customer (leads/v2) view — the flat None
+              endpoint supports only channel + unread, so hide Filters there to avoid dead controls. */}
+          {groupBy !== "none" && (
+            <button
+              data-filters-toggle
+              onClick={() => setFiltersOpen((v) => !v)}
+              className="flex items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
+              style={{ borderColor: filtersOpen ? C.primary : C.border, color: filtersOpen ? C.primary : C.dark }}
+            >
+              <IconFilter size={13} /> Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}
+            </button>
+          )}
+          {filtersOpen && groupBy !== "none" && (
             <FiltersPopover
               leadType={leadType} onLeadType={setLeadType}
               dateRange={dateRange} onDateRange={setDateRange}
@@ -752,12 +756,14 @@ function Inbox() {
               style={{ borderColor: showSuggest ? C.primary : C.border }}>
               <IconSearch size={14} className="text-[#626f81]" />
               <input
-                value={search}
+                value={groupBy === "none" ? "" : search}
                 onChange={(e) => setSearch(e.target.value)}
                 onFocus={() => setSearchFocused(true)}
                 onBlur={() => setSearchFocused(false)}
-                placeholder="Search Conversation"
-                className="w-full bg-transparent text-[12px] outline-none placeholder:text-[#626f81]"
+                disabled={groupBy === "none"}
+                title={groupBy === "none" ? "Search is available in the Customer view" : undefined}
+                placeholder={groupBy === "none" ? "Search — switch to Customer view" : "Search Conversation"}
+                className="w-full bg-transparent text-[12px] outline-none placeholder:text-[#626f81] disabled:cursor-not-allowed"
                 style={{ color: C.dark }}
               />
               {search && (
@@ -880,7 +886,7 @@ function Inbox() {
 
         {/* Expanded Listen/Transcript drawer for a flat-list (None) conversation. */}
         {teamDrawer && (
-          <ConversationDrawer auth={auth} target={teamDrawer} onClose={() => setTeamDrawer(null)} />
+          <ConversationDrawer auth={auth} target={teamDrawer} tz={tz ?? undefined} onClose={() => setTeamDrawer(null)} />
         )}
       </div>
     </div>
@@ -2643,7 +2649,7 @@ function fmtApptTime(a: AppointmentItem): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit", timeZone: a.timezone || undefined });
+  return d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit", timeZone: a.timezone || ACTIVE_TZ || undefined });
 }
 // §07 due-date badge: Due Today (orange) / Due Tomorrow / Due in N days (blue) / Overdue (red).
 function dueLabel(due?: string): { text: string; style: React.CSSProperties } {
@@ -2853,7 +2859,7 @@ function apptLabel(a: AppointmentItem): string {
   if (iso) {
     const d = new Date(iso);
     if (Number.isFinite(d.getTime())) {
-      when = d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit", timeZone: a.timezone || undefined });
+      when = d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit", timeZone: a.timezone || ACTIVE_TZ || undefined });
     }
   }
   return [type, when].filter(Boolean).join(" · ");
