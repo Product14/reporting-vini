@@ -1160,9 +1160,10 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           const text = stripHtml(m.body || "");
           if (!text && !m.subject) continue;
           const side = (m.direction || "").toLowerCase() === "inbound" ? "in" : "out";
-          // Prefer the email's OWN send/receive time (any of several shapes) over the conversation
-          // createdAt, so a mail sent today lands under a "Today" divider (RETCONVAI batch-3 #6).
-          const emailTs = m.sentAt || m.createdAt || m.timestamp || m.time || m.date || (typeof m._ts === "number" ? m._ts : "") || rec.createdAt;
+          // The email's own send time is `sentAt` (dev-confirmed); it's null on inbound replies, so fall
+          // back to `createdAt` (the received time), then the conversation createdAt as a last resort —
+          // so a mail sent today lands under a "Today" divider (RETCONVAI batch-3 #6).
+          const emailTs = m.sentAt || m.createdAt || rec.createdAt;
           out.push({
             t: +new Date(emailTs) || base,
             kind: "email", side, text,
