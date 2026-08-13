@@ -308,6 +308,23 @@ function teamConvPreview(c: TeamConversation): string {
   return "";
 }
 
+// Last real activity time for a flat-list row — from the inline messages (sms/chat `_ts`, newest-first;
+// call transcript `time`), NOT the conversation's updatedAt (which a campaign touch bumps). Falls back to
+// updatedAt/createdAt when no inline messages are present (RETCONVAI batch-3 #2/#5).
+function teamConvLastTs(c: TeamConversation): number {
+  const t = (c.type || "").toLowerCase();
+  if (t === "sms" || t === "chat") {
+    const ts = c.smsMessages?.find((m) => typeof m._ts === "number")?._ts;
+    if (ts) return ts;
+  } else if (t === "call") {
+    const turns = c.transcript ?? [];
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (typeof turns[i].time === "number") return turns[i].time as number;
+    }
+  }
+  return +new Date(c.updatedAt || c.createdAt) || 0;
+}
+
 function Inbox() {
   const { teamId, enterpriseId, spyneToken, spyneEnv, serviceType: scopeServiceType, serviceTypeExplicit, userEmail, userName, account } = useScenario();
   // FALLBACK department switcher — only when the host didn't specify serviceType (URL/referrer). Without
@@ -623,6 +640,9 @@ function Inbox() {
   // On the Unread tab, drop conversations read this session so they leave the list on open (there's no
   // read-state write API, so the server still returns them until a refetch — filter them out here).
   const displayCustomers = tab === "unread" ? customers.filter((c) => !readIds.has(c.customer_id)) : customers;
+  // Active list has zero results (a channel/filter with no conversations). Once loaded, the middle pane
+  // shows a "No conversation found" state instead of the previously-opened thread (RETCONVAI batch-3 #1).
+  const listEmpty = groupBy === "none" ? (!teamLoadingList && teamConvs.length === 0) : (!loadingList && displayCustomers.length === 0);
 
   if (!teamId || !enterpriseId) return <NoScope hasTeam={!!teamId} />;
 
@@ -809,8 +829,8 @@ function Inbox() {
         </aside>
 
         {/* MIDDLE — chat. Mobile single-pane: shown only once a customer is opened. */}
-        <section className={`${selected ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`} style={{ background: C.bg }}>
-          {selected ? (
+        <section className={`${selected && !listEmpty ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`} style={{ background: C.bg }}>
+          {selected && !listEmpty ? (
             <ThreadPane
               key={selected.customer_id}
               auth={auth}
@@ -820,13 +840,13 @@ function Inbox() {
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-[13px]" style={{ color: C.sub }}>
-              Select a conversation to view the thread.
+              {listEmpty ? "No conversation found." : "Select a conversation to view the thread."}
             </div>
           )}
         </section>
 
         {/* RIGHT — lead details. Hidden < lg (mobile opens it via the header ⓘ → DetailsDrawer). */}
-        {selected && (
+        {selected && !listEmpty && (
           <RightPanel key={`rp-${selected.customer_id}`} auth={auth} customer={selected} onExpand={() => setDetailsOpen(true)} />
         )}
 
@@ -886,7 +906,10 @@ function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: bool
   const type = (c.type || "").toLowerCase();
   const chIcon = type === "call" ? <IconPhone size={11} /> : type === "email" ? <IconMail size={11} /> : <IconMessage size={11} />;
   const chLabel = type === "call" ? "Call" : type === "email" ? "Email" : type === "chat" ? "Chat" : "SMS";
-  const preview = teamConvPreview(c) || prettify(c.status) || "—";
+  // Show the last real message; never the campaign-driven conversation status ("in progress") — batch-3 #2/#5.
+  const preview = teamConvPreview(c) || "No messages yet";
+  const ts = teamConvLastTs(c);
+  const stamp = ts ? new Date(ts).toISOString() : c.updatedAt || c.createdAt;
   return (
     <button
       onClick={onClick}
@@ -900,7 +923,7 @@ function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: bool
           </span>
           <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{name}</span>
         </div>
-        <span className="shrink-0 text-[12px] font-medium" style={{ color: C.sub }}>{fmtListStamp(c.updatedAt || c.createdAt)}</span>
+        <span className="shrink-0 text-[12px] font-medium" style={{ color: C.sub }}>{fmtListStamp(stamp)}</span>
       </div>
       <div className="flex items-center gap-2.5">
         <span className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: C.primaryAccent, color: C.primary }}>
@@ -1137,8 +1160,11 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           const text = stripHtml(m.body || "");
           if (!text && !m.subject) continue;
           const side = (m.direction || "").toLowerCase() === "inbound" ? "in" : "out";
+          // Prefer the email's OWN send/receive time (any of several shapes) over the conversation
+          // createdAt, so a mail sent today lands under a "Today" divider (RETCONVAI batch-3 #6).
+          const emailTs = m.sentAt || m.createdAt || m.timestamp || m.time || m.date || (typeof m._ts === "number" ? m._ts : "") || rec.createdAt;
           out.push({
-            t: +new Date(m.sentAt || m.createdAt || rec.createdAt) || base,
+            t: +new Date(emailTs) || base,
             kind: "email", side, text,
             subject: m.subject || undefined,
             // "received" on inbound is implicit; sent/opened/replied on outbound is worth showing.
@@ -1168,20 +1194,15 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
       const t = +new Date((ai.createdAt as string) || "") || 0;
       if (t) out.push({ t, kind: "created", emoji: "⚑", title: "Action item created", detail: ai.description || prettify(ai.intent || "") });
     }
-    // A speed-to-lead that fires at the same instant as a CAMPAIGN sms is really the campaign send, not a
-    // genuine speed-to-lead — suppress the STL pill in that case (INVAI-4967).
-    const campaignSmsTs = new Set(
-      (conv.leadJourney ?? [])
-        .filter((e) => e.eventType === "outbound_task" && (e.source || "").toUpperCase() === "CAMPAIGN" && (e.channel || "").toLowerCase() === "sms")
-        .map((e) => +new Date(e.timestamp) || 0),
-    );
     // Lead-journey milestones interleaved chronologically in the chat (also shown in the right panel).
     // These are lead-level (campaigns, tasks, speed-to-lead) and NOT tied to an inbound/outbound
     // conversation, so they only belong in the "All" view — showing them under the Inbound/Outbound
     // filter is what put campaign data in the Inbound tab (INVAI campaign-in-inbound). Skip when filtered.
     if (dir === "all") {
       for (const ev of conv.leadJourney ?? []) {
-        if (ev.eventType === "stl_triggered" && campaignSmsTs.has(+new Date(ev.timestamp) || 0)) continue;
+        // Speed-to-lead is a lead-journey milestone, not a conversation message — it belongs in the
+        // right-panel Lead Journey timeline, never in the chat window (RETCONVAI batch-3 #10).
+        if (ev.eventType === "stl_triggered") continue;
         const m = journeyMeta(ev);
         // Per-touch "side tasks" (campaign/follow-up sends) are routine — render them subtly so the
         // milestones (lead created, speed-to-lead, appointment) stay the visual anchors of the journey.
@@ -2368,7 +2389,8 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
           <PersonaSections persona={persona} conv={conv} />
 
           <RightSection title="Lead journey">
-            <LeadTimeline journey={conv?.leadJourney ?? []} nextScheduled={normalizeNextScheduled(conv?.nextScheduledTasks?.[0])} />
+            {/* next-scheduled is already shown as NextScheduledChip above — don't repeat it here (batch-3 #9). */}
+            <LeadTimeline journey={conv?.leadJourney ?? []} />
           </RightSection>
         </div>
       )}

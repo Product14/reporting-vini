@@ -131,6 +131,7 @@ export interface TeamTranscriptTurn {
   role?: string; // bot | user | tool
   message?: string | null;
   content?: string | null;
+  time?: number; // ms epoch of the turn
   toolCalls?: ToolCall[] | null;
 }
 export interface TeamConversation {
@@ -212,6 +213,12 @@ export interface EmailMessage {
   sentAt?: string | null; // null on inbound replies — fall back to createdAt
   openedAt?: string | null;
   createdAt?: string | null;
+  // Extra timestamp shapes some responses use — read as fallbacks so a real send/receive time is used for
+  // the thread's day dividers instead of the (older) conversation createdAt (RETCONVAI batch-3 #6).
+  timestamp?: string | number | null;
+  time?: string | number | null;
+  date?: string | null;
+  _ts?: number | null;
 }
 export interface ConvRecord {
   conversationId: string;
