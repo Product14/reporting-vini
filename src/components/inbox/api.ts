@@ -132,6 +132,7 @@ export interface TeamTranscriptTurn {
   message?: string | null;
   content?: string | null;
   time?: number; // ms epoch of the turn
+  secondsFromStart?: number; // offset from call start — powers click-to-seek in the call drawer
   toolCalls?: ToolCall[] | null;
 }
 export interface TeamConversation {

@@ -44,6 +44,7 @@ import {
   type ActionItem,
   type Persona,
 } from "./api";
+import { ConversationDrawer, type DrawerTarget } from "./ConversationDrawer";
 
 /* ── tokens ─────────────────────────────────────────────────────────────────── */
 const C = {
@@ -477,7 +478,21 @@ function Inbox() {
     setReadIds((prev) => (prev.has(c.customer_id) ? prev : new Set(prev).add(c.customer_id)));
   }, []);
   // Flat-list row → open the conversation's customer in the thread pane (loads their full v2 thread).
-  const openTeamConv = useCallback((c: TeamConversation) => { openCustomer(teamConvToCustomer(c)); }, [openCustomer]);
+  // Flat-list (None) row → open the expanded Listen/Transcript drawer for that ONE conversation (call or
+  // sms/chat), using the team endpoint's inline transcript/smsMessages. Email has no drawer variant, so it
+  // falls back to opening the customer thread. Works for "Unknown" rows too (no customer_id needed).
+  const [teamDrawer, setTeamDrawer] = useState<DrawerTarget | null>(null);
+  const openTeamConv = useCallback((c: TeamConversation) => {
+    const t = (c.type || "").toLowerCase();
+    const name = c.customer.name || c.customer.mobileNumber || "Unknown";
+    if (t === "call") {
+      setTeamDrawer({ kind: "call", title: name, sub: "Call", conversationId: c.conversationId, callId: c.callId, inlineTranscript: c.transcript });
+    } else if (t === "sms" || t === "chat") {
+      setTeamDrawer({ kind: t, title: name, sub: t === "chat" ? "Chat" : "SMS", conversationId: c.conversationId, messages: c.smsMessages ?? [] });
+    } else {
+      openCustomer(teamConvToCustomer(c));
+    }
+  }, [openCustomer]);
 
   // Debounce the search box → searchTerm query.
   useEffect(() => {
@@ -862,6 +877,11 @@ function Inbox() {
         {selected && detailsOpen && (
           <DetailsDrawer auth={auth} customer={selected} onClose={() => setDetailsOpen(false)} />
         )}
+
+        {/* Expanded Listen/Transcript drawer for a flat-list (None) conversation. */}
+        {teamDrawer && (
+          <ConversationDrawer auth={auth} target={teamDrawer} onClose={() => setTeamDrawer(null)} />
+        )}
       </div>
     </div>
   );
@@ -1094,8 +1114,10 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
 
   // §Report-modal (Figma 9842-21472) — thumbs-down opens a report form; submit posts a "down" vote.
   const [reportTarget, setReportTarget] = useState<{ conversationId: string; messageIndex: number; message: string; channel: "sms" | "call" | "chat" } | null>(null);
+  // Expanded Listen/Transcript drawer for a call card in this thread.
+  const [threadDrawer, setThreadDrawer] = useState<DrawerTarget | null>(null);
   const fbCtx = useMemo<FbCtx>(
-    () => ({ map: fbMap, vote: voteFeedback, openReport: (conversationId, messageIndex, message, channel) => setReportTarget({ conversationId, messageIndex, message, channel }) }),
+    () => ({ map: fbMap, vote: voteFeedback, openReport: (conversationId, messageIndex, message, channel) => setReportTarget({ conversationId, messageIndex, message, channel }), openDrawer: (t) => setThreadDrawer(t) }),
     [fbMap, voteFeedback],
   );
 
@@ -1207,11 +1229,20 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     // These are lead-level (campaigns, tasks, speed-to-lead) and NOT tied to an inbound/outbound
     // conversation, so they only belong in the "All" view — showing them under the Inbound/Outbound
     // filter is what put campaign data in the Inbound tab (INVAI campaign-in-inbound). Skip when filtered.
+    // The GENUINE speed-to-lead is the FIRST stl_triggered (fires ~1s after lead_created). The backend
+    // also emits stl_triggered echoes alongside later campaign sends — those are the "again and again"
+    // repeats. Keep only the earliest so exactly one "⚡ Speed to lead triggered" shows in the chat.
+    const firstStlTs = Math.min(
+      ...(conv.leadJourney ?? []).filter((e) => e.eventType === "stl_triggered").map((e) => +new Date(e.timestamp) || Infinity),
+    );
+    let stlShown = false;
     if (dir === "all") {
       for (const ev of conv.leadJourney ?? []) {
-        // Speed-to-lead is a lead-journey milestone, not a conversation message — it belongs in the
-        // right-panel Lead Journey timeline, never in the chat window (RETCONVAI batch-3 #10).
-        if (ev.eventType === "stl_triggered") continue;
+        // Show only the single genuine speed-to-lead; suppress duplicates/campaign-echo ones (batch-4).
+        if (ev.eventType === "stl_triggered") {
+          if (stlShown || (+new Date(ev.timestamp) || Infinity) !== firstStlTs) continue;
+          stlShown = true;
+        }
         const m = journeyMeta(ev);
         // Per-touch "side tasks" (campaign/follow-up sends) are routine — render them subtly so the
         // milestones (lead created, speed-to-lead, appointment) stay the visual anchors of the journey.
@@ -1342,6 +1373,9 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           onSave={(email) => { const run = emailPrompt; persistFeedbackEmail(email); setEmailPrompt(null); run(email); }}
         />
       )}
+      {threadDrawer && (
+        <ConversationDrawer auth={auth} target={threadDrawer} onClose={() => setThreadDrawer(null)} />
+      )}
     </>
   );
 }
@@ -1451,6 +1485,7 @@ interface FbCtx {
   map: Record<string, "up" | "down">;
   vote: (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call" | "chat", note?: string, reason?: string) => void;
   openReport: (conversationId: string, messageIndex: number, message: string, channel: "sms" | "call" | "chat") => void;
+  openDrawer?: (t: DrawerTarget) => void; // expand a call into the Listen/Transcript drawer
 }
 
 /* Insert TODAY/date dividers between nodes on day boundaries (§13). */
@@ -1753,6 +1788,14 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
             <button onClick={() => setOpen((v) => !v)} className="flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors hover:bg-[#f7f4ff]"
               style={{ borderColor: `${C.primary}44`, color: C.primary }}>
               <IconPlay size={9} /> {dur || "Play"}
+            </button>
+          )}
+          {/* Open the expanded Listen/Transcript drawer (waveform + click-to-seek). */}
+          {fb.openDrawer && (
+            <button
+              onClick={() => fb.openDrawer!({ kind: "call", title: V.title, sub: dur ? `Duration ${dur}` : undefined, conversationId: rec.conversationId, callId: rec.callId, recordingUrl: recording, inlineTranscript: turns ?? undefined })}
+              className="flex shrink-0 items-center justify-center rounded-md p-1 transition-colors hover:bg-[#f2f2f4]" title="Open expanded view">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: C.sub }}><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg>
             </button>
           )}
           <span className="shrink-0 text-[12px]" style={{ color: C.sub }}>{fmtTime(rec.createdAt)}</span>
