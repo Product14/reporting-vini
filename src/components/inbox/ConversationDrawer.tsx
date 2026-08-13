@@ -31,16 +31,20 @@ function fmtSec(s: number | null): string {
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 }
 
-// Normalize a raw call-transcript turn (either shape) → spoken lines only (drop system/tool/JSON).
+// Normalize a raw call-transcript turn (either shape) → spoken lines only. Only bot/assistant/agent/user
+// turns are real speech; drop the `system` prompt turn and `tool` (JSON) turns entirely.
+const SPOKEN_ROLES = new Set(["bot", "assistant", "agent", "user", "customer"]);
 function spokenTurns(raw: (TranscriptTurn | TeamTranscriptTurn)[]): Turn[] {
-  return raw
-    .map((t) => {
-      const role = (t.role || "").toLowerCase();
-      const text = ((t as TranscriptTurn).content ?? t.message ?? "").toString().trim();
-      const atSec = typeof (t as TranscriptTurn).secondsFromStart === "number" ? (t as TranscriptTurn).secondsFromStart! : null;
-      return { role: role === "user" || role === "customer" ? "customer" : "ai", text, atSec } as Turn;
-    })
-    .filter((t) => t.text && !t.text.startsWith("{"));
+  const out: Turn[] = [];
+  for (const t of raw) {
+    const role = (t.role || "").toLowerCase();
+    if (!SPOKEN_ROLES.has(role)) continue; // skip system / tool
+    const text = ((t as TranscriptTurn).content ?? t.message ?? "").toString().trim();
+    if (!text || text.startsWith("{")) continue;
+    const atSec = typeof (t as TranscriptTurn).secondsFromStart === "number" ? (t as TranscriptTurn).secondsFromStart! : null;
+    out.push({ role: role === "user" || role === "customer" ? "customer" : "ai", text, atSec });
+  }
+  return out;
 }
 
 function smsTurns(messages: SmsMessage[]): Turn[] {
