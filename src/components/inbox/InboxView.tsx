@@ -363,7 +363,7 @@ function Inbox() {
   // per conversation, latest-first, via the team-conversations endpoint). Channel is the None-mode
   // All/SMS/Calls/Email filter → the team endpoint's exact `type` (undefined = all).
   const [groupBy, setGroupBy] = useState<"customer" | "none">("customer");
-  const [channel, setChannel] = useState<"all" | "sms" | "call" | "email">("all");
+  const [channel, setChannel] = useState<"all" | "sms" | "chat" | "call" | "email">("all");
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [leadType, setLeadType] = useState<string[]>([]);
@@ -643,6 +643,13 @@ function Inbox() {
   // Active list has zero results (a channel/filter with no conversations). Once loaded, the middle pane
   // shows a "No conversation found" state instead of the previously-opened thread (RETCONVAI batch-3 #1).
   const listEmpty = groupBy === "none" ? (!teamLoadingList && teamConvs.length === 0) : (!loadingList && displayCustomers.length === 0);
+  // Channel-/dept-aware empty text so a blank Calls/Chat/Email tab explains WHY (e.g. this space has none
+  // of that channel) rather than a bare "not found". Only meaningful in None mode with a channel picked.
+  const channelWord = channel === "call" ? "call" : channel === "sms" ? "SMS" : channel === "email" ? "email" : channel === "chat" ? "chat" : "";
+  const emptyText =
+    tab === "unread" ? "No unread conversations."
+    : groupBy === "none" && channel !== "all" ? `No ${channelWord} conversations in the ${serviceType} space.`
+    : "No conversations found.";
 
   if (!teamId || !enterpriseId) return <NoScope hasTeam={!!teamId} />;
 
@@ -685,10 +692,11 @@ function Inbox() {
           {groupBy === "none" && (
             <Segmented
               value={channel}
-              onChange={(v) => setChannel(v as "all" | "sms" | "call" | "email")}
+              onChange={(v) => setChannel(v as "all" | "sms" | "chat" | "call" | "email")}
               options={[
                 { value: "all", label: "All" },
                 { value: "sms", label: "SMS" },
+                { value: "chat", label: "Chat" },
                 { value: "call", label: "Calls" },
                 { value: "email", label: "Email" },
               ]}
@@ -779,7 +787,7 @@ function Inbox() {
                 <ListSkeleton />
               ) : teamConvs.length === 0 ? (
                 <div className="px-5 py-10 text-center text-[12px]" style={{ color: C.sub }}>
-                  No conversations {tab === "unread" ? "unread" : "found"}.
+                  {emptyText}
                 </div>
               ) : (
                 <>
@@ -802,7 +810,7 @@ function Inbox() {
               <ListSkeleton />
             ) : displayCustomers.length === 0 ? (
               <div className="px-5 py-10 text-center text-[12px]" style={{ color: C.sub }}>
-                No conversations {tab === "unread" ? "unread" : "found"}.
+                {emptyText}
               </div>
             ) : (
               <>
@@ -840,7 +848,7 @@ function Inbox() {
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-[13px]" style={{ color: C.sub }}>
-              {listEmpty ? "No conversation found." : "Select a conversation to view the thread."}
+              {listEmpty ? emptyText : "Select a conversation to view the thread."}
             </div>
           )}
         </section>
