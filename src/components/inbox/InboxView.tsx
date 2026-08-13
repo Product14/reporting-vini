@@ -374,6 +374,8 @@ function Inbox() {
   const [debounced, setDebounced] = useState("");
   const [leadType, setLeadType] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>("all");
+  const [customStart, setCustomStart] = useState(""); // YYYY-MM-DD, used when dateRange === "custom"
+  const [customEnd, setCustomEnd] = useState("");
   // Which date the range/sort applies to (API sortBy). "conversation" = most-recently-active first,
   // the natural inbox ordering; "lead" = newest lead first (filters on lead createdAt).
   const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
@@ -482,22 +484,9 @@ function Inbox() {
     setDetailsOpen(false);
     setReadIds((prev) => (prev.has(c.customer_id) ? prev : new Set(prev).add(c.customer_id)));
   }, []);
-  // Flat-list row → open the conversation's customer in the thread pane (loads their full v2 thread).
-  // Flat-list (None) row → open the expanded Listen/Transcript drawer for that ONE conversation (call or
-  // sms/chat), using the team endpoint's inline transcript/smsMessages. Email has no drawer variant, so it
-  // falls back to opening the customer thread. Works for "Unknown" rows too (no customer_id needed).
-  const [teamDrawer, setTeamDrawer] = useState<DrawerTarget | null>(null);
-  const openTeamConv = useCallback((c: TeamConversation) => {
-    const t = (c.type || "").toLowerCase();
-    const name = c.customer.name || c.customer.mobileNumber || "Unknown";
-    // Only CALLS open the expanded Listen/Transcript drawer. SMS/chat/email open the normal thread (the
-    // bubble view already reads well; a modal for messages was unwanted).
-    if (t === "call") {
-      setTeamDrawer({ kind: "call", title: name, sub: "Call", agentName: currentAgentName(), conversationId: c.conversationId, callId: c.callId, inlineTranscript: c.transcript });
-    } else {
-      openCustomer(teamConvToCustomer(c));
-    }
-  }, [openCustomer]);
+  // Flat-list (None) row → open the conversation's customer in the main thread. No modal from the list —
+  // the expanded Listen/Transcript drawer is only reachable from a call card inside the main chat.
+  const openTeamConv = useCallback((c: TeamConversation) => { openCustomer(teamConvToCustomer(c)); }, [openCustomer]);
 
   // Debounce the search box → searchTerm query.
   useEffect(() => {
@@ -507,7 +496,7 @@ function Inbox() {
 
   // The query for the current tab/search/filters (page added per-call). Shared by page-1 load + load-more.
   const listQuery = useMemo(() => {
-    const range = dateRangeToIso(dateRange);
+    const range = dateRangeToIso(dateRange, customStart, customEnd);
     return {
       limit: 50,
       unreadOnly: tab === "unread",
@@ -517,7 +506,7 @@ function Inbox() {
       startDate: range.startDate,
       endDate: range.endDate,
     } as const;
-  }, [tab, debounced, leadType, dateBasis, dateRange]);
+  }, [tab, debounced, leadType, dateBasis, dateRange, customStart, customEnd]);
 
   // Load page 1 (reset) whenever scope / tab / search / filters change.
   useEffect(() => {
@@ -745,6 +734,8 @@ function Inbox() {
             <FiltersPopover
               leadType={leadType} onLeadType={setLeadType}
               dateRange={dateRange} onDateRange={setDateRange}
+              customStart={customStart} onCustomStart={setCustomStart}
+              customEnd={customEnd} onCustomEnd={setCustomEnd}
               dateBasis={dateBasis} onDateBasis={setDateBasis}
               onClose={() => setFiltersOpen(false)}
             />
@@ -887,11 +878,6 @@ function Inbox() {
         {/* Details drawer (full persona deep-dive) */}
         {selected && detailsOpen && (
           <DetailsDrawer auth={auth} customer={selected} onClose={() => setDetailsOpen(false)} />
-        )}
-
-        {/* Expanded Listen/Transcript drawer for a flat-list (None) conversation. */}
-        {teamDrawer && (
-          <ConversationDrawer auth={auth} target={teamDrawer} tz={tz ?? undefined} onClose={() => setTeamDrawer(null)} />
         )}
       </div>
     </div>
@@ -2672,30 +2658,38 @@ function dueLabel(due?: string): { text: string; style: React.CSSProperties } {
 const LEAD_TYPES = ["HOT", "WARM", "COLD", "DEAD"];
 // NOTE: the Lead-source filter was removed — leads/v2 rejects `leadSource` for every value (verified on
 // prod, returns 0 regardless of casing), so it only ever emptied the list. Re-add once the API supports it.
-type DateRange = "all" | "today" | "7d" | "30d";
+type DateRange = "all" | "today" | "7d" | "custom";
 const DATE_RANGES: { v: DateRange; label: string }[] = [
-  { v: "all", label: "All time" }, { v: "today", label: "Today" }, { v: "7d", label: "Last 7 days" }, { v: "30d", label: "Last 30 days" },
+  { v: "all", label: "All time" }, { v: "today", label: "Today" }, { v: "7d", label: "Last 7 days" }, { v: "custom", label: "Custom" },
 ];
 
 // Resolve a preset to leads/v2 startDate/endDate (ISO). The API adjusts date-only endDate to end-of-day.
-function dateRangeToIso(r: DateRange): { startDate?: string; endDate?: string } {
+// "custom" uses the operator-picked YYYY-MM-DD start/end (either bound optional).
+function dateRangeToIso(r: DateRange, customStart?: string, customEnd?: string): { startDate?: string; endDate?: string } {
   if (r === "all") return {};
+  if (r === "custom") {
+    const out: { startDate?: string; endDate?: string } = {};
+    if (customStart) out.startDate = new Date(`${customStart}T00:00:00`).toISOString();
+    if (customEnd) out.endDate = new Date(`${customEnd}T23:59:59`).toISOString();
+    return out;
+  }
   const now = new Date();
   const end = now.toISOString();
   if (r === "today") {
     // Start of the DEALER's calendar day (not the viewer's) so "Today" matches the dealer's clock.
     return { startDate: startOfTzDay(now).toISOString(), endDate: end };
   }
-  const days = r === "7d" ? 7 : 30;
-  const s = new Date(now.getTime() - days * 86400000);
+  const s = new Date(now.getTime() - 7 * 86400000); // "7d"
   return { startDate: s.toISOString(), endDate: end };
 }
 
 function FiltersPopover({
-  leadType, onLeadType, dateRange, onDateRange, dateBasis, onDateBasis, onClose,
+  leadType, onLeadType, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis, onClose,
 }: {
   leadType: string[]; onLeadType: (v: string[]) => void;
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
+  customStart: string; onCustomStart: (v: string) => void;
+  customEnd: string; onCustomEnd: (v: string) => void;
   dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
   onClose: () => void;
 }) {
@@ -2727,6 +2721,18 @@ function FiltersPopover({
               {d.label}
             </label>
           ))}
+          {dateRange === "custom" && (
+            <div className="mt-1 flex flex-col gap-1.5 px-2">
+              <label className="flex items-center justify-between gap-2 text-[11px]" style={{ color: C.sub }}>From
+                <input type="date" value={customStart} max={customEnd || undefined} onChange={(e) => onCustomStart(e.target.value)}
+                  className="rounded-md border px-2 py-1 text-[12px] outline-none focus:border-[#4600f2]" style={{ borderColor: C.border, color: C.dark }} />
+              </label>
+              <label className="flex items-center justify-between gap-2 text-[11px]" style={{ color: C.sub }}>To
+                <input type="date" value={customEnd} min={customStart || undefined} onChange={(e) => onCustomEnd(e.target.value)}
+                  className="rounded-md border px-2 py-1 text-[12px] outline-none focus:border-[#4600f2]" style={{ borderColor: C.border, color: C.dark }} />
+              </label>
+            </div>
+          )}
         </div>
         {/* Which date the range (and sort) applies to — lead createdAt vs last_contacted_at (API sortBy). */}
         <p className="mb-1.5 text-[10px] font-medium" style={{ color: C.sub }}>Apply to</p>
@@ -2749,7 +2755,7 @@ function FiltersPopover({
           ))}
         </div>
         {anyActive ? (
-          <button onClick={() => { onLeadType([]); onDateRange("all"); }}
+          <button onClick={() => { onLeadType([]); onDateRange("all"); onCustomStart(""); onCustomEnd(""); }}
             className="mt-3 w-full rounded-lg border py-1.5 text-[11px] font-medium" style={{ borderColor: C.border, color: C.sub }}>
             Clear all
           </button>
