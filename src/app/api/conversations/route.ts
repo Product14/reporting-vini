@@ -131,6 +131,13 @@ export async function GET(request: Request): Promise<Response> {
       " lower(ifNull(e.report_overview_appointmentScheduled,'')) AS apptScheduled," +
       " lower(ifNull(e.report_queryResolved,'')) AS queryResolved," +
       " ifNull(e.report_actionItems,'') AS actionItems," +
+      // endedReason is how a call ACTUALLY ended — 'voicemail' is the only reliable voicemail signal
+      // (duration is NOT: the agent monologues at the answering machine for 75-187s, so every voicemail
+      // call looks "connected"). The post-conversation email gate and the "Left a voicemail" outcome
+      // banner both key on this; without it the banner never fired and the gate had nothing to test.
+      " ifNull(e.callDetails_endedReason,'') AS endedReason," +
+      // Full call transcript — rendered in the post-conversation email (capped there, not here).
+      " ifNull(e.callDetails_transcript,'') AS transcript," +
       " q.score AS aiScore, q.grade AS grade, q.frustrated AS frustrated," +
       " formatDateTime(e.createdAt,'%Y-%m-%dT%H:%i:%SZ') AS at" +
       " FROM dealer_leads.endcallreports e" +
@@ -153,7 +160,12 @@ export async function GET(request: Request): Promise<Response> {
       title: String(r.title || ""), summary: String(r.summary || ""),
       vehicle: r.vehicle ? String(r.vehicle) : null,
       durationSec: Number(r.durationSec) || 0,
-      connected: (Number(r.durationSec) || 0) > 0,  // true if customer answered; false for voicemail/no-answer
+      // NOTE: this means "the call had airtime", NOT "a human answered". Voicemail calls run 75-187s
+      // (the agent talks to the machine), so they are `connected:true`. Use `endedReason` to detect
+      // voicemail — never this flag.
+      connected: (Number(r.durationSec) || 0) > 0,
+      endedReason: r.endedReason ? String(r.endedReason) : null,
+      transcript: r.transcript ? String(r.transcript) : null,
       recordingUrl: r.recordingUrl ? String(r.recordingUrl) : null,
       score: Number(r.score10) || 0,
       sentiment: frustrated ? "Negative" : "Neutral",
@@ -161,6 +173,23 @@ export async function GET(request: Request): Promise<Response> {
       appointmentScheduled: r.apptScheduled === "true",
       queryResolved: resolved,
       hasActionItem: !!(r.actionItems && !["", "[]", "{}"].includes(String(r.actionItems))),
+      // The action items THEMSELVES, not just the boolean. report_actionItems is a JSON array of plain
+      // strings ("Prepare the GLS for Victor's visit tomorrow at noon."). Only the flag was returned
+      // before, so the post-conversation email could say a call needed follow-up but never show WHAT —
+      // the chat branch has always returned the array, calls never did. Parsed defensively: anything
+      // unexpected yields [], which renders no section rather than breaking the email.
+      actionItems: ((): string[] => {
+        try {
+          const parsed: unknown = JSON.parse(String(r.actionItems || "[]"));
+          if (!Array.isArray(parsed)) return [];
+          return parsed
+            .map((x) => (typeof x === "string" ? x : typeof (x as { description?: unknown })?.description === "string" ? String((x as { description: string }).description) : ""))
+            .map((s) => s.trim())
+            .filter(Boolean);
+        } catch {
+          return [];
+        }
+      })(),
       aiScore: r.aiScore != null && r.aiScore !== "" ? Number(r.aiScore) : null,
       grade: r.grade ? String(r.grade) : null,
       frustrated,
