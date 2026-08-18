@@ -1216,7 +1216,9 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
             // claim/hand-back notices (role:"system" + human_assistant_id) become a state-change chip; any
             // other system turn (e.g. a leaked prompt) is dropped entirely.
             const c = (m.content || "").toLowerCase();
-            const handback = /handed it back|handed back/.test(c);
+            // NB: the CLAIM notice also contains "…until the conversation is handed back", so match the
+            // hand-back notice on the precise "handed it back" (which only it carries), not a loose "handed back".
+            const handback = /handed it back/.test(c);
             const claim = /claimed this conversation|has claimed|taken over|taking over/.test(c);
             if (m.human_assistant_id || handback || claim) out.push({ t, kind: "handover", claim: !handback });
             return;
