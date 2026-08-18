@@ -249,6 +249,12 @@ ecr_events AS (
             ),
             1, 0
         ) AS is_qualifying_call,
+        -- ★ SALES INBOUND qualified signal (locked 2026-08-18, source: Product14/vini-success
+        -- products/sales-inbound/queries/features.sql). The AI's OWN verdict on the call, rather than an
+        -- IRA primary_intent match. Used only for Sales Inbound in the final SELECT.
+        -- NOTE: report.connected is deliberately not read — vini-success measured the key present on 0 of
+        -- 451,526 rows. Prod 30d (sales): 'Yes' on 22,474 calls / 10,371 leads, 'No' on 65,145, '' on 245.
+        if(JSONExtractString(ifNull(ecr.report, '{}'), 'qualified') = 'Yes', 1, 0) AS is_report_qualified,
         if(
             ira.sourceId IS NOT NULL
             AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
@@ -333,6 +339,7 @@ ecr_by_call AS (
         callId,
         team_id,
         max(is_qualifying_call) AS qualified_via_call,
+        max(is_report_qualified) AS report_qualified,   -- Sales Inbound gate (see ecr_events)
         max(has_appt_intent)    AS had_appt_intent,
         max(has_transfer)       AS had_transfer,
         max(has_callback)       AS had_callback,
@@ -368,7 +375,21 @@ sms_by_conv AS (
         max(if(lower(sm.authorType) = 'human' AND lower(sm.direction) = 'in'
                AND ifNull(co.opt_out_call, 0) = 0
                AND ifNull(co.opt_out_sms, 0) = 0
-               AND hia.lead_id IS NOT NULL, 1, 0)) AS qualified_via_sms
+               AND hia.lead_id IS NOT NULL, 1, 0)) AS qualified_via_sms,
+        -- ★ SALES INBOUND SMS qualified signal (locked 2026-08-18, source: Product14/vini-success
+        -- products/sales-inbound/queries/features.sql). conversationAnalytics.outcome is a per-conversation
+        -- AI verdict on the SMS thread; this allowlist is the intent-bearing subset. Everything absent is a
+        -- real outcome that is NOT qualification (Opt Out, Not Interested, Already Purchased, Reconnect
+        -- Needed, Human Requested, Wrong Number, Language Barrier, Operating Hours, Decision Maker
+        -- Unavailable, and others). vini-success measured it over 2026-07-15..08-13: the outcome exists on
+        -- EXACTLY the engaged conversations (13,345 empty-outcome conversations had 0 engaged) and is
+        -- perfectly nested inside engaged (0 violations in 14,980 SMS conversations).
+        -- Prod 60d check: 9 of these 10 values occur ('Appointment' never appears on SMS — dead entry,
+        -- kept for fidelity with the source). Used only for Sales Inbound in the final SELECT.
+        max(has(['Purchase Intent','Pricing Inquiry','Appointment','Financing Inquiry','Trade Inquiry',
+                 'Deposit Placed','Ancillary Inquiry','Purchase Closed','Vehicle Inquiry',
+                 'General Engagement'],
+                JSONExtractString(ifNull(c.conversationAnalytics, '{}'), 'outcome'))) AS sms_outcome_qualified
     FROM dealer_leads.smsMessages AS sm FINAL
     JOIN dealer_leads.conversations AS c FINAL
         ON sm.conversationId = c.conversationId
@@ -691,12 +712,23 @@ SELECT
     -- The two channel columns carry the whole switch, so `qualified` below stays a plain greatest():
     --   greatest(oc_q AND spoke, oc_q AND reply_real)  ==  oc_q AND (spoke OR reply_real)
     -- which is exactly the funnel query's `eng=1 AND oc_q=1`.
-    if(agent_type = 'Sales Outbound',
-       if(ifNull(oco.oc_q, 0) = 1 AND ifNull(ec.is_connected, 0) = 1, 1, 0),
+    -- Sales Inbound: the AI's own report.qualified verdict (source: vini-success). ⚠️ This is NOT gated on
+    -- connected, so qualified is NOT nested inside connected for Sales Inbound — vini-success measured
+    -- 10.7% of qualified call conversations (156 of 1,451) with no captured role='user' turn, because
+    -- report.qualified is a model verdict while connected is a transcript test. Do not build a
+    -- "share of connected" chart on Sales Inbound calls; turn rate can exceed 100%.
+    multiIf(
+       agent_type = 'Sales Outbound',
+         if(ifNull(oco.oc_q, 0) = 1 AND ifNull(ec.is_connected, 0) = 1, 1, 0),
+       agent_type = 'Sales Inbound',
+         ifNull(ec.report_qualified, 0),
        ifNull(ec.qualified_via_call, 0))    AS qualified_via_call,
     -- n_human_inbound_real, not n_human_inbound: a reply that is only "STOP" is the customer leaving.
-    if(agent_type = 'Sales Outbound',
-       if(ifNull(oco.oc_q, 0) = 1 AND ifNull(sb.n_human_inbound_real, 0) > 0, 1, 0),
+    multiIf(
+       agent_type = 'Sales Outbound',
+         if(ifNull(oco.oc_q, 0) = 1 AND ifNull(sb.n_human_inbound_real, 0) > 0, 1, 0),
+       agent_type = 'Sales Inbound',
+         ifNull(sb.sms_outcome_qualified, 0),
        ifNull(sb.qualified_via_sms, 0))     AS qualified_via_sms,
     greatest(qualified_via_call, qualified_via_sms) AS qualified,
 
