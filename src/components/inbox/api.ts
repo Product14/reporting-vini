@@ -192,9 +192,11 @@ export interface SmsMessage {
   toolCallId?: string | null;
   toolCalls?: ToolCall[] | null;
   _ts?: number;
-  // Human-handover (RETCONVAI-2997, UAT-only): outbound bubbles sent by a rep during an ACTIVE handover
-  // carry authorType "human" + the rep's name. Absent everywhere else (AI/customer bubbles) — read defensively.
-  authorType?: string | null; // "ai" | "human" | "customer" | …
+  // Human-handover (RETCONVAI-2997, UAT-only): a rep's manual turn during an ACTIVE handover carries
+  // authorUserId + authorName (resolved server-side). On v2 there's NO authorType/direction — detect a rep
+  // turn by role "assistant" + a present authorUserId. authorType is the v1 shape. All read defensively.
+  authorType?: string | null; // v1 only: "ai" | "human"
+  authorUserId?: string | null; // present only on human-authored turns
   authorName?: string | null;
 }
 export interface CallData {
@@ -306,6 +308,13 @@ export interface ActionItem {
   meta?: { conversationId?: string; callSid?: string; customer_id?: string; vehicle_details?: { make?: string; model?: string; year?: string; trim?: string } };
   [k: string]: unknown;
 }
+// Handover conflict (RETCONVAI-2997): a customer should only ever have ONE conversation needing a rep.
+// If >1 in-progress conversation is PENDING/ACTIVE at once, that's a data inconsistency — show an error,
+// not a picker. Scoped to the fetched page.
+export interface HumanTransferConflict {
+  hasConflict: boolean;
+  conversationIds: string[];
+}
 export interface ConversationsV2 {
   conversations: ConvRecord[];
   nextActionItems: ActionItem[];
@@ -314,6 +323,7 @@ export interface ConversationsV2 {
   leadJourney: LeadJourneyEvent[];
   leads: LeadSummary[];
   stopAiEngagement?: boolean; // aggregate engagement-stopped flag from conversations/v2 (persisted state)
+  humanTransferConflict?: HumanTransferConflict | null; // UAT handover conflict guard (flat on v2 data)
 }
 
 const EMPTY_CONV: ConversationsV2 = {
@@ -351,6 +361,7 @@ export async function fetchInboxConversations(
         leadJourney: Array.isArray(d.leadJourney) ? d.leadJourney : [],
         leads: Array.isArray(d.leads) ? d.leads : [],
         stopAiEngagement: d.stopAiEngagement === true, // aggregate flag (true if any matched lead is stopped)
+        humanTransferConflict: d.humanTransferConflict ?? null, // UAT handover conflict (flat on v2 data)
       };
     } catch {
       return EMPTY_CONV;
@@ -687,6 +698,7 @@ export interface HandoverResult {
   ok: boolean;
   status: number;
   phase?: string | null; // the conversation's phase AFTER the toggle (NONE | PENDING | ACTIVE)
+  conversationId?: string | null; // echoed back — the conversation the toggle acted on
   error?: string;
 }
 const HANDOVER_ENABLED = (a: InboxAuth) => a.spyneEnv === "uat";
@@ -729,8 +741,8 @@ export async function postHandoverToggle(a: InboxAuth, conversationId: string): 
       headers: { "content-type": "application/json", ...(a.spyneToken ? { Authorization: `Bearer ${a.spyneToken}` } : {}) },
       body: JSON.stringify({ conversationId }),
     });
-    const j = (await r.json().catch(() => null)) as { phase?: string; data?: { phase?: string }; error?: string } | null;
-    return { ok: r.ok, status: r.status, phase: j?.phase ?? j?.data?.phase ?? null, error: r.ok ? undefined : j?.error || `HTTP ${r.status}` };
+    const j = (await r.json().catch(() => null)) as { phase?: string; conversationId?: string; data?: { phase?: string; conversationId?: string }; error?: string } | null;
+    return { ok: r.ok, status: r.status, phase: j?.phase ?? j?.data?.phase ?? null, conversationId: j?.conversationId ?? j?.data?.conversationId ?? null, error: r.ok ? undefined : j?.error || `HTTP ${r.status}` };
   } catch (e) {
     return { ok: false, status: 0, error: String(e) };
   }

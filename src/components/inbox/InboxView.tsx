@@ -1318,27 +1318,39 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   const derivedHandover = useMemo(() => deriveHandover(conv, handoverOn), [conv, handoverOn]);
   const handoverState = hoOverride ?? derivedHandover;
   const handoverPhase = handoverState.phase;
-  const handoverConvId = handoverState.conversationId;
+  const handoverConvId = handoverState.conversationId; // the flagged/claimed conv (send + hand-back target)
+  // >1 conversation flagged at once for one customer = backend data inconsistency → show an error, not a picker.
+  const handoverConflict = handoverOn && !!conv?.humanTransferConflict?.hasConflict;
+  // Direct take-over (RETCONVAI-4553): when nothing is flagged, a rep can still step into the customer's
+  // latest sms/chat conversation. Toggle acts on the flagged conv if there is one, else this.
+  const latestSmsConvId = useMemo(() => {
+    if (!handoverOn) return undefined;
+    return (conv?.conversations ?? [])
+      .filter((c) => c.type === "sms" || c.type === "chat")
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0]?.conversationId;
+  }, [conv, handoverOn]);
+  const actOnConvId = handoverConvId ?? latestSmsConvId;
   // Drop the optimistic override the moment the fetched (server) state actually changes phase/target —
   // keyed on primitives so a lagged re-fetch (same phase) doesn't clear it prematurely.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- clear optimistic override once server state advances
     setHoOverride(null);
   }, [derivedHandover.phase, derivedHandover.conversationId]);
-  // Claim a PENDING conversation (→ACTIVE) or hand an ACTIVE one back to Vini (→NONE). The endpoint reads
-  // the current phase and does whichever is appropriate.
+  // One button, one call — the server reads the conversation's current phase and does whichever transition
+  // fits: NONE→ACTIVE (direct take-over), PENDING→ACTIVE (claim), or ACTIVE→NONE (hand back). Never guess the
+  // direction client-side; send only the conversationId and read `phase` back (esp. after a 409 race).
   const toggleHandover = useCallback(async () => {
-    if (!handoverConvId) return;
+    if (!actOnConvId) return;
     setHoBusy(true); setHoErr("");
-    const res = await postHandoverToggle(auth, handoverConvId);
+    const res = await postHandoverToggle(auth, actOnConvId);
     setHoBusy(false);
-    if (!res.ok) { setHoErr(res.error || "Couldn't update handover — try again."); return; }
-    // Optimistically flip the footer from the authoritative toggle response, then re-fetch the thread so
-    // the derived state (and any second pending conversation) reconciles once the write has propagated.
-    if (res.phase) setHoOverride({ ...handoverState, phase: res.phase });
+    if (!res.ok) { setHoErr(res.error || "Couldn't update handover — refresh and retry."); reloadConv(); return; }
+    // Optimistically flip the footer from the authoritative response, carrying the conversation it acted on
+    // (needed for the compose box + hand-back after a direct take-over from NONE), then reconcile from server.
+    if (res.phase) setHoOverride({ ...handoverState, phase: res.phase, conversationId: res.conversationId ?? actOnConvId });
     reloadConv();
     setTimeout(() => reloadConv(), 2000);
-  }, [auth, handoverConvId, handoverState, reloadConv]);
+  }, [auth, actOnConvId, handoverState, reloadConv]);
   const sendManual = useCallback(async () => {
     if (!handoverConvId) return;
     const body = draft.trim();
@@ -1427,9 +1439,16 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
         )}
       </div>
 
-      {/* footer — §12 driver status. On UAT the SMS human-handover controls replace the read-only line when
-          Vini has flagged the conversation (PENDING) or a rep has claimed it (ACTIVE); prod never renders these. */}
-      {handoverOn && handoverPhase === "PENDING" ? (
+      {/* footer — §12 driver status. On UAT the SMS human-handover controls replace the read-only line:
+          conflict → error · PENDING → claim · ACTIVE → compose/hand-back · NONE → direct take-over. Prod
+          never renders any of it (handoverOn === false). */}
+      {handoverOn && handoverConflict ? (
+        <div className="shrink-0 border-t bg-white px-4 py-3" style={{ borderColor: C.border }}>
+          <div className="mx-auto flex w-full max-w-[760px] items-center gap-2 rounded-xl border px-4 py-3 text-[12px] font-medium" style={{ borderColor: C.red, background: "#fef2f2", color: C.red }}>
+            ⚠️ More than one conversation is flagged for handover at once — refresh the thread, or flag it to support if it persists.
+          </div>
+        </div>
+      ) : handoverOn && handoverPhase === "PENDING" ? (
         <div className="shrink-0 border-t bg-white px-4 py-3" style={{ borderColor: C.border }}>
           <div className="mx-auto flex w-full max-w-[760px] flex-col gap-2 rounded-xl border px-4 py-3" style={{ borderColor: C.orange, background: C.orangeAccent }}>
             <div className="flex items-start justify-between gap-3">
@@ -1474,7 +1493,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           </div>
         </div>
       ) : (
-        <div className="flex shrink-0 items-center justify-center border-t bg-white px-4 py-2.5 shadow-[0px_-1px_15px_rgba(0,0,0,0.04)]" style={{ borderColor: C.border }}>
+        <div className="flex shrink-0 items-center justify-center gap-3 border-t bg-white px-4 py-2.5 shadow-[0px_-1px_15px_rgba(0,0,0,0.04)]" style={{ borderColor: C.border }}>
           <p className="text-[12px]" style={{ color: C.sub }}>
             {engagementStopped
               ? "🛑 AI engagement is paused for this lead"
@@ -1482,6 +1501,15 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
                 ? "🙋 A human is currently handling this conversation"
                 : "🤖 Vini is handling replies"}
           </p>
+          {/* Direct take-over (RETCONVAI-4553): step into a conversation Vini is handling, unflagged. */}
+          {handoverOn && !engagementStopped && !humanDriving && actOnConvId && (
+            <>
+              <button onClick={toggleHandover} disabled={hoBusy} className="shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-semibold disabled:opacity-60" style={{ borderColor: C.primary, color: C.primary }}>
+                {hoBusy ? "…" : "Take over"}
+              </button>
+              {hoErr && <span className="text-[11px]" style={{ color: C.red }}>{hoErr}</span>}
+            </>
+          )}
         </div>
       )}
 
