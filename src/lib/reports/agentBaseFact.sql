@@ -124,13 +124,27 @@ appointment_intent_set AS (
 -- ⚠️ LOCKSTEP: this list is DUPLICATED in src/lib/reports/detailQueries.ts `BUYING_INTENT_ACTIONS`
 -- (warm-leads / "work now"). This SQL copy is the source of truth — edit BOTH together, or the spine's
 -- SMS-qualified and the detail queries silently diverge.
+-- ★ VOCABULARY DRIFT (fixed 2026-08-18): the original 15 labels below silently decayed as the AI's
+-- intent naming changed. Most glaring: SERVICE_SCHEDULE_APPOINTMENT was present but its SALES twin
+-- SALES_SCHEDULE_APPOINTMENT was NOT — and that label only starts appearing 2026-07-02 (493 leads by
+-- 2026-08-18). SEND_VEHICLE_PHOTO starts 2026-07-31 (75). Because an unrecognised label reads as "no
+-- buying intent", qualified FELL over July while real qualification did not: fleet-wide the 10 added
+-- labels lift the gate by 33-39 leads/wk in early June, rising to 163-299/wk from July.
+-- VERIFIED against prod 2026-08-18: all 25 labels are real values of dealer_leads.actionItems.intent.
+-- The SendVehicle* camelCase forms are legacy (1-15 leads each, June only) — kept so history reads
+-- consistently. When the AI emits a new intent name, ADD IT HERE or the metric quietly sags again.
 sms_buying_intent_actions AS (
     SELECT arrayJoin([
+        -- the original 15
         'ScheduleAppointment','RescheduleAppointment','SALES_SCHEDULE_SHOWROOM_VISIT',
         'CheckVehicleAvailability','CheckVehiclePrice','InquireFinanceStatus',
         'SALES_CONNECT_TO_FINANCE','InquireTradeInValue','SALES_TRADE_IN_FOLLOW_UP',
         'ScheduleTestDrive','SALES_SCHEDULE_TEST_DRIVE','InquireLeaseOptions',
-        'SALES_FOLLOW_UP_WITH_QUOTE','SERVICE_SCHEDULE_APPOINTMENT','SERVICE_SEND_ESTIMATE'
+        'SALES_FOLLOW_UP_WITH_QUOTE','SERVICE_SCHEDULE_APPOINTMENT','SERVICE_SEND_ESTIMATE',
+        -- added 2026-08-18: names the AI drifted to, plus legacy camelCase variants
+        'SALES_SCHEDULE_APPOINTMENT','SALES_SEND_VEHICLE_INFO','SALES_FOLLOW_UP_BE_BACK',
+        'SEND_VEHICLE_PHOTO','SendVehicleImages','SendVehicleDetails','SendVehicleCatalog',
+        'SendVehicleInformation','SendVehicleLink','CheckVehicleCondition'
     ]) AS intent
 ),
 
@@ -338,6 +352,14 @@ sms_by_conv AS (
         c.teamId         AS team_id,
         count()          AS n_sms_messages,
         sum(if(lower(sm.authorType) = 'human' AND lower(sm.direction) = 'in', 1, 0)) AS n_human_inbound,
+        -- A human inbound reply whose whole body is an opt-out keyword is NOT engagement — "STOP" is the
+        -- customer leaving, not replying. Used ONLY by the Sales-Outbound campaign-outcome qualified gate
+        -- (see ob_campaign_outcome) so it can match the funnel query's `reply_real`. n_human_inbound above
+        -- deliberately still counts them, so reached_person / sms_replied keep their existing meaning.
+        sum(if(lower(sm.authorType) = 'human' AND lower(sm.direction) = 'in'
+               AND upper(trimBoth(ifNull(sm.body, ''))) NOT IN
+                   ('STOP','STOPALL','STOP ALL','UNSUBSCRIBE','CANCEL','END','QUIT',
+                    'OPTOUT','OPT OUT','REMOVE','NO'), 1, 0)) AS n_human_inbound_real,
         sum(if(lower(sm.direction) = 'out', 1, 0)) AS n_sms_outbound,
         -- canonical (LOCKED): SMS qualified = human inbound reply AND a concrete buying-intent signal
         -- on the lead (NOT opted-out). A bare reply with no buying intent is "Engaged", not Qualified —
@@ -478,6 +500,60 @@ outbound_campaign_leads AS (
     WHERE clm.__deleted = 0
 ),
 
+-- ★ SALES OUTBOUND QUALIFIED — CAMPAIGN-OUTCOME RULE (locked 2026-08-18) ★
+-- For SALES OUTBOUND ONLY, qualified is the campaign DISPOSITION the agent recorded on the lead, gated on
+-- the customer actually having engaged that period. Sales Inbound and both Service agents keep the
+-- intent-based rule (IRA primary_intent on calls / buying-intent action item on SMS) — the "same rule both
+-- channels" invariant is DELIBERATELY broken here, for outbound only.
+--
+-- WHY: the intent-based rule decayed badly on outbound. Fleet-wide weekly Sales Outbound qualified under
+-- the old rule vs this one: they agree through mid-June (136/128, 254/237, 312/310) then diverge hard as
+-- the AI's intent naming drifted — 205/387 (w/c 07-06), 165/385 (w/c 08-03), i.e. the console was
+-- reporting roughly HALF the real qualified pool from July onward. The outcome field kept working because
+-- it is written by the dialer, not inferred from an intent label.
+--
+-- ⚠️ CAVEAT (state it with the number): campaignLeadMappings holds ONE CURRENT outcome per lead,
+-- overwritten in place, and updatedAt churns under CDC — so there is NO usable event date. Each lead's
+-- current outcome therefore applies to every period it engaged in, and can leak BACKWARDS into periods
+-- before the intent was actually expressed. The engagement gate stops idle periods counting, which bounds
+-- but does not eliminate this. It also means the number is not perfectly reproducible over time: a
+-- re-run months later sees whatever the outcome has since become. Fixing it properly needs event history
+-- (outboundTaskAuditLogs, 14.7M rows). Source: vini-daily-calls/src/abr-trends/
+-- vini_sales_outbound_funnel_weekly.sql caveat B.
+-- The 20 dispositions that count as qualified. Superset of WARM_LEAD_OUTCOMES in detailQueries.ts (which
+-- is the narrower hot/warm "work these now" tiering, 9 values) — this list additionally counts dispositions
+-- where the lead has already progressed PAST discussion (booked, self-booked, deposit, walk-in committed)
+-- or been handed to a human, all of which are qualified by any reading.
+-- NOTE: declared BEFORE ob_campaign_outcome because a WITH clause may only reference earlier CTEs.
+ob_qualifying_outcomes AS (
+    SELECT arrayJoin([
+        -- buying-signal tier (== HOT_TIER_OUTCOMES)
+        'purchase intent','vehicle inquiry','pricing inquiry','financing inquiry',
+        'trade inquiry','ancillary inquiry',
+        -- engaged/nurture tier (== WARM_TIER_OUTCOMES)
+        'customer considering','customer open to return','reconnect needed',
+        -- already progressed past discussion
+        'appointment','service appointment booked','meeting already scheduled',
+        'customer already self booked','walk in committed','appointment rescheduled',
+        'deposit placed',
+        -- handed to a human
+        'callback requested','human requested','human transferred','transferred to service team'
+    ]) AS outcome
+),
+ob_campaign_outcome AS (
+    SELECT lead_id, outcome,
+           if(outcome IN (SELECT outcome FROM ob_qualifying_outcomes), 1, 0) AS oc_q
+    FROM (
+        SELECT
+            clm.leadId AS lead_id,
+            -- most recent outcome wins; see the caveat above about updatedAt under CDC.
+            argMax(lower(trimBoth(ifNull(clm.outcome, ''))), clm.updatedAt) AS outcome
+        FROM dealer_leads.campaignLeadMappings AS clm FINAL
+        WHERE clm.__deleted = 0
+        GROUP BY clm.leadId
+    )
+),
+
 -- canonical: agent-worked = call OR SMS. Per lead, the representative spine conversation a lead-level
 -- AI-assisted (CRM) meeting attaches to. We prefer an OUTBOUND conversation (outbound-campaign assist =
 -- outbound, mirroring the call-back→OB rule), else the latest spine conversation — so the assist lands on
@@ -600,9 +676,21 @@ SELECT
     ifNull(sb.n_human_inbound, 0)           AS n_human_inbound,
     ifNull(sb.n_sms_outbound, 0)            AS n_sms_outbound,
 
-    ifNull(ec.qualified_via_call, 0)        AS qualified_via_call,
-    ifNull(sb.qualified_via_sms, 0)         AS qualified_via_sms,
-    greatest(ifNull(ec.qualified_via_call, 0), ifNull(sb.qualified_via_sms, 0)) AS qualified,
+    -- ★ SALES OUTBOUND uses the campaign-outcome rule (ob_campaign_outcome); Sales Inbound and both
+    -- Service agents keep the intent-based rule. `agent_type` is referenced (not cs.direction) so the
+    -- callback→outbound flip injected by callbackAttribution.ts is honoured: a lead that called back the
+    -- outbound line is Sales Outbound and must be judged by the outbound rule.
+    -- The two channel columns carry the whole switch, so `qualified` below stays a plain greatest():
+    --   greatest(oc_q AND spoke, oc_q AND reply_real)  ==  oc_q AND (spoke OR reply_real)
+    -- which is exactly the funnel query's `eng=1 AND oc_q=1`.
+    if(agent_type = 'Sales Outbound',
+       if(ifNull(oco.oc_q, 0) = 1 AND ifNull(ec.is_connected, 0) = 1, 1, 0),
+       ifNull(ec.qualified_via_call, 0))    AS qualified_via_call,
+    -- n_human_inbound_real, not n_human_inbound: a reply that is only "STOP" is the customer leaving.
+    if(agent_type = 'Sales Outbound',
+       if(ifNull(oco.oc_q, 0) = 1 AND ifNull(sb.n_human_inbound_real, 0) > 0, 1, 0),
+       ifNull(sb.qualified_via_sms, 0))     AS qualified_via_sms,
+    greatest(qualified_via_call, qualified_via_sms) AS qualified,
 
     if(ifNull(ad.n_appts, 0) > 0, 1, 0)     AS appointment_booked,
     ifNull(ad.n_appts, 0)                    AS appointments_count,
@@ -673,5 +761,9 @@ LEFT JOIN conv_hours ch
     ON ch.conversationId = cs.conversationId AND ch.team_id = cs.team_id
 LEFT JOIN appt_by_conv_dedup ad
     ON ad.conversationId = cs.conversationId AND ad.team_id = cs.team_id
+-- Sales-Outbound qualified gate. Keyed on lead_id only: campaignLeadMappings has no team column, and
+-- lead_id is globally unique, so this cannot pull another rooftop's row.
+LEFT JOIN ob_campaign_outcome oco
+    ON oco.lead_id = cs.lead_id
 WHERE 1 = 1
 ORDER BY cs.activity_ts DESC, cs.team_id, cs.conv_type

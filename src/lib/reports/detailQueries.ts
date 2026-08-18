@@ -55,12 +55,21 @@ const WARM_LEAD_OUTCOMES = [...HOT_TIER_OUTCOMES, ...WARM_TIER_OUTCOMES];
 // Mirror of agentBaseFact.sql `sms_buying_intent_actions` — the canonical concrete-buying-intent
 // action-item vocab (vehicle / availability / price / financing / trade-in / test-drive / booking).
 // The spine's copy is the source of truth; keep in lockstep.
+// ★ VOCABULARY DRIFT (fixed 2026-08-18): the original 15 decayed as the AI's intent naming changed —
+// SERVICE_SCHEDULE_APPOINTMENT was here but its SALES twin was not, and SALES_SCHEDULE_APPOINTMENT only
+// starts 2026-07-02. An unrecognised label reads as "no buying intent", so qualified sagged over July
+// while real qualification did not. All 25 verified against prod 2026-08-18. Keep in lockstep with the
+// spine's copy, and ADD new intent names here as the AI emits them.
 const BUYING_INTENT_ACTIONS = [
   "ScheduleAppointment", "RescheduleAppointment", "SALES_SCHEDULE_SHOWROOM_VISIT",
   "CheckVehicleAvailability", "CheckVehiclePrice", "InquireFinanceStatus",
   "SALES_CONNECT_TO_FINANCE", "InquireTradeInValue", "SALES_TRADE_IN_FOLLOW_UP",
   "ScheduleTestDrive", "SALES_SCHEDULE_TEST_DRIVE", "InquireLeaseOptions",
   "SALES_FOLLOW_UP_WITH_QUOTE", "SERVICE_SCHEDULE_APPOINTMENT", "SERVICE_SEND_ESTIMATE",
+  // added 2026-08-18 — drifted names + legacy camelCase variants
+  "SALES_SCHEDULE_APPOINTMENT", "SALES_SEND_VEHICLE_INFO", "SALES_FOLLOW_UP_BE_BACK",
+  "SEND_VEHICLE_PHOTO", "SendVehicleImages", "SendVehicleDetails", "SendVehicleCatalog",
+  "SendVehicleInformation", "SendVehicleLink", "CheckVehicleCondition",
 ];
 const sqlList = (xs: string[]): string => xs.map((s) => `'${esc(s)}'`).join(",");
 
