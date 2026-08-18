@@ -1042,7 +1042,7 @@ function ListSkeleton() {
  * Thread pane
  * ════════════════════════════════════════════════════════════════════════════ */
 type ThreadNode =
-  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; fb?: { conversationId: string; messageIndex: number } }
+  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; human?: boolean; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "email"; side: "in" | "out"; sender: string; subject?: string; text: string; status?: string }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
@@ -1218,11 +1218,14 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           }
           if (!parsed.text) return;
           const side = role === "user" ? "in" : "out";
+          // Human handover (RETCONVAI-2997): an outbound turn with an authorUserId was sent by a REP, not
+          // Vini — label it with the rep's name and mark it human (v2 tags only human turns this way).
+          const byHuman = side === "out" && !!m.authorUserId;
           out.push({
-            t, kind: "msg", side, text: parsed.text, chat: isChat || undefined,
-            sender: side === "out" ? aiAgentName : custFirst,
-            // Feedback attaches to AI messages only, keyed by conversation + message index (§03).
-            fb: side === "out" ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
+            t, kind: "msg", side, text: parsed.text, chat: isChat || undefined, human: byHuman || undefined,
+            sender: side === "out" ? (byHuman ? m.authorName || "Team member" : aiAgentName) : custFirst,
+            // Feedback attaches to AI messages only (never a rep's own message), keyed by conversation + index (§03).
+            fb: side === "out" && !byHuman ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
           });
         });
       } else if (rec.type === "email" && Array.isArray(rec.emailMessages)) {
@@ -1713,7 +1716,7 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
       </div>
     );
   }
-  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
+  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} human={node.human} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
 }
 
 /* §03 — a tool-use "behind the scenes" step: action + query params + result, expandable. Modeled on
@@ -1812,13 +1815,14 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   );
 }
 
-function MessageBubble({ side, sender, text, at, chat, fbNode, fb, custName, custSeed }: {
+function MessageBubble({ side, sender, text, at, chat, human, fbNode, fb, custName, custSeed }: {
   side: "in" | "out"; sender: string; text: string; at: string;
   chat?: boolean; // website-chat message → "Web chat" tag distinguishes it from a text
+  human?: boolean; // outbound turn sent by a REP during a handover (not Vini) → person avatar + "Team" tag
   fbNode?: { conversationId: string; messageIndex: number }; fb?: FbCtx;
   custName?: string; custSeed?: string; // full customer name + seed → customer avatar matches the header
 }) {
-  const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)}{chat && <> · Web chat</>}</span>;
+  const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span>{human && <span className="font-medium" style={{ color: C.green }}> · Team</span>} · {fmtTime(at)}{chat && <> · Web chat</>}</span>;
   if (side === "out") {
     const rating = fbNode && fb ? fb.map[`${fbNode.conversationId}#${fbNode.messageIndex}`] : undefined;
     return (
@@ -1841,7 +1845,8 @@ function MessageBubble({ side, sender, text, at, chat, fbNode, fb, custName, cus
             {meta}
           </div>
         </div>
-        <Avatar kind="agent" name={sender} />
+        {/* a rep's manual reply gets a person avatar (initials), not Vini's headset/photo */}
+        <Avatar kind={human ? "customer" : "agent"} name={sender} />
       </div>
     );
   }
