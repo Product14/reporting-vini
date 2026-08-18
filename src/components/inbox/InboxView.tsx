@@ -1304,8 +1304,12 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     const res = await postHandoverToggle(auth, handoverConvId);
     setHoBusy(false);
     if (!res.ok) { setHoErr(res.error || "Couldn't update handover — try again."); return; }
-    loadHandover();
+    // The toggle response carries the authoritative new phase — apply it immediately so the footer flips
+    // without waiting on the v1 re-read, which lags the write by ~1s (eventual consistency). Reconcile
+    // shortly after (also re-surfaces a *second* pending conversation once a hand-back has propagated).
+    if (res.phase) setHandoverState((s) => ({ ...s, phase: res.phase as HandoverState["phase"] }));
     reloadConv();
+    setTimeout(() => loadHandover(), 1500);
   }, [auth, handoverConvId, loadHandover, reloadConv]);
   const sendManual = useCallback(async () => {
     if (!handoverConvId) return;
@@ -1317,6 +1321,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     if (!res.ok) { setHoErr(res.error || "Couldn't send — try again."); return; }
     setDraft("");
     reloadConv();
+    setTimeout(() => reloadConv(), 1500); // the sent SMS lands in the v2 thread a beat later
   }, [auth, handoverConvId, draft, reloadConv]);
   // Fetch handover state on customer change (and on demand). No-op on prod (loadHandover guards on handoverOn).
   useEffect(() => { loadHandover(); }, [loadHandover]);
