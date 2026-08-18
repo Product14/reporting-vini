@@ -223,8 +223,9 @@ export interface EmailMessage {
 //   NONE = Vini owns replies · PENDING = Vini flagged for a rep (show "Take over") · ACTIVE = a rep is replying (Vini silent).
 export interface HumanTransferDetails {
   phase?: "NONE" | "PENDING" | "ACTIVE" | string;
-  triggerReason?: string | null; // why Vini escalated (e.g. "explicit_request", "low_confidence")
+  triggerReason?: string | null; // why Vini escalated (e.g. "AI_CANNOT_HANDLE", "explicit_request")
   handoverSummary?: string | null; // Vini's short note to the rep on what the customer needs
+  aiFlaggedAt?: string | null; // when Vini raised the flag (used to pick the newest PENDING)
   claimedByUserId?: string | null;
   claimedByName?: string | null;
   claimedAt?: string | null;

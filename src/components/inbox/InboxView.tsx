@@ -29,7 +29,6 @@ import {
   stopInboxEngagement,
   postHandoverToggle,
   postHandoverSend,
-  fetchHandoverState,
   type HandoverState,
   fetchInboxTranscript,
   fetchInboxCall,
@@ -1053,10 +1052,36 @@ type ThreadNode =
 const EVENT_GRADIENT =
   "linear-gradient(90deg, rgba(91,109,246,0.10) 1%, rgba(127,106,242,0.10) 23%, rgba(182,81,215,0.10) 66%, rgba(232,62,84,0.10) 86%, rgba(237,137,57,0.10) 113%)";
 
+// SMS human handover (RETCONVAI-2997): pick the single actionable handover from the v2 thread — which now
+// carries humanTransferDetails per conversation. Prefer ACTIVE (a rep is on it), else the newest PENDING by
+// aiFlaggedAt. Reading from v2 (not v1) means the banner reflects exactly the data the thread shows and is
+// naturally serviceType-scoped (a service handover appears in the service space, not sales). UAT-only via `on`.
+function deriveHandover(conv: ConversationsV2 | null, on: boolean): HandoverState {
+  if (!on || !conv) return { phase: "NONE" };
+  const flagged = (conv.conversations ?? []).filter(
+    (c) => (c.type === "sms" || c.type === "chat") && (c.humanTransferDetails?.phase === "PENDING" || c.humanTransferDetails?.phase === "ACTIVE"),
+  );
+  const active = flagged.find((c) => c.humanTransferDetails?.phase === "ACTIVE");
+  const pending = flagged
+    .filter((c) => c.humanTransferDetails?.phase === "PENDING")
+    .sort((a, b) => String(b.humanTransferDetails?.aiFlaggedAt || "").localeCompare(String(a.humanTransferDetails?.aiFlaggedAt || "")));
+  const pick = active ?? pending[0];
+  const h = pick?.humanTransferDetails;
+  if (!pick || !h) return { phase: "NONE" };
+  return {
+    phase: h.phase || "NONE",
+    conversationId: pick.conversationId,
+    handoverSummary: h.handoverSummary ?? null,
+    triggerReason: h.triggerReason ?? null,
+    claimedByName: h.claimedByName ?? null,
+  };
+}
+
 function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
-  // SMS human handover (RETCONVAI-2997) — UAT-only; declared here so the customer-change reset effect can touch them.
-  const [handoverState, setHandoverState] = useState<HandoverState>({ phase: "NONE" });
+  // SMS human handover (RETCONVAI-2997) — UAT-only. `hoOverride` optimistically holds the post-toggle phase
+  // until the re-fetched v2 (derivedHandover) catches up (writes lag the read ~1s).
+  const [hoOverride, setHoOverride] = useState<HandoverState | null>(null);
   const [hoBusy, setHoBusy] = useState(false);
   const [hoErr, setHoErr] = useState("");
   const [draft, setDraft] = useState("");
@@ -1095,8 +1120,8 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     setConv(null);
     setFbMap({});
     setSummary("");
-    // Reset handover UI on customer change (the fetch is a dedicated effect below, keyed on loadHandover).
-    setHandoverState({ phase: "NONE" });
+    // Reset handover UI on customer change (phase itself is derived from conv below).
+    setHoOverride(null);
     setDraft("");
     setHoErr("");
     // §6 — the two middle-panel calls fire in parallel (conversations + persona summary).
@@ -1286,31 +1311,34 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   const humanDriving = !engagementStopped && !!latestMode && latestMode !== "auto";
 
   // ── SMS human handover (RETCONVAI-2997) — UAT-ONLY. Prod must show none of this. ──────────────────
-  // Handover state (phase / summary / triggerReason / the conversationId to act on) lives on the V1
-  // endpoint, NOT conversations/V2 which the thread renders — so it's fetched separately (UAT-gated).
+  // Phase/summary/conversationId are DERIVED from the v2 thread (conversations/v2 now carries
+  // humanTransferDetails). `hoOverride` briefly overrides the derived phase after a toggle, until the
+  // re-fetched conv catches up (the write lags the read ~1s).
   const handoverOn = auth.spyneEnv === "uat";
+  const derivedHandover = useMemo(() => deriveHandover(conv, handoverOn), [conv, handoverOn]);
+  const handoverState = hoOverride ?? derivedHandover;
   const handoverPhase = handoverState.phase;
   const handoverConvId = handoverState.conversationId;
-  const loadHandover = useCallback(() => {
-    // Prod / non-UAT: leave state at NONE (init + the customer-change reset already ensure it) — no sync setState.
-    if (!handoverOn) return;
-    fetchHandoverState(auth, customer.customer_id).then(setHandoverState);
-  }, [handoverOn, auth, customer.customer_id]);
+  // Drop the optimistic override the moment the fetched (server) state actually changes phase/target —
+  // keyed on primitives so a lagged re-fetch (same phase) doesn't clear it prematurely.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clear optimistic override once server state advances
+    setHoOverride(null);
+  }, [derivedHandover.phase, derivedHandover.conversationId]);
   // Claim a PENDING conversation (→ACTIVE) or hand an ACTIVE one back to Vini (→NONE). The endpoint reads
-  // the current phase and does whichever is appropriate. Refresh both the phase and the thread after.
+  // the current phase and does whichever is appropriate.
   const toggleHandover = useCallback(async () => {
     if (!handoverConvId) return;
     setHoBusy(true); setHoErr("");
     const res = await postHandoverToggle(auth, handoverConvId);
     setHoBusy(false);
     if (!res.ok) { setHoErr(res.error || "Couldn't update handover — try again."); return; }
-    // The toggle response carries the authoritative new phase — apply it immediately so the footer flips
-    // without waiting on the v1 re-read, which lags the write by ~1s (eventual consistency). Reconcile
-    // shortly after (also re-surfaces a *second* pending conversation once a hand-back has propagated).
-    if (res.phase) setHandoverState((s) => ({ ...s, phase: res.phase as HandoverState["phase"] }));
+    // Optimistically flip the footer from the authoritative toggle response, then re-fetch the thread so
+    // the derived state (and any second pending conversation) reconciles once the write has propagated.
+    if (res.phase) setHoOverride({ ...handoverState, phase: res.phase });
     reloadConv();
-    setTimeout(() => loadHandover(), 1500);
-  }, [auth, handoverConvId, loadHandover, reloadConv]);
+    setTimeout(() => reloadConv(), 2000);
+  }, [auth, handoverConvId, handoverState, reloadConv]);
   const sendManual = useCallback(async () => {
     if (!handoverConvId) return;
     const body = draft.trim();
@@ -1321,10 +1349,8 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     if (!res.ok) { setHoErr(res.error || "Couldn't send — try again."); return; }
     setDraft("");
     reloadConv();
-    setTimeout(() => reloadConv(), 1500); // the sent SMS lands in the v2 thread a beat later
+    setTimeout(() => reloadConv(), 2000); // the sent SMS lands in the v2 thread a beat later
   }, [auth, handoverConvId, draft, reloadConv]);
-  // Fetch handover state on customer change (and on demand). No-op on prod (loadHandover guards on handoverOn).
-  useEffect(() => { loadHandover(); }, [loadHandover]);
 
   return (
     <>
