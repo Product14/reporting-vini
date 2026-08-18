@@ -29,6 +29,8 @@ import {
   stopInboxEngagement,
   postHandoverToggle,
   postHandoverSend,
+  fetchHandoverState,
+  type HandoverState,
   fetchInboxTranscript,
   fetchInboxCall,
   resolveInboxActionItem,
@@ -1053,6 +1055,11 @@ const EVENT_GRADIENT =
 
 function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
+  // SMS human handover (RETCONVAI-2997) — UAT-only; declared here so the customer-change reset effect can touch them.
+  const [handoverState, setHandoverState] = useState<HandoverState>({ phase: "NONE" });
+  const [hoBusy, setHoBusy] = useState(false);
+  const [hoErr, setHoErr] = useState("");
+  const [draft, setDraft] = useState("");
   // §7A purple summary box — persona.conversationMemory.summaryShort, shown at the top of the chat.
   const [summary, setSummary] = useState<string>("");
   // §03 feedback — keyed `${conversationId}#${messageIndex}` → thumb direction.
@@ -1088,6 +1095,10 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     setConv(null);
     setFbMap({});
     setSummary("");
+    // Reset handover UI on customer change (the fetch is a dedicated effect below, keyed on loadHandover).
+    setHandoverState({ phase: "NONE" });
+    setDraft("");
+    setHoErr("");
     // §6 — the two middle-panel calls fire in parallel (conversations + persona summary).
     fetchInboxPersona(auth, customer.customer_id).then((p) => {
       if (on && p?.conversationMemory?.summaryShort) setSummary(p.conversationMemory.summaryShort);
@@ -1275,40 +1286,40 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   const humanDriving = !engagementStopped && !!latestMode && latestMode !== "auto";
 
   // ── SMS human handover (RETCONVAI-2997) — UAT-ONLY. Prod must show none of this. ──────────────────
+  // Handover state (phase / summary / triggerReason / the conversationId to act on) lives on the V1
+  // endpoint, NOT conversations/V2 which the thread renders — so it's fetched separately (UAT-gated).
   const handoverOn = auth.spyneEnv === "uat";
-  // The sms/chat conversation currently in a handover. Prefer an actionable one (PENDING or ACTIVE); the
-  // backend keeps at most one live at a time, so first-match is safe.
-  const handoverConv = useMemo(() => {
-    if (!handoverOn) return null;
-    const smsish = (conv?.conversations ?? []).filter((c) => c.type === "sms" || c.type === "chat");
-    return smsish.find((c) => c.humanTransferDetails?.phase === "PENDING" || c.humanTransferDetails?.phase === "ACTIVE") ?? null;
-  }, [conv, handoverOn]);
-  const handover = handoverConv?.humanTransferDetails ?? null;
-  const handoverPhase = handover?.phase ?? "NONE";
-  const [hoBusy, setHoBusy] = useState(false);
-  const [hoErr, setHoErr] = useState("");
-  const [draft, setDraft] = useState("");
+  const handoverPhase = handoverState.phase;
+  const handoverConvId = handoverState.conversationId;
+  const loadHandover = useCallback(() => {
+    // Prod / non-UAT: leave state at NONE (init + the customer-change reset already ensure it) — no sync setState.
+    if (!handoverOn) return;
+    fetchHandoverState(auth, customer.customer_id).then(setHandoverState);
+  }, [handoverOn, auth, customer.customer_id]);
   // Claim a PENDING conversation (→ACTIVE) or hand an ACTIVE one back to Vini (→NONE). The endpoint reads
-  // the current phase and does whichever is appropriate.
+  // the current phase and does whichever is appropriate. Refresh both the phase and the thread after.
   const toggleHandover = useCallback(async () => {
-    if (!handoverConv) return;
+    if (!handoverConvId) return;
     setHoBusy(true); setHoErr("");
-    const res = await postHandoverToggle(auth, handoverConv.conversationId);
+    const res = await postHandoverToggle(auth, handoverConvId);
     setHoBusy(false);
     if (!res.ok) { setHoErr(res.error || "Couldn't update handover — try again."); return; }
+    loadHandover();
     reloadConv();
-  }, [auth, handoverConv, reloadConv]);
+  }, [auth, handoverConvId, loadHandover, reloadConv]);
   const sendManual = useCallback(async () => {
-    if (!handoverConv) return;
+    if (!handoverConvId) return;
     const body = draft.trim();
     if (!body) return;
     setHoBusy(true); setHoErr("");
-    const res = await postHandoverSend(auth, handoverConv.conversationId, body);
+    const res = await postHandoverSend(auth, handoverConvId, body);
     setHoBusy(false);
     if (!res.ok) { setHoErr(res.error || "Couldn't send — try again."); return; }
     setDraft("");
     reloadConv();
-  }, [auth, handoverConv, draft, reloadConv]);
+  }, [auth, handoverConvId, draft, reloadConv]);
+  // Fetch handover state on customer change (and on demand). No-op on prod (loadHandover guards on handoverOn).
+  useEffect(() => { loadHandover(); }, [loadHandover]);
 
   return (
     <>
@@ -1393,8 +1404,8 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-[13px] font-semibold" style={{ color: C.orange }}>⚑ Vini needs a human here</p>
-                {handover?.handoverSummary && <p className="mt-1 text-[12px] leading-snug" style={{ color: C.dark }}>{handover.handoverSummary}</p>}
-                {handover?.triggerReason && <p className="mt-1 text-[11px]" style={{ color: C.sub }}>Reason: {String(handover.triggerReason).replace(/_/g, " ")}</p>}
+                {handoverState.handoverSummary && <p className="mt-1 text-[12px] leading-snug" style={{ color: C.dark }}>{handoverState.handoverSummary}</p>}
+                {handoverState.triggerReason && <p className="mt-1 text-[11px]" style={{ color: C.sub }}>Reason: {String(handoverState.triggerReason).replace(/_/g, " ").toLowerCase()}</p>}
               </div>
               <button onClick={toggleHandover} disabled={hoBusy} className="shrink-0 rounded-lg px-3.5 py-2 text-[13px] font-semibold text-white disabled:opacity-60" style={{ background: C.orange }}>
                 {hoBusy ? "…" : "Take over"}
@@ -1408,7 +1419,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           <div className="mx-auto flex w-full max-w-[760px] flex-col gap-2">
             <div className="flex items-center justify-between gap-3">
               <p className="text-[12px] font-medium" style={{ color: C.green }}>
-                🙋 You&apos;re handling this — Vini is paused{handover?.claimedByName ? ` · ${handover.claimedByName}` : ""}
+                🙋 You&apos;re handling this — Vini is paused{handoverState.claimedByName ? ` · ${handoverState.claimedByName}` : ""}
               </p>
               <button onClick={toggleHandover} disabled={hoBusy} className="shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-semibold disabled:opacity-60" style={{ borderColor: C.border, color: C.sub }}>
                 {hoBusy ? "…" : "Hand back to Vini"}

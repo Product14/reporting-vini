@@ -690,6 +690,31 @@ export interface HandoverResult {
 }
 const HANDOVER_ENABLED = (a: InboxAuth) => a.spyneEnv === "uat";
 
+// The actionable handover for a customer, resolved server-side from the V1 endpoint (V2 lacks the field).
+export interface HandoverState {
+  phase: "NONE" | "PENDING" | "ACTIVE" | string;
+  conversationId?: string; // the conversation /handover/toggle + /send operate on
+  handoverSummary?: string | null;
+  triggerReason?: string | null;
+  claimedByName?: string | null;
+}
+const HANDOVER_NONE: HandoverState = { phase: "NONE" };
+
+// UAT-only; degrades to NONE on prod / any error so the thread never breaks.
+export async function fetchHandoverState(a: InboxAuth, customerId: string): Promise<HandoverState> {
+  if (!HANDOVER_ENABLED(a) || !a.teamId || !a.enterpriseId || !customerId) return HANDOVER_NONE;
+  const p = new URLSearchParams({ team_id: a.teamId, enterprise_id: a.enterpriseId, customer_id: customerId });
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/handover/state?${p}`, { cache: "no-store", headers: authHeaders(a) });
+    const j = (await r.json().catch(() => null)) as HandoverState | null;
+    if (!r.ok || !j || !j.phase) return HANDOVER_NONE;
+    return { phase: j.phase, conversationId: j.conversationId, handoverSummary: j.handoverSummary, triggerReason: j.triggerReason, claimedByName: j.claimedByName };
+  } catch {
+    return HANDOVER_NONE;
+  }
+}
+
 // Claim (PENDING→ACTIVE) or hand back (ACTIVE→NONE) — the endpoint picks the action from current phase.
 export async function postHandoverToggle(a: InboxAuth, conversationId: string): Promise<HandoverResult> {
   if (!HANDOVER_ENABLED(a)) return { ok: false, status: 404, error: "not_available" };
