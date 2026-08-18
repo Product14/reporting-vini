@@ -23,6 +23,21 @@ const esc = (v: string): string => String(v ?? "").replace(/'/g, "''").replace(/
 const teamPred = (col: string, teamId?: string): string =>
   teamId ? `AND ${col} = '${esc(teamId)}'` : "";
 
+/* ── meetings.meta.source — NOT an appointment anyone just booked ──────────────────────────────────
+ * `meetings.source` says who OWNS a booking ('spyne' = us, 'bdc'/'eleads' = the dealer's CRM).
+ * `meta.source` says HOW the row came to exist, and 'warm_transfer' rows are the customer's EXISTING
+ * appointments pulled in around a transfer — records we did not create, whose start times are often the
+ * customer's own PAST visits. They must never count as, or be listed as, an appointment: source='spyne'
+ * alone is not proof the AI booked it.
+ * Caught on Honda of Downtown Los Angeles 2026-08-14 (a manager got 7 "New appointment" emails for ONE
+ * customer in 6 seconds — all 7 warm_transfer, start times Jul-2024 → Jan-2026). The event-email send
+ * path already gates on this (vini-daily-calls server/roi-cron/eventRunner.cjs); this is the same rule
+ * for every metric/list. 'callback' meta.source rows are deliberately left alone.
+ * Prod (all-time, 2026-08-18): only three meta.source values exist — '' (97,583), 'warm_transfer'
+ * (4,975 across 48 teams) and 'callback' (1,050) — so one equality test covers it. */
+const notWarmTransfer = (alias = "m"): string =>
+  `lower(JSONExtractString(ifNull(${alias}.meta, ''), 'source')) != 'warm_transfer'`;
+
 // A "warm lead" = a campaignLeadMappings.outcome that signals real buying intent. SINGLE SOURCE OF
 // TRUTH for the warm-leads count (campaigns card + outbound headline). Deliberately EXCLUDES
 // 'general engagement' — a generic "they replied" signal that isn't a warm lead and would otherwise
@@ -117,7 +132,9 @@ campaign_appts AS (
     FROM attributed_calls ac
     JOIN dealer_leads.meetings AS m FINAL
         ON m.call_id = ac.callId AND m.__deleted = 0 AND m.is_active = 1
-    WHERE m.source = 'spyne' OR ac.is_task = 1
+    WHERE (m.source = 'spyne' OR ac.is_task = 1)
+      -- warm_transfer rows are pre-existing appointments, not ones this campaign booked (see notWarmTransfer)
+      AND ${notWarmTransfer("m")}
     GROUP BY ac.campaignId
 ),
 campaign_outcomes AS (
@@ -306,6 +323,9 @@ booked_leads AS (
     SELECT DISTINCT m.lead_id AS lead_id
     FROM dealer_leads.meetings AS m FINAL
     WHERE m.__deleted = 0 AND m.is_active = 1
+      -- a warm_transfer row is a pre-existing/past appointment, not a booking — it must NOT suppress a
+      -- warm lead from "Work these now" (see notWarmTransfer).
+      AND ${notWarmTransfer("m")}
       AND toDate(m.created_at) >= ${startFloor}
       ${teamPred("m.team_id", teamId)}
 ),
@@ -402,6 +422,7 @@ export interface AppointmentsOpts {
 //     bridging the dealerVinId (UUID) form. Both inventory tables are semi-joined (vin IN (…)) to only
 //     the VINs a team's meetings reference, so a run never scans all of vinMaster (1.8M) / dealerVinMapping
 //     (21.8M). GROUP BY meeting_id collapses any CDC/join fan-out to one row.
+// meta.source='warm_transfer' rows are excluded — appointments we did not create (see notWarmTransfer).
 // Test/demo/reseller enterprises excluded (same predicate as the other detail queries). booked_at floored
 // by ${startFloor} so a full run stays bounded (covers the daily window + the 30d top-vehicles window).
 export function appointmentsSql({ teamId, startFloor = "addDays(today(), -120)" }: AppointmentsOpts = {}): string {
@@ -428,6 +449,8 @@ meet AS (
     JOIN eventila.enterprise_details ed FINAL ON ed.enterprise_id = m.enterprise_id
     WHERE m.__deleted = 0 AND m.is_active = 1
       AND (m.source = 'spyne' OR m.lead_id IN (SELECT lead_id FROM ob_enrolled))
+      -- never list a warm_transfer row: we didn't create it (see notWarmTransfer)
+      AND ${notWarmTransfer("m")}
       AND m.service_type IN ('sales','service')
       AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
       AND toDate(m.created_at) >= ${startFloor}

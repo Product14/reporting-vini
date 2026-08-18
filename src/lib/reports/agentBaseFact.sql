@@ -501,6 +501,16 @@ lead_assist_conv AS (
 --                                      added into the headline.
 -- Each meeting is classified once: source='spyne' → booked; else (CRM) → assisted, attached to the lead's
 -- representative spine conversation. is_assisted carries the split downstream (two separate counters).
+--
+-- canonical (2026-08-18): EXCLUDE meta.source='warm_transfer' from BOTH halves. `meetings.source` says who
+-- OWNS a booking; `meta.source` says HOW the row came to exist — 'warm_transfer' rows are the customer's
+-- EXISTING appointments pulled in around a transfer, records nobody just booked (their start times are
+-- often the customer's own PAST visits). source='spyne' alone is NOT proof the AI booked it. Caught on
+-- Honda of Downtown Los Angeles 2026-08-14: 7 "New appointment" emails for ONE customer in 6 seconds, all
+-- 7 warm_transfer (start times Jul-2024 → Jan-2026). Mirrors the event-email gate in vini-daily-calls
+-- (server/roi-cron/eventRunner.cjs) and notWarmTransfer() in detailQueries.ts. Prod all-time has exactly
+-- three meta.source values — '' , 'warm_transfer' (4,975 / 48 teams), 'callback' (1,050) — so one equality
+-- test covers it; 'callback' rows are deliberately left alone.
 appt_attribution AS (
     SELECT
         meeting_id,
@@ -514,6 +524,7 @@ appt_attribution AS (
                m.conversation_id AS conv_id, 2 AS pri, 0 AS is_assisted
         FROM dealer_leads.meetings AS m FINAL
         WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
+          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
           AND m.conversation_id IS NOT NULL AND m.conversation_id != ''
         UNION ALL
         -- PRIMARY: AI-booked — same source='spyne' meetings matched via call_id (when conv id absent).
@@ -523,6 +534,7 @@ appt_attribution AS (
         JOIN dealer_leads.conversations AS c FINAL
             ON c.callId = m.call_id AND c.__deleted = 0
         WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
+          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
           AND m.call_id IS NOT NULL AND m.call_id != ''
         UNION ALL
         -- SECONDARY: AI-assisted (CRM). canonical: agent-worked = call OR SMS. Attribute the CRM meeting
@@ -537,6 +549,7 @@ appt_attribution AS (
             ON lac.lead_id = m.lead_id AND lac.team_id = m.team_id
         WHERE m.is_active = 1 AND m.__deleted = 0
           AND ifNull(m.source, '') != 'spyne'
+          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
           AND m.lead_id IN (SELECT lead_id FROM outbound_campaign_leads)
           -- canonical: bound the BOOKING to the report window (like AI-booked meetings attach to in-window
           -- conversations), so a windowed view credits only assists booked in that window.

@@ -8,6 +8,7 @@
  * unconfigured or the call fails, so the report keeps rendering. See client.ts for the auth model. */
 
 import { spyneGet, resolveToken } from "./client";
+import { runClickhouse, chEsc, hasClickhouseCreds } from "./clickhouse";
 import type { Meeting, MeetingsResult } from "@/components/reports/data";
 
 export type ServiceType = "sales" | "service";
@@ -53,6 +54,47 @@ interface RawMeeting {
  * (e.g. Honda DTLA: 152 meetings booked on a day, but only ~23 by the AI). The API ignores a `source`
  * query param, so we filter client-side. */
 const AI_SOURCE = "spyne";
+
+/* …and `source='spyne'` alone is NOT proof the AI booked it. `meta.source` says HOW the row came to
+ * exist, and 'warm_transfer' rows are the customer's EXISTING appointments pulled in around a transfer
+ * — records we did not create, whose start times are often the customer's own PAST visits. Listing one
+ * invents an appointment (Honda of Downtown Los Angeles 2026-08-14: a manager was shown 7 "appointments"
+ * for ONE customer, all 7 warm_transfer, start times Jul-2024 → Jan-2026).
+ *
+ * The Spyne meetings API doesn't return `meta` at all, so it's resolved from ClickHouse, keyed on the
+ * ids the API hands back — the same lookup vini-daily-calls' send path does
+ * (server/roi-cron/leadCaptureCH.cjs fetchMeetingMetaSource). The ClickHouse-sourced snapshot path
+ * (report_appointments, see detailQueries.ts appointmentsSql) filters this at the source; this covers
+ * the live path (the console's inbound/outbound drill-down, and the snapshot-empty fallback).
+ *
+ * BEST-EFFORT BY DESIGN: no creds or a failed/empty lookup drops nothing, so a ClickHouse outage can
+ * never silently blank a rooftop's real appointment list. TEAM-SCOPED: a meeting id that isn't this
+ * rooftop's returns no row, so the lookup can't leak or act on another dealer's records. */
+async function dropWarmTransferMeetings(teamId: string, meetings: Meeting[]): Promise<Meeting[]> {
+  const ids = [...new Set(meetings.map((m) => m.id).filter(Boolean))];
+  if (!ids.length || !hasClickhouseCreds()) return meetings;
+  const inList = `(${ids.map((i) => `'${chEsc(i)}'`).join(",")})`;
+  const rows = await runClickhouse<{ meetingId?: string; rowId?: string; metaSource?: string }>(
+    // The feed's `id` is meeting_id for some rows and _id for others, so key on both. SharedReplacing-
+    // MergeTree keeps duplicate physical rows and an early version can carry an empty meta — prefer a
+    // populated value across them rather than reading whichever row comes back first.
+    `SELECT toString(m.meeting_id) AS meetingId, toString(m._id) AS rowId,
+            anyIf(JSONExtractString(ifNull(m.meta,''),'source'),
+                  notEmpty(JSONExtractString(ifNull(m.meta,''),'source'))) AS metaSource
+     FROM dealer_leads.meetings AS m
+     WHERE m.team_id = '${chEsc(teamId)}'
+       AND (m.meeting_id IN ${inList} OR m._id IN ${inList})
+     GROUP BY meetingId, rowId`,
+  );
+  const warm = new Set<string>();
+  for (const r of rows) {
+    if ((r.metaSource || "").trim().toLowerCase() !== "warm_transfer") continue;
+    if (r.meetingId) warm.add(r.meetingId);
+    if (r.rowId) warm.add(r.rowId);
+  }
+  if (!warm.size) return meetings;
+  return meetings.filter((m) => !warm.has(m.id));
+}
 // The endpoint returns the meetings array directly under `data` (NOT data.meetings), with pagination alongside.
 interface MeetingsResp { data?: RawMeeting[]; pagination?: { hasNextPage?: boolean; total?: number } }
 
@@ -187,7 +229,10 @@ export async function fetchMeetings(opts: {
     const lists = await Promise.all(
       types.map((serviceType) => fetchOne({ teamId, enterpriseId, serviceType, startISO, endISO, sortOrder, token, env })),
     );
-    let meetings = lists.flat();
+    // Drop meta.source='warm_transfer' rows before any scoping/counting below — they are appointments
+    // we did not create (see dropWarmTransferMeetings). Applied here so every branch's `total` and every
+    // listed row honour it.
+    let meetings = await dropWarmTransferMeetings(teamId, lists.flat());
     // `total` is the count the modal headlines. Defaults to the rows we list; the lead-scoped drill
     // overrides it with the authoritative booked-lead count so the number matches the tile even if a
     // lead's live meeting record didn't come back (deleted/rescheduled/non-spyne after Q12227 captured it).
