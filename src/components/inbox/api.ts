@@ -198,6 +198,7 @@ export interface SmsMessage {
   authorType?: string | null; // v1 only: "ai" | "human"
   authorUserId?: string | null; // present only on human-authored turns
   authorName?: string | null;
+  human_assistant_id?: string | null; // marks the backend-injected role:"system" claim/hand-back notices
 }
 export interface CallData {
   callDuration?: string; // seconds, as a string ("81.206")

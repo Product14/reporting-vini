@@ -280,12 +280,17 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
       if (body) return body;
       continue;
     }
-    // sms / chat — bubbles are chronological, newest last.
-    const m = c.smsMessages?.[c.smsMessages.length - 1];
-    if (!m) continue;
-    const parsed = parseSmsText(m.content);
-    const text = parsed.text || parsed.summary || "";
-    if (text) return clip((m.role === "user" ? "" : currentAgentName() + ": ") + text);
+    // sms / chat — bubbles are chronological, newest last. Skip internal system/tool turns (e.g. the
+    // handover claim/hand-back notices) and prefix a rep's own reply with their name.
+    const arr = c.smsMessages ?? [];
+    for (let k = arr.length - 1; k >= 0; k--) {
+      const mm = arr[k];
+      const r = (mm.role || "").toLowerCase();
+      if (r === "system" || r === "tool") continue;
+      const parsed = parseSmsText(mm.content);
+      const text = parsed.text || parsed.summary || "";
+      if (text) return clip((r === "user" ? "" : (mm.authorUserId ? (mm.authorName || "Team") : currentAgentName()) + ": ") + text);
+    }
   }
   return "";
 }
@@ -298,9 +303,11 @@ function teamConvPreview(c: TeamConversation): string {
   const t = (c.type || "").toLowerCase();
   if (t === "sms" || t === "chat") {
     for (const m of c.smsMessages ?? []) {
+      const r = (m.role || "").toLowerCase();
+      if (r === "system" || r === "tool") continue; // internal (handover notices etc.) — not a preview
       const parsed = parseSmsText(m.content ?? "");
       const text = parsed.text || parsed.summary || "";
-      if (text) return clip((m.role === "user" ? "" : currentAgentName() + ": ") + text);
+      if (text) return clip((r === "user" ? "" : (m.authorUserId ? (m.authorName || "Team") : currentAgentName()) + ": ") + text);
     }
     return "";
   }
@@ -1043,6 +1050,7 @@ function ListSkeleton() {
  * ════════════════════════════════════════════════════════════════════════════ */
 type ThreadNode =
   | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; human?: boolean; fb?: { conversationId: string; messageIndex: number } }
+  | { t: number; kind: "handover"; claim: boolean } // rep took over / handed back — a state change, not a message
   | { t: number; kind: "email"; side: "in" | "out"; sender: string; subject?: string; text: string; status?: string }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
@@ -1203,6 +1211,16 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
           const t = m._ts || base - (msgs.length - i);
           const role = (m.role || "").toLowerCase();
           if (role === "tool") return; // folded into its tool step (emitted from the call message)
+          if (role === "system") {
+            // Backend-injected, AI-DIRECTED turns — never customer-facing, so never a bubble. The handover
+            // claim/hand-back notices (role:"system" + human_assistant_id) become a state-change chip; any
+            // other system turn (e.g. a leaked prompt) is dropped entirely.
+            const c = (m.content || "").toLowerCase();
+            const handback = /handed it back|handed back/.test(c);
+            const claim = /claimed this conversation|has claimed|taken over|taking over/.test(c);
+            if (m.human_assistant_id || handback || claim) out.push({ t, kind: "handover", claim: !handback });
+            return;
+          }
           const rc = (m.toolCalls ?? undefined)?.[0];
           if (rc) {
             // §03 — a tool step: action + query params + result, as an expandable "AI action" card.
@@ -1712,6 +1730,19 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
           <span className="font-semibold" style={{ color: C.dark }}>{node.title}</span>
           {node.detail && <span style={{ color: C.dark }}>{node.detail}</span>}
           <span style={{ color: C.sub }}>{fmtTime(new Date(node.t).toISOString())}</span>
+        </span>
+      </div>
+    );
+  }
+  if (node.kind === "handover") {
+    // Rep took over / handed back — a state change in the timeline, not a chat message.
+    return (
+      <div className="flex justify-center">
+        <span className="flex items-center gap-1.5 rounded-full border px-3.5 py-1 text-[11px] font-medium"
+          style={node.claim ? { borderColor: `${C.green}55`, background: "#f0faf5", color: C.green } : { borderColor: C.border, background: "#fff", color: C.sub }}>
+          <span>{node.claim ? "🙋" : "🤖"}</span>
+          <span>{node.claim ? "A team member took over" : "Handed back to Vini — AI resumed"}</span>
+          <span style={{ color: C.sub }}>· {fmtTime(new Date(node.t).toISOString())}</span>
         </span>
       </div>
     );
