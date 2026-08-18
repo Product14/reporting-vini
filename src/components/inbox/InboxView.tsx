@@ -27,6 +27,8 @@ import {
   fetchInboxPersona,
   postInboxFeedback,
   stopInboxEngagement,
+  postHandoverToggle,
+  postHandoverSend,
   fetchInboxTranscript,
   fetchInboxCall,
   resolveInboxActionItem,
@@ -1074,6 +1076,12 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     try { window.localStorage.setItem("inbox_feedback_email", e); } catch { /* ignore */ }
   }, []);
 
+  // Re-pull just the conversations (not persona/feedback) — used after a handover claim/hand-back/send so
+  // the thread reflects the new phase without wiping the in-session thumbs (fbMap) or summary.
+  const reloadConv = useCallback(() => {
+    fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((data) => setConv(data));
+  }, [auth, customer.customer_id]);
+
   useEffect(() => {
     let on = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset thread state on customer change
@@ -1266,6 +1274,42 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   const latestMode = conv?.conversations?.[0]?.aiMode;
   const humanDriving = !engagementStopped && !!latestMode && latestMode !== "auto";
 
+  // ── SMS human handover (RETCONVAI-2997) — UAT-ONLY. Prod must show none of this. ──────────────────
+  const handoverOn = auth.spyneEnv === "uat";
+  // The sms/chat conversation currently in a handover. Prefer an actionable one (PENDING or ACTIVE); the
+  // backend keeps at most one live at a time, so first-match is safe.
+  const handoverConv = useMemo(() => {
+    if (!handoverOn) return null;
+    const smsish = (conv?.conversations ?? []).filter((c) => c.type === "sms" || c.type === "chat");
+    return smsish.find((c) => c.humanTransferDetails?.phase === "PENDING" || c.humanTransferDetails?.phase === "ACTIVE") ?? null;
+  }, [conv, handoverOn]);
+  const handover = handoverConv?.humanTransferDetails ?? null;
+  const handoverPhase = handover?.phase ?? "NONE";
+  const [hoBusy, setHoBusy] = useState(false);
+  const [hoErr, setHoErr] = useState("");
+  const [draft, setDraft] = useState("");
+  // Claim a PENDING conversation (→ACTIVE) or hand an ACTIVE one back to Vini (→NONE). The endpoint reads
+  // the current phase and does whichever is appropriate.
+  const toggleHandover = useCallback(async () => {
+    if (!handoverConv) return;
+    setHoBusy(true); setHoErr("");
+    const res = await postHandoverToggle(auth, handoverConv.conversationId);
+    setHoBusy(false);
+    if (!res.ok) { setHoErr(res.error || "Couldn't update handover — try again."); return; }
+    reloadConv();
+  }, [auth, handoverConv, reloadConv]);
+  const sendManual = useCallback(async () => {
+    if (!handoverConv) return;
+    const body = draft.trim();
+    if (!body) return;
+    setHoBusy(true); setHoErr("");
+    const res = await postHandoverSend(auth, handoverConv.conversationId, body);
+    setHoBusy(false);
+    if (!res.ok) { setHoErr(res.error || "Couldn't send — try again."); return; }
+    setDraft("");
+    reloadConv();
+  }, [auth, handoverConv, draft, reloadConv]);
+
   return (
     <>
       {/* header */}
@@ -1341,16 +1385,63 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
         )}
       </div>
 
-      {/* footer — §12 driver status, READ-ONLY (no take-over/send/stop API exists yet). */}
-      <div className="flex shrink-0 items-center justify-center border-t bg-white px-4 py-2.5 shadow-[0px_-1px_15px_rgba(0,0,0,0.04)]" style={{ borderColor: C.border }}>
-        <p className="text-[12px]" style={{ color: C.sub }}>
-          {engagementStopped
-            ? "🛑 AI engagement is paused for this lead"
-            : humanDriving
-              ? "🙋 A human is currently handling this conversation"
-              : "🤖 Vini is handling replies"}
-        </p>
-      </div>
+      {/* footer — §12 driver status. On UAT the SMS human-handover controls replace the read-only line when
+          Vini has flagged the conversation (PENDING) or a rep has claimed it (ACTIVE); prod never renders these. */}
+      {handoverOn && handoverPhase === "PENDING" ? (
+        <div className="shrink-0 border-t bg-white px-4 py-3" style={{ borderColor: C.border }}>
+          <div className="mx-auto flex w-full max-w-[760px] flex-col gap-2 rounded-xl border px-4 py-3" style={{ borderColor: C.orange, background: C.orangeAccent }}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold" style={{ color: C.orange }}>⚑ Vini needs a human here</p>
+                {handover?.handoverSummary && <p className="mt-1 text-[12px] leading-snug" style={{ color: C.dark }}>{handover.handoverSummary}</p>}
+                {handover?.triggerReason && <p className="mt-1 text-[11px]" style={{ color: C.sub }}>Reason: {String(handover.triggerReason).replace(/_/g, " ")}</p>}
+              </div>
+              <button onClick={toggleHandover} disabled={hoBusy} className="shrink-0 rounded-lg px-3.5 py-2 text-[13px] font-semibold text-white disabled:opacity-60" style={{ background: C.orange }}>
+                {hoBusy ? "…" : "Take over"}
+              </button>
+            </div>
+            {hoErr && <p className="text-[11px]" style={{ color: C.red }}>{hoErr}</p>}
+          </div>
+        </div>
+      ) : handoverOn && handoverPhase === "ACTIVE" ? (
+        <div className="shrink-0 border-t bg-white px-4 py-3" style={{ borderColor: C.border }}>
+          <div className="mx-auto flex w-full max-w-[760px] flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[12px] font-medium" style={{ color: C.green }}>
+                🙋 You&apos;re handling this — Vini is paused{handover?.claimedByName ? ` · ${handover.claimedByName}` : ""}
+              </p>
+              <button onClick={toggleHandover} disabled={hoBusy} className="shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-semibold disabled:opacity-60" style={{ borderColor: C.border, color: C.sub }}>
+                {hoBusy ? "…" : "Hand back to Vini"}
+              </button>
+            </div>
+            <div className="flex items-end gap-2">
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void sendManual(); } }}
+                rows={1}
+                placeholder="Type a reply to the customer…  (⌘/Ctrl+Enter to send)"
+                className="max-h-[120px] min-h-[40px] flex-1 resize-y rounded-lg border px-3 py-2 text-[13px] outline-none"
+                style={{ borderColor: C.border, color: C.dark }}
+              />
+              <button onClick={sendManual} disabled={hoBusy || !draft.trim()} className="shrink-0 rounded-lg px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50" style={{ background: C.primary }}>
+                Send
+              </button>
+            </div>
+            {hoErr && <p className="text-[11px]" style={{ color: C.red }}>{hoErr}</p>}
+          </div>
+        </div>
+      ) : (
+        <div className="flex shrink-0 items-center justify-center border-t bg-white px-4 py-2.5 shadow-[0px_-1px_15px_rgba(0,0,0,0.04)]" style={{ borderColor: C.border }}>
+          <p className="text-[12px]" style={{ color: C.sub }}>
+            {engagementStopped
+              ? "🛑 AI engagement is paused for this lead"
+              : humanDriving
+                ? "🙋 A human is currently handling this conversation"
+                : "🤖 Vini is handling replies"}
+          </p>
+        </div>
+      )}
 
       {reportTarget && (
         <ReportModal

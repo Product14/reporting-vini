@@ -192,6 +192,10 @@ export interface SmsMessage {
   toolCallId?: string | null;
   toolCalls?: ToolCall[] | null;
   _ts?: number;
+  // Human-handover (RETCONVAI-2997, UAT-only): outbound bubbles sent by a rep during an ACTIVE handover
+  // carry authorType "human" + the rep's name. Absent everywhere else (AI/customer bubbles) — read defensively.
+  authorType?: string | null; // "ai" | "human" | "customer" | …
+  authorName?: string | null;
 }
 export interface CallData {
   callDuration?: string; // seconds, as a string ("81.206")
@@ -215,10 +219,23 @@ export interface EmailMessage {
   openedAt?: string | null;
   createdAt?: string | null;
 }
+// SMS human-handover state (RETCONVAI-2997, UAT-only). Lives on an sms/chat ConvRecord. `phase` drives the UI:
+//   NONE = Vini owns replies · PENDING = Vini flagged for a rep (show "Take over") · ACTIVE = a rep is replying (Vini silent).
+export interface HumanTransferDetails {
+  phase?: "NONE" | "PENDING" | "ACTIVE" | string;
+  triggerReason?: string | null; // why Vini escalated (e.g. "explicit_request", "low_confidence")
+  handoverSummary?: string | null; // Vini's short note to the rep on what the customer needs
+  claimedByUserId?: string | null;
+  claimedByName?: string | null;
+  claimedAt?: string | null;
+  requestedAt?: string | null;
+  claimHistory?: unknown[];
+}
 export interface ConvRecord {
   conversationId: string;
   type: "call" | "sms" | "chat" | "email"; // chat = website widget (messages in smsMessages); email = bodies in emailMessages
   status: string;
+  humanTransferDetails?: HumanTransferDetails | null; // UAT-only; present on sms/chat records when handover is in play
   createdAt: string;
   updatedAt: string;
   isAI?: boolean;
@@ -659,6 +676,58 @@ export async function stopInboxEngagement(a: InboxAuth, leadId: string): Promise
     return r.ok;
   } catch {
     return false;
+  }
+}
+
+/* ── SMS human handover (RETCONVAI-2997) — UAT-ONLY ──────────────────────────────
+ * Every fn short-circuits unless spyneEnv === "uat" so nothing can fire on prod even if a caller forgets
+ * to gate the UI; the proxies enforce the same rule server-side. */
+export interface HandoverResult {
+  ok: boolean;
+  status: number;
+  phase?: string | null; // the conversation's phase AFTER the toggle (NONE | PENDING | ACTIVE)
+  error?: string;
+}
+const HANDOVER_ENABLED = (a: InboxAuth) => a.spyneEnv === "uat";
+
+// Claim (PENDING→ACTIVE) or hand back (ACTIVE→NONE) — the endpoint picks the action from current phase.
+export async function postHandoverToggle(a: InboxAuth, conversationId: string): Promise<HandoverResult> {
+  if (!HANDOVER_ENABLED(a)) return { ok: false, status: 404, error: "not_available" };
+  if (!a.teamId || !conversationId) return { ok: false, status: 400, error: "missing params" };
+  const p = new URLSearchParams({ team_id: a.teamId });
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/handover/toggle?${p}`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "content-type": "application/json", ...(a.spyneToken ? { Authorization: `Bearer ${a.spyneToken}` } : {}) },
+      body: JSON.stringify({ conversationId }),
+    });
+    const j = (await r.json().catch(() => null)) as { phase?: string; data?: { phase?: string }; error?: string } | null;
+    return { ok: r.ok, status: r.status, phase: j?.phase ?? j?.data?.phase ?? null, error: r.ok ? undefined : j?.error || `HTTP ${r.status}` };
+  } catch (e) {
+    return { ok: false, status: 0, error: String(e) };
+  }
+}
+
+// Send a manual SMS as the rep — requires the conversation to already be ACTIVE (claim first).
+export async function postHandoverSend(a: InboxAuth, conversationId: string, body: string): Promise<HandoverResult> {
+  if (!HANDOVER_ENABLED(a)) return { ok: false, status: 404, error: "not_available" };
+  const text = (body || "").trim();
+  if (!a.teamId || !conversationId || !text) return { ok: false, status: 400, error: "missing params" };
+  const p = new URLSearchParams({ team_id: a.teamId });
+  withEnv(p, a);
+  try {
+    const r = await fetch(`/api/inbox/handover/send?${p}`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "content-type": "application/json", ...(a.spyneToken ? { Authorization: `Bearer ${a.spyneToken}` } : {}) },
+      body: JSON.stringify({ conversationId, body: text }),
+    });
+    const j = (await r.json().catch(() => null)) as { error?: string } | null;
+    return { ok: r.ok, status: r.status, error: r.ok ? undefined : j?.error || `HTTP ${r.status}` };
+  } catch (e) {
+    return { ok: false, status: 0, error: String(e) };
   }
 }
 
