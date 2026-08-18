@@ -550,6 +550,14 @@ ob_campaign_outcome AS (
             argMax(lower(trimBoth(ifNull(clm.outcome, ''))), clm.updatedAt) AS outcome
         FROM dealer_leads.campaignLeadMappings AS clm FINAL
         WHERE clm.__deleted = 0
+          -- COST: the outcome has no usable date (see caveat above), so this scan CANNOT be
+          -- date-bounded. Instead bound it to the leads this run actually touches — the only rows the
+          -- join below can ever use. Without this, the ETL (which walks its range in 3-day chunks) pays
+          -- a full campaignLeadMappings FINAL scan ~40x per reconcile: the 120d full run went from
+          -- 28min to 42min when this CTE was added, and the daily 04:17 full reconcile has only ~1min
+          -- of margin before the 05:00 hourly cancels it (concurrency: cancel-in-progress). Results are
+          -- identical — verified per-team against the un-bounded version.
+          AND clm.leadId IN (SELECT lead_id FROM conversation_spine)
         GROUP BY clm.leadId
     )
 ),
