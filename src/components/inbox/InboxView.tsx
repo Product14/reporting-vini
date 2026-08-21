@@ -538,7 +538,9 @@ function Inbox() {
       setPageInfo(p.pagination);
       // Only the unfiltered query knows the true All + Unread totals; the unread query's pagination is
       // scoped to unread rows, so never overwrite the cached counts from it.
-      if (!listQuery.unreadOnly) setCounts({ all: p.pagination.totalCustomers, unread: p.pagination.unreadCount });
+      // Capture the true All/Unread totals ONLY from the unfiltered query — the unread-tab and the
+      // Needs-Attention filter both return scoped totals that would otherwise clobber the tab labels.
+      if (!listQuery.unreadOnly && !needsAttention) setCounts({ all: p.pagination.totalCustomers, unread: p.pagination.unreadCount });
       setLoadingList(false);
       // Auto-select: the deep-linked customer if any (synthesize a stub row if it's not on this page so
       // the thread still loads), else the first conversation. Only when nothing is selected yet.
@@ -823,8 +825,8 @@ function Inbox() {
           </div>
           <div className="flex shrink-0" style={{ borderColor: C.border }}>
             {/* In None mode the flat endpoint returns a total but no unread count, so Unread shows no number. */}
-            <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
-            <TabBtn active={tab === "unread"} onClick={() => setTab("unread")} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
+            <TabBtn active={tab === "all" && !needsAttention} onClick={() => { setNeedsAttention(false); setTab("all"); }} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
+            <TabBtn active={tab === "unread" && !needsAttention} onClick={() => { setNeedsAttention(false); setTab("unread"); }} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
             {/* Needs Attention — UAT-only quick filter for PENDING handovers, with a live count badge. Only
                 in Customer mode (leads/v2 backs the filter; the None/team endpoint has no phase filter). */}
             {handoverOn && groupBy === "customer" && (
