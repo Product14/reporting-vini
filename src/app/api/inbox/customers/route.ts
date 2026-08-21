@@ -56,12 +56,17 @@ export async function GET(request: Request): Promise<Response> {
   // rather than showing an empty list. Once every env has it, the retry never fires.
   const dept = (searchParams.get("serviceType") || "").toLowerCase();
   if (dept === "sales" || dept === "service") up.set("serviceType", dept);
+  // Handover filter (RETCONVAI-2997, UAT): PENDING / ACTIVE / NONE (comma-separated). UI only sends it on
+  // UAT where it's supported; if an older backend 400s on it, the retry below drops it.
+  const phase = (searchParams.get("humanTransferPhase") || "").trim();
+  if (/^(NONE|PENDING|ACTIVE)(,(NONE|PENDING|ACTIVE))*$/i.test(phase)) up.set("humanTransferPhase", phase.toUpperCase());
 
   const token = spyneTokenFrom(request);
   const env = spyneEnvFrom(request);
   let res = await spyneServiceGet<unknown>(`/conversation/leads/v2/get-customers-list?${up.toString()}`, token, env);
-  if (!res.ok && res.status === 400 && up.has("serviceType")) {
+  if (!res.ok && res.status === 400 && (up.has("serviceType") || up.has("humanTransferPhase"))) {
     up.delete("serviceType");
+    up.delete("humanTransferPhase");
     res = await spyneServiceGet<unknown>(`/conversation/leads/v2/get-customers-list?${up.toString()}`, token, env);
   }
   if (!res.ok) return Response.json({ error: res.error, degraded: true }, { status: res.status });

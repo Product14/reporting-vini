@@ -77,6 +77,8 @@ export interface LeadsQuery {
   leadSource?: string[];
   // Which date field startDate/endDate filter on (and the sort): lead createdAt vs last_contacted_at.
   sortBy?: "lead" | "conversation";
+  // Handover filter (RETCONVAI-2997, UAT): "PENDING" (needs a rep) / "ACTIVE" / "PENDING,ACTIVE" / "NONE".
+  humanTransferPhase?: string;
 }
 
 const EMPTY_PAGE: LeadsPage = {
@@ -108,6 +110,7 @@ export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Pro
   if (q.endDate) p.set("endDate", q.endDate);
   for (const t of q.leadType ?? []) p.append("leadType", t);
   if (q.sortBy) p.set("sortBy", q.sortBy);
+  if (q.humanTransferPhase) p.set("humanTransferPhase", q.humanTransferPhase);
   if (a.serviceType) p.set("serviceType", a.serviceType); // department scope (sales|service)
   withEnv(p, a);
   try {

@@ -401,6 +401,11 @@ function Inbox() {
   // switching to the Unread tab — which refetches with unreadOnly=true — doesn't collapse the "All" count
   // to the filtered total (RETCONVAI-4582).
   const [counts, setCounts] = useState<{ all: number; unread: number } | null>(null);
+  // SMS human handover (RETCONVAI-2997) — UAT-only. "Needs Attention" quick filter = conversations Vini
+  // flagged for a rep (PENDING), with a LIVE count badge (polled). Toggling it filters the list to PENDING.
+  const handoverOn = spyneEnv === "uat";
+  const [needsAttention, setNeedsAttention] = useState(false);
+  const [needsCount, setNeedsCount] = useState(0);
   const pageRef = useRef(1);
   const [loadingMore, setLoadingMore] = useState(false);
   const listBottomRef = useRef<HTMLDivElement | null>(null);
@@ -509,14 +514,16 @@ function Inbox() {
     const range = dateRangeToIso(dateRange, customStart, customEnd);
     return {
       limit: 50,
-      unreadOnly: tab === "unread",
+      // Needs-Attention shows ALL pending-handover convs, so it overrides the Unread scope while active.
+      unreadOnly: !needsAttention && tab === "unread",
       searchTerm: debounced || undefined,
       leadType: leadType.length ? leadType : undefined,
       sortBy: dateBasis,
       startDate: range.startDate,
       endDate: range.endDate,
+      humanTransferPhase: needsAttention ? "PENDING" : undefined,
     } as const;
-  }, [tab, debounced, leadType, dateBasis, dateRange, customStart, customEnd]);
+  }, [tab, debounced, leadType, dateBasis, dateRange, customStart, customEnd, needsAttention]);
 
   // Load page 1 (reset) whenever scope / tab / search / filters change.
   useEffect(() => {
@@ -550,6 +557,18 @@ function Inbox() {
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, enterpriseId, spyneToken, spyneEnv, serviceType, listQuery]);
+
+  // Live PENDING-handover count for the "Needs Attention" badge (UAT-only). Polled (no websocket) so the
+  // badge tracks conversations entering/leaving PENDING in ~real time. Cheap: a limit:1 query, total only.
+  useEffect(() => {
+    if (!handoverOn || !teamId || !enterpriseId) return;
+    let on = true;
+    const tick = () => fetchInboxCustomers(auth, { humanTransferPhase: "PENDING", limit: 1 }).then((p) => { if (on) setNeedsCount(p.pagination.totalCustomers); });
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => { on = false; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handoverOn, teamId, enterpriseId, spyneToken, spyneEnv, serviceType]);
 
   // Append the next page (infinite scroll). Deduped by customer_id (page boundaries can repeat a row).
   const loadMore = useCallback(() => {
@@ -666,7 +685,8 @@ function Inbox() {
   // of that channel) rather than a bare "not found". Only meaningful in None mode with a channel picked.
   const channelWord = channel === "call" ? "call" : channel === "sms" ? "SMS" : channel === "email" ? "email" : channel === "chat" ? "chat" : "";
   const emptyText =
-    tab === "unread" ? "No unread conversations."
+    needsAttention ? "🎉 Nothing needs attention — no conversations are waiting for a rep."
+    : tab === "unread" ? "No unread conversations."
     : groupBy === "none" && channel !== "all" ? `No ${channelWord} conversations in the ${serviceType} space.`
     : "No conversations found.";
 
@@ -805,6 +825,30 @@ function Inbox() {
             {/* In None mode the flat endpoint returns a total but no unread count, so Unread shows no number. */}
             <TabBtn active={tab === "all"} onClick={() => setTab("all")} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
             <TabBtn active={tab === "unread"} onClick={() => setTab("unread")} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
+            {/* Needs Attention — UAT-only quick filter for PENDING handovers, with a live count badge. Only
+                in Customer mode (leads/v2 backs the filter; the None/team endpoint has no phase filter). */}
+            {handoverOn && groupBy === "customer" && (
+              <button
+                onClick={() => setNeedsAttention((v) => !v)}
+                title="Conversations Vini flagged for a rep"
+                className="flex items-center gap-1.5 border-b px-3 py-2.5 text-[12px] transition-colors"
+                style={{
+                  borderColor: needsAttention ? C.orange : C.border,
+                  borderBottomWidth: needsAttention ? 2 : 1,
+                  color: needsAttention ? C.orange : needsCount > 0 ? C.orange : C.sub,
+                  fontWeight: needsAttention || needsCount > 0 ? 600 : 500,
+                  opacity: needsCount > 0 || needsAttention ? 1 : 0.65,
+                }}
+              >
+                <span>⚑ Needs Attention</span>
+                <span
+                  className="inline-flex min-w-[18px] items-center justify-center rounded-full px-1.5 text-[11px] font-semibold"
+                  style={needsCount > 0 ? { background: C.orange, color: "#fff" } : { background: "#eef1f4", color: C.sub }}
+                >
+                  {needsCount}
+                </span>
+              </button>
+            )}
             <div className="flex-1 border-b" style={{ borderColor: C.border }} />
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1093,6 +1137,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
   const [hoBusy, setHoBusy] = useState(false);
   const [hoErr, setHoErr] = useState("");
   const [draft, setDraft] = useState("");
+  const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "failed">("idle"); // rep-SMS delivery feedback
   // §7A purple summary box — persona.conversationMemory.summaryShort, shown at the top of the chat.
   const [summary, setSummary] = useState<string>("");
   // §03 feedback — keyed `${conversationId}#${messageIndex}` → thumb direction.
@@ -1378,14 +1423,21 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     if (!handoverConvId) return;
     const body = draft.trim();
     if (!body) return;
-    setHoBusy(true); setHoErr("");
+    setHoBusy(true); setHoErr(""); setSendState("sending");
     const res = await postHandoverSend(auth, handoverConvId, body);
     setHoBusy(false);
-    if (!res.ok) { setHoErr(res.error || "Couldn't send — try again."); return; }
-    setDraft("");
+    if (!res.ok) { setHoErr(res.error || "Couldn't send — try again."); setSendState("failed"); return; }
+    setDraft(""); setSendState("sent");
     reloadConv();
     setTimeout(() => reloadConv(), 2000); // the sent SMS lands in the v2 thread a beat later
   }, [auth, handoverConvId, draft, reloadConv]);
+  // Real-time-ish (no websocket exists): while handover is in play (UAT), poll the open thread so new
+  // customer SMS + phase changes appear without a manual refresh. Gentle 8s cadence; resets per customer.
+  useEffect(() => {
+    if (!handoverOn) return;
+    const id = setInterval(() => reloadConv(), 8000);
+    return () => clearInterval(id);
+  }, [handoverOn, reloadConv]);
 
   return (
     <>
@@ -1501,18 +1553,27 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
             <div className="flex items-end gap-2">
               <textarea
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void sendManual(); } }}
+                onChange={(e) => { setDraft(e.target.value); if (sendState !== "idle") setSendState("idle"); }}
+                // Enter sends; Shift+Enter inserts a newline.
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendManual(); } }}
                 rows={1}
-                placeholder="Type a reply to the customer…  (⌘/Ctrl+Enter to send)"
+                placeholder="Type a reply to the customer…  (Enter to send · Shift+Enter for a new line)"
                 className="max-h-[120px] min-h-[40px] flex-1 resize-y rounded-lg border px-3 py-2 text-[13px] outline-none"
                 style={{ borderColor: C.border, color: C.dark }}
               />
               <button onClick={sendManual} disabled={hoBusy || !draft.trim()} className="shrink-0 rounded-lg px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50" style={{ background: C.primary }}>
-                Send
+                {sendState === "sending" ? "Sending…" : "Send"}
               </button>
             </div>
-            {hoErr && <p className="text-[11px]" style={{ color: C.red }}>{hoErr}</p>}
+            {/* Send delivery feedback (v2 exposes no per-message delivered/received status yet, so this
+                reflects the send call: sending → sent/failed). */}
+            {hoErr ? (
+              <p className="text-[11px]" style={{ color: C.red }}>⚠ {hoErr}</p>
+            ) : sendState === "sent" ? (
+              <p className="text-[11px]" style={{ color: C.green }}>✓ Sent</p>
+            ) : sendState === "sending" ? (
+              <p className="text-[11px]" style={{ color: C.sub }}>Sending…</p>
+            ) : null}
           </div>
         </div>
       ) : (
@@ -1862,7 +1923,10 @@ function MessageBubble({ side, sender, text, at, chat, human, fbNode, fb, custNa
       <div className="group flex justify-end gap-2">
         <div className="flex max-w-[70%] flex-col items-end gap-1.5">
           {text && (
-            <div className="rounded-[15px] rounded-br-none px-5 py-3.5 text-[12px] leading-[18px]" style={{ background: C.blueAccent, color: C.dark }}>
+            // A rep's manual reply is HIGHLIGHTED — green tint + a left accent stripe — so a human message
+            // stands out from Vini's (blue) at a glance.
+            <div className="rounded-[15px] rounded-br-none px-5 py-3.5 text-[12px] leading-[18px]"
+              style={human ? { background: "#e6f7ee", color: C.dark, boxShadow: `inset 3px 0 0 ${C.green}` } : { background: C.blueAccent, color: C.dark }}>
               {text}
             </div>
           )}
