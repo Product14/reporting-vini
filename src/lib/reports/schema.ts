@@ -22,6 +22,7 @@ export interface RawRow {
   primary_intent: string | null;
   is_call: number;
   is_sms: number;
+  is_chat: number; // web chat — the third AI channel (conversations.type='chat')
   n_sms_outbound: number;
   qualified: number;
   appointment_booked: number; // canonical: AI-booked (meetings.source='spyne') — PRIMARY/headline
@@ -60,7 +61,8 @@ export interface AgentDailyRow {
   // volume
   calls: number; // Σ is_call
   sms_threads: number; // Σ is_sms
-  conv_count: number; // total conversations (rows)
+  chats: number; // Σ is_chat — web-chat sessions (0 on rows aggregated before migration 0021)
+  conv_count: number; // total conversations (rows) = calls + sms_threads + chats
   connected: number; // Σ connected
   reached_person: number; // Σ reached_person
   qualified: number; // Σ qualified
@@ -140,7 +142,7 @@ export interface ReportAppointmentRow {
   status: string | null; // scheduled | cancelled | show | noshow | completed
   assisted?: boolean; // AI-assisted (CRM) — SECONDARY, never folded into the AI-booked headline
   direction?: string | null; // 'inbound' | 'outbound' (AI-booked rows only)
-  booked_via?: string | null; // 'call' | 'sms' (AI-booked rows only)
+  booked_via?: string | null; // 'call' | 'sms' | 'chat' (AI-booked rows only)
 }
 
 // One row per (team_id, agent_type, lead_id, activity_day). Retains lead identity so window-distinct

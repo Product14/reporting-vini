@@ -233,6 +233,7 @@ export interface FleetLive {
   talkMinutes: number;
   smsSent: number; // OUTBOUND SMS messages sent (activity volume)
   smsThreads: number; // SMS CONVERSATIONS (threads) — the conversation-grained count for "Calls & texts"
+  chats: number; // WEB CHAT sessions — same conversation grain; 0 on rooftops that don't run chat
   optOuts: number;
   csat: number;
   sentiment: number;
@@ -264,6 +265,8 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   // from build.ts). This is the conversation-grained "texts" count for the "Calls & texts" tile, so a text
   // count that claims to be "conversations handled" matches a DB SMS-conversation count (RETCONVAI-4151/4166).
   const smsThreads = sum((a) => a.channelSplit?.sms ?? 0);
+  // WEB CHAT sessions — the third channel, same conversation grain as smsThreads (migration 0021).
+  const chats = sum((a) => a.metrics.chats ?? 0);
   const afterHours = sum((a) => a.metrics.afterHours);
   const talkMinutes = sum((a) => a.metrics.talkMinutes);
   const optOuts = sum((a) => a.metrics.optOuts);
@@ -369,6 +372,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     talkMinutes,
     smsSent,
     smsThreads,
+    chats,
     optOuts,
     csat: +wAvg((a) => a.quality.csat).toFixed(1),
     sentiment: Math.round(wAvg((a) => a.quality.sentiment)),

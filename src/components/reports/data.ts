@@ -48,6 +48,9 @@ export interface AgentMetrics {
   revenue: number; // $ attributed
   cost: number; // $ to run (telephony + SMS + data lookups)
   smsSent: number;
+  // Web-chat sessions the agent handled (conversations.type='chat'). Third channel beside calls and SMS;
+  // optional so mock agents (which don't set it) still type-check, and the tile hides when there are none.
+  chats?: number;
   optOuts: number;
   afterHours: number; // captured (inbound)
   talkMinutes: number;

@@ -59,7 +59,7 @@ function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
   return {
     activity_day: day, team_id: team, agent_type: type,
     enterprise_name: str(r.enterprise_name), rooftop_name: str(r.rooftop_name), rooftop_stage: str(r.rooftop_stage),
-    calls: 0, sms_threads: 0, conv_count: 0, connected: 0, reached_person: 0, qualified: 0, appointments: 0,
+    calls: 0, sms_threads: 0, chats: 0, conv_count: 0, connected: 0, reached_person: 0, qualified: 0, appointments: 0,
     appointments_assisted: 0, // canonical: AI-assisted (CRM) — SECONDARY
     sms_sent: 0, sms_replied: 0, after_hours: 0, talk_seconds: 0, transfers: 0, transfers_failed: 0, callbacks: 0, query_resolved: 0,
     opt_outs: 0, leads_attempted: 0, quality_score_sum: 0, quality_basis: 0,
@@ -110,14 +110,16 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     let a = groups.get(gk);
     if (!a) { a = blankAcc(day, team, type, r); groups.set(gk, a); }
 
-    const isCall = num(r.is_call), isSms = num(r.is_sms);
+    const isCall = num(r.is_call), isSms = num(r.is_sms), isChat = num(r.is_chat);
     a.calls += isCall;
     a.sms_threads += isSms;
+    a.chats += isChat; // web chat — third channel; 0 on rows from a pre-chat spine
     a.conv_count += 1;
     // canonical: "Real conversations" = connected, voicemail EXCLUDED. Use the spine's `r.connected`
     // (= is_connected = report.connected='Yes' OR (not voicemail AND user msgs)), NOT talk_seconds>0 —
     // voicemails have a positive duration so talk_seconds>0 over-counts them as conversations (the bug
-    // behind OB connected=925 vs the real ~329). This daily column is call-side connected.
+    // behind OB connected=925 vs the real ~329). On a chat row the spine folds chat engagement into the
+    // same column (visitor actually typed), so this counts call-side connected AND engaged chats.
     if (num(r.connected) > 0) a.connected += 1;
     a.reached_person += num(r.reached_person);
     a.qualified += num(r.qualified);

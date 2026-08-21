@@ -174,7 +174,11 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
         customer: a.customer_name?.trim() || "—",
         phone: a.phone ?? "",
         channel: (a.assisted ? null : a.direction === "inbound" ? "Inbound" : a.direction === "outbound" ? "Outbound" : null) as NamedAppt["channel"],
-        how: a.assisted ? "AI-assisted → CRM" : a.booked_via === "sms" ? "AI-booked, via SMS" : "AI-booked, on call",
+        how: a.assisted
+          ? "AI-assisted → CRM"
+          : a.booked_via === "sms" ? "AI-booked, via SMS"
+            : a.booked_via === "chat" ? "AI-booked, in web chat"
+              : "AI-booked, on call",
         vehicle: fmtVehicle(a.vehicle),
         when: a.meeting_start ?? null,
         bookedAt: a.booked_at ?? null,
@@ -269,6 +273,8 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     const appointmentsAssisted = lc ? lc.apptLeadsAssisted : sum(rows, (r) => r.appointments_assisted);
     const smsSent = sum(rows, (r) => r.sms_sent);
     const smsThreads = sum(rows, (r) => r.sms_threads);
+    // web chat — third channel. 0 on rows aggregated before migration 0021, so the tile self-hides.
+    const chats = sum(rows, (r) => r.chats);
     const afterHours = sum(rows, (r) => r.after_hours);
     const talkSeconds = sum(rows, (r) => r.talk_seconds);
     // canonical: transfers = window-DISTINCT leads with a completed transfer (lead grain, matches the
@@ -310,6 +316,7 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
       afterHours,
       talkMinutes: Math.round(talkSeconds / 60),
       smsSent,
+      chats, // web-chat sessions (see migration 0021)
       optOuts,
     };
 

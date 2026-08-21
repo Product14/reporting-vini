@@ -174,14 +174,113 @@ agent_stage_override AS (
     )
 ),
 
+-- ── WEB CHAT — the third AI channel ──────────────────────────────────────────────────────────────
+-- Web chat lives in dealer_leads.conversations as type='chat' (22.8k rows / 296 teams all-time) with its
+-- own IRA-style `summary` JSON — the same keys a call report carries (useCase, inOutType, qualified,
+-- spam, queryResolved, overview.appointmentScheduled). It was excluded from the spine entirely, so chat
+-- sessions, chat qualification and — most visibly — appointments the AI booked INSIDE a chat were absent
+-- from every agent number. Two upstream gaps make chat harder to attach than call/SMS:
+--   1. a chat-booked meeting row carries NEITHER conversation_id NOR call_id, so both of
+--      appt_attribution's anchors miss it. Paragon Honda (team 5895de05b) 2026-08: 4 of its 7 AI-booked
+--      sales appointments were dropped this way — the console read 3 while the Appointments calendar
+--      (which lists meetings directly) correctly showed 7.
+--   2. many teams' chat conversations carry a NULL leadId — Paragon's have since Jan-2026 (45/45
+--      populated Aug-2025, 0/35 Aug-2026; an upstream regression worth its own fix) — so there is no
+--      lead to join lead_canonical on and the row cannot enter a lead-grained funnel.
+--
+-- chat_booking_link repairs both from the one fact that IS reliable: the booking happens DURING the chat.
+-- It matches an anchorless source='spyne' meeting to the same team's chat whose live span brackets the
+-- booking timestamp and whose own summary says it scheduled an appointment; nearest chat wins. Verified
+-- on prod 2026-08-21: all 16 anchorless spyne meetings in the trailing 60d matched exactly one such chat
+-- (3 had several candidate chats — the appointmentScheduled='Yes' + nearest-start rule picked the right
+-- one every time), and all 16 were sales.
+chat_booking_link AS (
+    SELECT
+        meeting_id,
+        team_id,
+        argMin(conversationId, gap) AS conversationId,
+        argMin(lead_id, gap)        AS lead_id
+    FROM (
+        SELECT
+            m.meeting_id     AS meeting_id,
+            m.team_id        AS team_id,
+            m.lead_id        AS lead_id,
+            c.conversationId AS conversationId,
+            abs(dateDiff('second', c.createdAt, m.created_at)) AS gap
+        FROM (
+            -- anchorless AI-booked meetings: no conversation_id AND no call_id to attribute them by.
+            -- One day of slack either side of the window so a chat straddling midnight still links; the
+            -- chat (the attribution anchor) is what the window is actually pinned on, below.
+            SELECT meeting_id, team_id, lead_id, created_at
+            FROM dealer_leads.meetings FINAL
+            WHERE is_active = 1 AND __deleted = 0 AND source = 'spyne'
+              AND lower(JSONExtractString(ifNull(meta, ''), 'source')) != 'warm_transfer'
+              AND (conversation_id IS NULL OR conversation_id = '')
+              AND (call_id IS NULL OR call_id = '')
+              AND lead_id IS NOT NULL AND lead_id != ''
+              AND toDate(created_at) >= {START} - 1 AND toDate(created_at) < {END} + 1
+        ) AS m
+        JOIN (
+            SELECT conversationId, teamId, createdAt, updatedAt
+            FROM dealer_leads.conversations FINAL
+            WHERE __deleted = 0 AND ifNull(isTest, 0) = 0 AND lower(type) = 'chat'
+              AND JSONExtractString(ifNull(summary, ''), 'overview', 'appointmentScheduled') = 'Yes'
+              AND toDate(createdAt) >= {START} AND toDate(createdAt) < {END}
+        ) AS c
+            ON c.teamId = m.team_id
+        WHERE c.createdAt <= m.created_at
+          AND m.created_at <= c.updatedAt + INTERVAL 5 MINUTE
+    )
+    GROUP BY meeting_id, team_id
+),
+
+-- conversationId → the lead a chat booked for. Recovers the lead of a NULL-leadId chat (gap 2 above) so
+-- the chat can join lead_canonical like any other conversation. Only chats that produced a booking are
+-- recoverable this way: a NULL-leadId chat that booked nothing still cannot enter a lead-grained funnel,
+-- which is why the upstream leadId regression needs fixing rather than working around forever.
+chat_conv_lead AS (
+    SELECT conversationId, team_id, any(lead_id) AS lead_id
+    FROM chat_booking_link
+    GROUP BY conversationId, team_id
+),
+
+-- Conversation rows feeding the spine, with the chat lead-id recovery applied. Split out of
+-- conversation_spine so the recovered lead can be used as a plain column in the lead_canonical join
+-- (chaining an expression across two joins is fragile in ClickHouse).
+conv_src AS (
+    SELECT
+        c.conversationId     AS conversationId,
+        c.callId             AS callId,
+        lower(c.type)        AS conv_type,
+        coalesce(nullIf(c.leadId, ''), ccl.lead_id) AS lead_id,
+        c.teamId             AS team_id,
+        c.enterpriseId       AS enterprise_id,
+        c.createdAt          AS createdAt,
+        c.teamAgentMappingId AS teamAgentMappingId,
+        c.metadata           AS metadata,
+        c.outboundTaskId     AS outboundTaskId,
+        c.followupId         AS followupId
+    FROM dealer_leads.conversations AS c FINAL
+    LEFT JOIN chat_conv_lead AS ccl
+        ON ccl.conversationId = c.conversationId AND ccl.team_id = c.teamId
+    WHERE ifNull(c.isTest, 0) = 0 AND c.__deleted = 0
+      AND c.status != 'failed'
+      -- 'chat' joins 'sms' and 'call' as a first-class channel (see chat_booking_link above)
+      AND lower(c.type) IN ('sms', 'call', 'chat')
+      -- keep the original leadId pruning for call/SMS (it keeps this scan small); only chat is allowed
+      -- through without one, because chat is the channel whose leadId can be recovered below.
+      AND (ifNull(c.leadId, '') != '' OR lower(c.type) = 'chat')
+      AND toDate(c.createdAt) >= {START} AND toDate(c.createdAt) < {END}
+),
+
 conversation_spine AS (
     SELECT
         c.conversationId                  AS conversationId,
         c.callId                          AS callId,
-        lower(c.type)                     AS conv_type,
-        c.leadId                          AS lead_id,
-        c.teamId                          AS team_id,
-        c.enterpriseId                    AS enterprise_id,
+        c.conv_type                       AS conv_type,
+        c.lead_id                         AS lead_id,
+        c.team_id                         AS team_id,
+        c.enterprise_id                   AS enterprise_id,
         lc.service_type                   AS service_type,
         any(lower(at.agentCallType))      AS direction,
         toDate(c.createdAt)               AS activity_day,
@@ -193,22 +292,20 @@ conversation_spine AS (
         any(c.metadata)                   AS metadata,
         any(c.outboundTaskId)             AS outbound_task_id,
         any(c.followupId)                 AS followup_id
-    FROM dealer_leads.conversations AS c FINAL
+    FROM conv_src AS c
     JOIN lead_canonical lc
-        ON lc.lead_id = c.leadId AND lc.team_id = c.teamId
+        ON lc.lead_id = c.lead_id AND lc.team_id = c.team_id
     LEFT JOIN dealer_leads.teamAgentMappings AS tam FINAL
         ON c.teamAgentMappingId = tam.teamAgentMappingId AND tam.__deleted = 0
     LEFT JOIN dealer_leads.agentTypes AS at FINAL
         ON tam.agentTypeId = at.agentTypeId AND at.__deleted = 0
-    WHERE c.leadId IS NOT NULL
-      AND ifNull(c.isTest, 0) = 0 AND c.__deleted = 0
-      AND c.status != 'failed'
-      AND lower(c.type) IN ('sms', 'call')
+    WHERE c.lead_id IS NOT NULL AND c.lead_id != ''
+      -- chat maps to an agentType exactly like a call does (prod 90d: agentCallType='inbound' on 836 of
+      -- 947 chats, agentType 'Sales'), so the existing direction gate carries it unchanged.
       AND lower(at.agentCallType) IN ('inbound', 'outbound')
-      AND toDate(c.createdAt) >= {START} AND toDate(c.createdAt) < {END}
     GROUP BY
-        c.conversationId, c.callId, lower(c.type),
-        c.leadId, c.teamId, c.enterpriseId, lc.service_type, toDate(c.createdAt)
+        c.conversationId, c.callId, c.conv_type,
+        c.lead_id, c.team_id, c.enterprise_id, lc.service_type, toDate(c.createdAt)
 ),
 
 ecr_events AS (
@@ -404,6 +501,49 @@ sms_by_conv AS (
     GROUP BY c.conversationId, c.teamId
 ),
 
+-- ★ WEB CHAT verdicts, one row per chat conversation (the chat analogue of ecr_by_call / sms_by_conv).
+-- Every signal here is the AI's own read of the chat, taken from the same `summary` JSON a call report
+-- uses — there is no IRA row and no transcript-side signal for chat.
+chat_by_conv AS (
+    SELECT
+        c.conversationId AS conversationId,
+        c.teamId         AS team_id,
+        -- ENGAGED: the visitor actually exchanged messages. The chat lifecycle has exactly three states
+        -- in prod (90d) and they are perfectly correlated with content:
+        --   not_started (64)  isEmpty=1, no summary  — widget opened, nobody typed  → NOT engaged
+        --   in_progress (350) isEmpty=0, no summary  — live exchange (2-12 messages) → engaged
+        --   completed   (534) isEmpty=0, summary set — finished, AI verdict available → engaged
+        -- so this is chat's equivalent of "not voicemail and the customer spoke". Spam chats are excluded
+        -- here, exactly as spam calls are dropped in ecr_events.
+        -- A summary is REQUIRED, which follows the rule calls already use: is_connected comes from the
+        -- call's endcallreports row, so a call whose report has not landed is a touch but not yet a real
+        -- conversation. Chat's summary is written at completion, so an in_progress chat is likewise a
+        -- touch (it counts in Leads reached) and becomes a real conversation when its verdict lands.
+        -- This also keeps the channel internally consistent — every chat counted in the turn-rate
+        -- denominator is one that CAN qualify. It matters: fleet-wide over 30d, all 262 chats that carry
+        -- a leadId sit in_progress with no summary (18 teams), so counting them as conversations would
+        -- have added ~254 conversation-leads with ZERO possible qualifications and quietly dented turn
+        -- rate everywhere. Both halves of that are upstream bugs (chats stuck in_progress — 3d3deabc98 is
+        -- 44/44 over 30d; and the NULL leadId on the teams whose chats DO complete) and fixing either one
+        -- makes this channel count more, with no change needed here.
+        max(if(ifNull(c.isEmpty, 0) = 0
+               AND lower(ifNull(c.status, '')) NOT IN ('not_started', 'failed')
+               AND ifNull(c.summary, '') != ''
+               AND lower(JSONExtractString(ifNull(c.summary, ''), 'spam')) != 'yes', 1, 0)) AS chat_engaged,
+        -- ★ The AI's OWN qualification verdict on the chat. This is the same signal the locked Sales
+        -- Inbound rule reads off a call (report.qualified): the chat summary carries an identical
+        -- `qualified` key. Used for Sales Inbound in the final SELECT; the other agents apply their own
+        -- rule to it there, exactly as they do for calls and SMS.
+        max(if(JSONExtractString(ifNull(c.summary, ''), 'qualified') = 'Yes'
+               AND lower(JSONExtractString(ifNull(c.summary, ''), 'spam')) != 'yes', 1, 0)) AS chat_qualified,
+        max(if(JSONExtractString(ifNull(c.summary, ''), 'queryResolved') = 'Yes', 1, 0)) AS chat_query_resolved
+    FROM dealer_leads.conversations AS c FINAL
+    WHERE c.__deleted = 0 AND lower(c.type) = 'chat'
+      AND toDate(c.createdAt) >= {START} AND toDate(c.createdAt) < {END}
+      AND c.conversationId IN (SELECT conversationId FROM conversation_spine)
+    GROUP BY c.conversationId, c.teamId
+),
+
 lead_optout AS (
     SELECT
         lc.lead_id AS lead_id,
@@ -583,7 +723,7 @@ ob_campaign_outcome AS (
     )
 ),
 
--- canonical: agent-worked = call OR SMS. Per lead, the representative spine conversation a lead-level
+-- canonical: agent-worked = call, SMS or web chat. Per lead, the representative spine conversation a lead-level
 -- AI-assisted (CRM) meeting attaches to. We prefer an OUTBOUND conversation (outbound-campaign assist =
 -- outbound, mirroring the call-back→OB rule), else the latest spine conversation — so the assist lands on
 -- the right agent row even when the booking was worked over SMS with no AI call on the meeting record.
@@ -600,7 +740,7 @@ lead_assist_conv AS (
 -- canonical (LOCKED 2026-06-30): Appointments are TWO distinct metrics, never folded together.
 --   • AI-booked (PRIMARY / headline) = the AI created the meeting record (meetings.source='spyne').
 --   • AI-assisted (CRM, SECONDARY)   = meeting booked in the CRM (source!='spyne') on a lead the agent
---                                      WORKED. canonical: agent-worked = call OR SMS — the lead had ANY
+--                                      WORKED. canonical: agent-worked = call, SMS or web chat — ANY
 --                                      AI sales touch in-window (present in the conversation spine) AND is
 --                                      outbound-campaign enrolled. NOT call-only. Shown smaller; never
 --                                      added into the headline.
@@ -642,7 +782,15 @@ appt_attribution AS (
           AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
           AND m.call_id IS NOT NULL AND m.call_id != ''
         UNION ALL
-        -- SECONDARY: AI-assisted (CRM). canonical: agent-worked = call OR SMS. Attribute the CRM meeting
+        -- PRIMARY: AI-booked — booked INSIDE A WEB CHAT. These meeting rows carry neither a
+        -- conversation_id nor a call_id, so both anchors above miss them and without this branch the
+        -- booking is counted NOWHERE (Paragon Honda 2026-08: 4 of 7 sales appointments). chat_booking_link
+        -- resolves the chat that was live when the booking landed; see its definition for the match rule.
+        SELECT cbl.meeting_id AS meeting_id, cbl.team_id AS team_id, cbl.lead_id AS lead_id,
+               cbl.conversationId AS conv_id, 2 AS pri, 0 AS is_assisted
+        FROM chat_booking_link AS cbl
+        UNION ALL
+        -- SECONDARY: AI-assisted (CRM). canonical: agent-worked = call, SMS or chat. Attribute the CRM meeting
         -- by LEAD_ID to the lead's representative spine conversation (lead_assist_conv) — this captures
         -- SMS-only worked leads whose meeting record carries no call_id/conversation_id (the bug where a
         -- call-only join silently dropped them). Gated to outbound-campaign leads with an in-window spine
@@ -700,6 +848,8 @@ SELECT
     1                                       AS touched,
     if(cs.conv_type='call', 1, 0)           AS is_call,
     if(cs.conv_type='sms',  1, 0)           AS is_sms,
+    -- ★ web chat — the third channel. is_call + is_sms + is_chat = 1 for every spine row.
+    if(cs.conv_type='chat', 1, 0)           AS is_chat,
 
     ifNull(sb.n_sms_messages, 0)            AS n_sms_messages,
     ifNull(sb.n_human_inbound, 0)           AS n_human_inbound,
@@ -730,7 +880,21 @@ SELECT
        agent_type = 'Sales Inbound',
          ifNull(sb.sms_outcome_qualified, 0),
        ifNull(sb.qualified_via_sms, 0))     AS qualified_via_sms,
-    greatest(qualified_via_call, qualified_via_sms) AS qualified,
+    -- ★ WEB CHAT qualified. Each agent applies its OWN canonical rule to the chat, mirroring how the two
+    -- columns above treat calls and SMS:
+    --   • Sales Inbound  → the AI's own verdict (chat summary `qualified`), the chat twin of
+    --                      report.qualified. Like that rule it is NOT nested inside engaged.
+    --   • Sales Outbound → campaign-outcome rule AND the customer engaged in the chat.
+    --   • Service (both) → the intent rule: engaged AND a windowed buying-intent action item on the lead
+    --                      (chat carries no IRA row, so the lead-level gate is the available signal).
+    -- Non-chat rows have no chat_by_conv match, so every branch collapses to 0 for them.
+    multiIf(
+       agent_type = 'Sales Outbound',
+         if(ifNull(oco.oc_q, 0) = 1 AND ifNull(cb.chat_engaged, 0) = 1, 1, 0),
+       agent_type = 'Sales Inbound',
+         ifNull(cb.chat_qualified, 0),
+       if(ifNull(cb.chat_engaged, 0) = 1 AND hia_lead.lead_id IS NOT NULL, 1, 0)) AS qualified_via_chat,
+    greatest(qualified_via_call, qualified_via_sms, qualified_via_chat) AS qualified,
 
     if(ifNull(ad.n_appts, 0) > 0, 1, 0)     AS appointment_booked,
     ifNull(ad.n_appts, 0)                    AS appointments_count,
@@ -738,12 +902,20 @@ SELECT
     if(ifNull(ad.n_appts_assisted, 0) > 0, 1, 0) AS appointment_assisted,
     ifNull(ad.n_appts_assisted, 0)           AS appointments_assisted_count,
 
-    ifNull(ec.is_connected, 0)              AS connected,
+    -- canonical "Real conversation": the customer actually engaged. Call side = is_connected (voicemail
+    -- excluded); chat side = chat_engaged (the visitor typed; empty widget opens excluded). chat_engaged is
+    -- NULL on call/SMS rows, so this is additive-only for the new channel.
+    greatest(ifNull(ec.is_connected, 0), ifNull(cb.chat_engaged, 0)) AS connected,
     if(ifNull(sb.n_human_inbound, 0) > 0, 1, 0) AS sms_replied,
-    greatest(ifNull(ec.is_connected, 0), if(ifNull(sb.n_human_inbound, 0) > 0, 1, 0)) AS reached_person,
+    greatest(ifNull(ec.is_connected, 0), ifNull(cb.chat_engaged, 0),
+             if(ifNull(sb.n_human_inbound, 0) > 0, 1, 0)) AS reached_person,
 
+    -- primary_intent stays call-only on purpose: the chat's overview.customerIntent is free text
+    -- ("Appointment for Purchase Discussion") while this column feeds the controlled-vocabulary IRA
+    -- intent breakdown. Mixing them would fill "what customers wanted" with singleton labels. TODO:
+    -- map chat intents onto the IRA vocabulary, then include them here.
     ec.primary_intent                       AS primary_intent,
-    ifNull(ec.is_query_resolved, 0)         AS query_resolved,
+    greatest(ifNull(ec.is_query_resolved, 0), ifNull(cb.chat_query_resolved, 0)) AS query_resolved,
     ifNull(ec.had_appt_intent, 0)           AS had_appt_intent,
     ifNull(ec.had_transfer, 0)              AS had_transfer,
     ifNull(ec.transferred, 0)               AS transferred,
@@ -793,6 +965,13 @@ LEFT JOIN ecr_by_call ec
     ON ec.callId = cs.callId AND ec.team_id = cs.team_id
 LEFT JOIN sms_by_conv sb
     ON sb.conversationId = cs.conversationId AND sb.team_id = cs.team_id
+-- ★ web-chat verdicts (engaged / qualified / query resolved) — see chat_by_conv
+LEFT JOIN chat_by_conv cb
+    ON cb.conversationId = cs.conversationId AND cb.team_id = cs.team_id
+-- buying-intent gate at LEAD level, reused by the Service branch of qualified_via_chat (chat has no IRA
+-- row of its own). Same CTE the SMS rule joins through lead_canonical.
+LEFT JOIN lead_high_intent_action hia_lead
+    ON hia_lead.lead_id = cs.lead_id AND hia_lead.team_id = cs.team_id
 LEFT JOIN lead_optout lo
     ON lo.lead_id = cs.lead_id AND lo.team_id = cs.team_id
 LEFT JOIN quality_by_call q

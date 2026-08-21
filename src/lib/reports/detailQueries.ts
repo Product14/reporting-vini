@@ -511,6 +511,33 @@ conv_dir AS (
            OR c.callId      IN (SELECT call_id        FROM meet WHERE assisted = 0))
     GROUP BY c.conversationId, c.callId
 ),
+-- Web-chat bookings: the meeting row carries NEITHER conversation_id NOR call_id, so conv_dir above
+-- can't reach it and the row would list with an empty channel. Mirrors chat_booking_link in
+-- agentBaseFact.sql (which is what makes these count at all): match the anchorless meeting to the same
+-- team's chat whose live span brackets the booking and whose summary says it scheduled an appointment,
+-- nearest chat wins. Chat is customer-initiated, so direction is inbound by construction.
+chat_link AS (
+    SELECT meeting_id, argMin(conv_id, gap) AS conv_id
+    FROM (
+        SELECT m.meeting_id AS meeting_id, c.conversationId AS conv_id,
+               abs(dateDiff('second', c.createdAt, m.booked_at)) AS gap
+        FROM (
+            SELECT meeting_id, team_id, booked_at FROM meet
+            WHERE assisted = 0 AND ifNull(conversation_id, '') = '' AND ifNull(call_id, '') = ''
+        ) AS m
+        JOIN (
+            SELECT conversationId, teamId, createdAt, updatedAt
+            FROM dealer_leads.conversations FINAL
+            WHERE __deleted = 0 AND ifNull(isTest, 0) = 0 AND lower(type) = 'chat'
+              AND JSONExtractString(ifNull(summary, ''), 'overview', 'appointmentScheduled') = 'Yes'
+              AND toDate(createdAt) >= ${startFloor} - 1
+              ${teamPred("teamId", teamId)}
+        ) AS c
+            ON c.teamId = m.team_id
+        WHERE c.createdAt <= m.booked_at AND m.booked_at <= c.updatedAt + INTERVAL 5 MINUTE
+    )
+    GROUP BY meeting_id
+),
 -- dealerVinId (UUID) → real VIN, bounded to only the ids these meetings reference.
 dvm AS (
     SELECT dealerVinId, any(vin) AS vin
@@ -543,8 +570,12 @@ SELECT
     any(meet.booked_at) AS booked_at,
     any(meet.status) AS status,
     meet.assisted AS assisted,
-    any(if(meet.assisted = 1, NULL, coalesce(cd1.direction, cd2.direction))) AS direction,
-    any(if(meet.assisted = 1, NULL, coalesce(cd1.conv_type, cd2.conv_type))) AS booked_via
+    -- cd1/cd2 resolve a call- or chat-anchored booking; cl is the anchorless web-chat case (see chat_link),
+    -- which is inbound by construction because a web chat is always customer-initiated.
+    any(if(meet.assisted = 1, NULL,
+           coalesce(cd1.direction, cd2.direction, if(cl.conv_id != '', 'inbound', NULL)))) AS direction,
+    any(if(meet.assisted = 1, NULL,
+           coalesce(cd1.conv_type, cd2.conv_type, if(cl.conv_id != '', 'chat', NULL)))) AS booked_via
 FROM meet
 LEFT JOIN dealer_leads.customer AS cu FINAL ON cu.customer_id = meet.customer_id AND cu.__deleted = 0
 LEFT JOIN vm ON vm.vin = meet.tok
@@ -552,6 +583,7 @@ LEFT JOIN dvm ON dvm.dealerVinId = meet.tok
 LEFT JOIN vm AS vm2 ON vm2.vin = dvm.vin
 LEFT JOIN conv_dir AS cd1 ON cd1.conv_id = meet.conversation_id
 LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id
+LEFT JOIN chat_link AS cl ON cl.meeting_id = meet.meeting_id
 WHERE meet.assisted = 0 OR meet.lead_id IN (SELECT lead_id FROM worked)
 GROUP BY meet.team_id, meet.meeting_id, meet.assisted
 ORDER BY booked_at DESC

@@ -311,6 +311,8 @@ function AgentReportsView() {
         [inbound ? "Total calls" : "Calls dispatched", scale(m.calls)],
         ["Talk time (minutes)", scale(m.talkMinutes)],
         ["Total SMS", scale(m.smsSent)],
+        // web chat — only when the rooftop actually runs it (see migration 0021)
+        ...(scale(m.chats ?? 0) > 0 ? [["Web chats", scale(m.chats ?? 0)]] : []),
         [inbound ? "" : "Warm leads (campaigns)", inbound ? "" : warmLeadsTotal],
         ["Calls during hours", during],
         ["Calls after hours", after],
@@ -506,6 +508,7 @@ function AgentReportsView() {
               ["Turn rate", fmtRate(scale(leadQualified), scale(leadConnected))],
               [inbound ? "Total calls" : "Calls dispatched", `${scale(m.calls)} (${scale(m.talkMinutes)} min talk)`],
               ["Total SMS", scale(m.smsSent)],
+              ...(scale(m.chats ?? 0) > 0 ? [["Web chats", scale(m.chats ?? 0)]] : []),
               ...(!inbound ? [["Warm leads (campaigns)", warmLeadsTotal]] : []),
               ["Calls during hours", during],
               ["Calls after hours", after],
@@ -852,9 +855,11 @@ function AgentReportsView() {
             </div>
 
             {/* secondary: activity — key volume + rates. Outbound adds a Warm leads total (rooftop-wide). */}
-            <div className="grid grid-cols-2 divide-x divide-y divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd] sm:grid-cols-4 sm:divide-y-0">
+            <div className={`grid grid-cols-2 divide-x divide-y divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd] sm:grid-cols-4 sm:divide-y-0 ${scale(m.chats ?? 0) > 0 ? "lg:grid-cols-5" : ""}`}>
               <ActivityStat label={inbound ? "Total calls" : "Calls dispatched"} value={fmtInt(scale(m.calls))} hint={`${fmtInt(scale(m.talkMinutes))} mins talk`} />
               <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} />
+              {/* web chat — the third channel; shown only on rooftops that actually run it (migration 0021) */}
+              {scale(m.chats ?? 0) > 0 ? <ActivityStat label="Web chats" value={fmtInt(scale(m.chats ?? 0))} hint="sessions" /> : null}
               <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint="qualified ÷ conversations" accent="#813fed" />
               {inbound
                 ? <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint="AI-booked ÷ qualified" accent="#059669" />
