@@ -697,9 +697,9 @@ export async function stopInboxEngagement(a: InboxAuth, leadId: string): Promise
   }
 }
 
-/* ── SMS human handover (RETCONVAI-2997) — UAT-ONLY ──────────────────────────────
- * Every fn short-circuits unless spyneEnv === "uat" so nothing can fire on prod even if a caller forgets
- * to gate the UI; the proxies enforce the same rule server-side. */
+/* ── SMS human handover (RETCONVAI-2997) — GA (live on prod + uat) ────────────────
+ * Was UAT-only; the backend is now deployed on prod too, so these are enabled wherever a team is scoped.
+ * They still degrade gracefully where the backend isn't present (proxy/upstream errors → safe no-op). */
 export interface HandoverResult {
   ok: boolean;
   status: number;
@@ -707,7 +707,7 @@ export interface HandoverResult {
   conversationId?: string | null; // echoed back — the conversation the toggle acted on
   error?: string;
 }
-const HANDOVER_ENABLED = (a: InboxAuth) => a.spyneEnv === "uat";
+const HANDOVER_ENABLED = (a: InboxAuth) => Boolean(a.teamId); // GA — enabled wherever a team is scoped
 
 // The actionable handover for a customer, resolved server-side from the V1 endpoint (V2 lacks the field).
 export interface HandoverState {

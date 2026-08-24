@@ -18,7 +18,7 @@ export async function POST(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
   const teamId = (searchParams.get("team_id") || "").trim();
   if (!svcIdOk(teamId)) return Response.json({ error: "valid team_id is required" }, { status: 400 });
-  if (spyneEnvFrom(request) !== "uat") return Response.json({ error: "not_available" }, { status: 404 });
+  // GA: live on prod + uat (was uat-gated). Forwards to the request's env; auth still required.
 
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });

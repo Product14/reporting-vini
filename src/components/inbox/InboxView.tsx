@@ -402,9 +402,11 @@ function Inbox() {
   // switching to the Unread tab — which refetches with unreadOnly=true — doesn't collapse the "All" count
   // to the filtered total (RETCONVAI-4582).
   const [counts, setCounts] = useState<{ all: number; unread: number } | null>(null);
-  // SMS human handover (RETCONVAI-2997) — UAT-only. "Needs Attention" quick filter = conversations Vini
-  // flagged for a rep (PENDING), with a LIVE count badge (polled). Toggling it filters the list to PENDING.
-  const handoverOn = spyneEnv === "uat";
+  // SMS human handover (RETCONVAI-2997). "Needs Attention" quick filter = conversations Vini flagged for a
+  // rep (PENDING), with a LIVE count badge (polled). Toggling it filters the list to PENDING.
+  // GA: the handover backend is now live on prod AND uat (was uat-gated). Degrades gracefully on any env
+  // where it isn't present (missing field ⇒ no flag; filter 400 ⇒ graceful retry). `spyneEnv` kept referenced.
+  const handoverOn = spyneEnv === "uat" || spyneEnv === "stag" || spyneEnv === "prod" || spyneEnv === "";
   const [needsAttention, setNeedsAttention] = useState(false);
   const [needsCount, setNeedsCount] = useState(0);
   // Customers already being handled (a rep claimed them → phase ACTIVE). The lead-level PENDING flag the
@@ -1494,7 +1496,8 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   // Phase/summary/conversationId are DERIVED from the v2 thread (conversations/v2 now carries
   // humanTransferDetails). `hoOverride` briefly overrides the derived phase after a toggle, until the
   // re-fetched conv catches up (the write lags the read ~1s).
-  const handoverOn = auth.spyneEnv === "uat";
+  // GA: handover backend live on prod + uat (was uat-gated). Enabled on every env; degrades gracefully.
+  const handoverOn = auth.spyneEnv === "uat" || auth.spyneEnv === "stag" || auth.spyneEnv === "prod" || auth.spyneEnv === "";
   const derivedHandover = useMemo(() => deriveHandover(conv, handoverOn, dir), [conv, handoverOn, dir]);
   const handoverState = hoOverride ?? derivedHandover;
   const handoverPhase = handoverState.phase;
@@ -1544,13 +1547,14 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     reloadConv();
     setTimeout(() => reloadConv(), 2000); // the sent SMS lands in the v2 thread a beat later
   }, [auth, handoverConvId, draft, reloadConv]);
-  // Real-time-ish (no websocket exists): while handover is in play (UAT), poll the open thread so new
-  // customer SMS + phase changes appear without a manual refresh. Gentle 8s cadence; resets per customer.
+  // Real-time-ish (no websocket exists): poll the open thread so new customer SMS + phase changes appear
+  // without a manual refresh. Scoped to an ACTIVE/PENDING handover only — that's when a rep needs live
+  // updates — so we don't poll every thread now that handover is GA on prod. Gentle 8s cadence.
   useEffect(() => {
-    if (!handoverOn) return;
+    if (!handoverOn || (handoverPhase !== "PENDING" && handoverPhase !== "ACTIVE")) return;
     const id = setInterval(() => reloadConv(), 8000);
     return () => clearInterval(id);
-  }, [handoverOn, reloadConv]);
+  }, [handoverOn, handoverPhase, reloadConv]);
 
   return (
     <>

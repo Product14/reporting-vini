@@ -18,8 +18,8 @@ export async function POST(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
   const teamId = (searchParams.get("team_id") || "").trim();
   if (!svcIdOk(teamId)) return Response.json({ error: "valid team_id is required" }, { status: 400 });
-  // Hard UAT gate — human handover is not deployed to prod; never let it run there.
-  if (spyneEnvFrom(request) !== "uat") return Response.json({ error: "not_available" }, { status: 404 });
+  // GA: the handover backend is live on prod + uat, so this forwards to whichever env the request targets
+  // (previously hard-gated to uat). Auth is still required.
 
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
