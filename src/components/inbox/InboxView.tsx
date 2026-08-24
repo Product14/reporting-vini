@@ -392,8 +392,11 @@ function Inbox() {
   // Which date the range/sort applies to (API sortBy). "conversation" = most-recently-active first,
   // the natural inbox ordering; "lead" = newest lead first (filters on lead createdAt).
   const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);   // desktop popover
+  const [sheetOpen, setSheetOpen] = useState(false);        // mobile all-in-one sheet
   const activeFilterCount = leadType.length + (dateRange !== "all" ? 1 : 0);
+  // The mobile button stands in for four controls, so its badge counts every non-default among them.
+  const mobileFilterCount = activeFilterCount + (groupBy !== "customer" ? 1 : 0) + (channel !== "all" ? 1 : 0);
 
   const [tz, setTz] = useState<string | null>(null);
   // Customer list is PAGINATED (limit 50/page) and accumulated via infinite scroll — big teams have
@@ -754,13 +757,23 @@ function Inbox() {
           {account?.name && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
           {tz && <span className="ml-1 hidden text-[11px] lg:inline" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
-        {/* Group by / CSV / Filters all act on the LIST. Mobile is single-pane, so while a thread is open
-            the list they act on isn't even on screen — hiding them there buys back a whole header row
-            (~50px of an 844px phone, on top of the console's own chrome and the browser's). */}
-        <div className={`${threadOnly ? "hidden lg:flex" : "flex"} relative w-full flex-wrap items-center justify-start gap-2 lg:w-auto lg:flex-nowrap lg:justify-end lg:gap-3.5`}>
+        {/* MOBILE: Group by + Channel + CSV + Filters are ONE button (they all act on the list, and four
+            of them wrapped the header onto a second row). Hidden in thread view — the list they act on
+            isn't on screen there — which keeps the mobile header to a single row throughout. */}
+        {!threadOnly && (
+          <button
+            onClick={() => setSheetOpen(true)}
+            className="flex shrink-0 items-center gap-1.5 rounded-[15px] border px-3 py-2 text-[12px] font-medium transition-colors lg:hidden"
+            style={{ borderColor: mobileFilterCount ? C.primary : C.border, color: mobileFilterCount ? C.primary : C.dark }}
+          >
+            <IconFilter size={13} /> Filters{mobileFilterCount ? ` (${mobileFilterCount})` : ""}
+          </button>
+        )}
+        {/* DESKTOP: the four discrete controls — there's room for them at lg and up. */}
+        <div className="relative hidden flex-nowrap items-center justify-end gap-3.5 lg:flex">
           {/* Group by: one row per CUSTOMER (merged thread) vs NONE (flat, one row per conversation). */}
           <div className="flex items-center gap-1.5">
-            <span className="hidden text-[11px] font-medium lg:inline" style={{ color: C.sub }}>Group by</span>
+            <span className="text-[11px] font-medium" style={{ color: C.sub }}>Group by</span>
             <Segmented
               value={groupBy}
               onChange={(v) => setGroupBy(v as "customer" | "none")}
@@ -783,7 +796,7 @@ function Inbox() {
           )}
           <button
             onClick={() => exportCsv(customers)}
-            className="flex shrink-0 items-center gap-1.5 rounded-[15px] border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8] lg:gap-2 lg:px-6 lg:py-2"
+            className="flex shrink-0 items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
             style={{ borderColor: C.border, color: C.dark }}
           >
             <IconDownload size={13} /> CSV
@@ -794,7 +807,7 @@ function Inbox() {
             <button
               data-filters-toggle
               onClick={() => setFiltersOpen((v) => !v)}
-              className="flex shrink-0 items-center gap-1.5 rounded-[15px] border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8] lg:gap-2 lg:px-6 lg:py-2"
+              className="flex shrink-0 items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
               style={{ borderColor: filtersOpen ? C.primary : C.border, color: filtersOpen ? C.primary : C.dark }}
             >
               <IconFilter size={13} /> Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}
@@ -873,7 +886,7 @@ function Inbox() {
               <button
                 onClick={() => setNeedsAttention((v) => !v)}
                 title="Conversations Vini flagged for a rep"
-                className="flex shrink-0 items-center gap-1.5 border-b px-2.5 py-2.5 text-[12px] transition-colors lg:px-3"
+                className="flex shrink-0 items-center gap-1.5 border-b px-2.5 py-2.5 text-[12px] transition-colors"
                 style={{
                   borderColor: needsAttention ? C.orange : C.border,
                   borderBottomWidth: needsAttention ? 2 : 1,
@@ -979,6 +992,22 @@ function Inbox() {
         {selected && detailsOpen && (
           <DetailsDrawer auth={auth} customer={selected} onClose={() => setDetailsOpen(false)} />
         )}
+
+        {/* MOBILE all-in-one list controls. Closed automatically once a thread is open (threadOnly), since
+            its own trigger is hidden there and it would otherwise sit over the thread with no way back. */}
+        {sheetOpen && !threadOnly && (
+          <MobileControlsSheet
+            groupBy={groupBy} onGroupBy={setGroupBy}
+            channel={channel} onChannel={setChannel}
+            onExport={() => exportCsv(customers)}
+            onClose={() => setSheetOpen(false)}
+            leadType={leadType} onLeadType={setLeadType}
+            dateRange={dateRange} onDateRange={setDateRange}
+            customStart={customStart} onCustomStart={setCustomStart}
+            customEnd={customEnd} onCustomEnd={setCustomEnd}
+            dateBasis={dateBasis} onDateBasis={setDateBasis}
+          />
+        )}
       </div>
     </div>
   );
@@ -989,7 +1018,7 @@ function TabBtn({ active, onClick, label }: { active: boolean; onClick: () => vo
   return (
     <button
       onClick={onClick}
-      className="flex w-[96px] shrink-0 items-center justify-center border-b px-2 py-2.5 text-[12px] transition-colors lg:w-[120px] lg:px-4"
+      className="flex w-[96px] shrink-0 items-center justify-center border-b px-2 py-2.5 text-[12px] transition-colors lg:w-[100px] lg:px-3"
       style={{
         borderColor: active ? C.primary : C.border,
         borderBottomWidth: active ? 2 : 1,
@@ -3146,9 +3175,6 @@ function FiltersPopover({
   dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
   onClose: () => void;
 }) {
-  const toggle = (arr: string[], set: (v: string[]) => void, t: string) =>
-    set(arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t]);
-  const anyActive = leadType.length || dateRange !== "all";
   // Close on outside-click via a listener instead of a full-screen backdrop — the old `fixed inset-0`
   // overlay sat on top of the list and swallowed scroll while the popover stayed open (multi-select),
   // so the list "stopped scrolling" after adding a filter. Ignore clicks on the Filters toggle so it
@@ -3165,11 +3191,147 @@ function FiltersPopover({
   }, [onClose]);
   return (
     <>
-      <div ref={popRef} className="animate-dropdown-in absolute right-0 top-11 z-50 max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg" style={{ borderColor: C.border }}>
+      <div ref={popRef} className="animate-dropdown-in absolute right-0 top-11 z-50 hidden max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg lg:block" style={{ borderColor: C.border }}>
+        <FilterSections
+          leadType={leadType} onLeadType={onLeadType}
+          dateRange={dateRange} onDateRange={onDateRange}
+          customStart={customStart} onCustomStart={onCustomStart}
+          customEnd={customEnd} onCustomEnd={onCustomEnd}
+          dateBasis={dateBasis} onDateBasis={onDateBasis}
+        />
+      </div>
+    </>
+  );
+}
+
+/* One labelled section of the mobile sheet. Declared at module scope — a component defined inside the
+ * render would be a new type every pass and reset its subtree's state. */
+function SheetGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="border-t px-4 py-3.5" style={{ borderColor: C.border }}>
+      <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>{label}</p>
+      {children}
+    </div>
+  );
+}
+
+/* MOBILE: one control for everything that acts on the list. Group by, the channel filter, CSV export and
+ * the date/temperature filters were four separate header controls — ~330px of chrome that wrapped onto a
+ * second header row on a phone. They all fold into this bottom sheet behind a single "Filters" button, so
+ * the mobile header is one row. Desktop keeps the four discrete controls (it has the width for them). */
+function MobileControlsSheet({
+  groupBy, onGroupBy, channel, onChannel, onExport, onClose,
+  leadType, onLeadType, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
+}: {
+  groupBy: "customer" | "none"; onGroupBy: (v: "customer" | "none") => void;
+  channel: "all" | "sms" | "chat" | "call" | "email"; onChannel: (v: "all" | "sms" | "chat" | "call" | "email") => void;
+  onExport: () => void; onClose: () => void;
+  leadType: string[]; onLeadType: (v: string[]) => void;
+  dateRange: DateRange; onDateRange: (v: DateRange) => void;
+  customStart: string; onCustomStart: (v: string) => void;
+  customEnd: string; onCustomEnd: (v: string) => void;
+  dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
+}) {
+  // Esc closes, and the body can't scroll behind the sheet while it's open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-[60] flex flex-col justify-end lg:hidden" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/30" />
+      <div
+        className="animate-dropdown-in relative max-h-[85dvh] overflow-y-auto rounded-t-2xl bg-white pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_28px_rgba(3,7,18,0.18)]"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog" aria-modal="true" aria-label="List filters"
+      >
+        <div className="sticky top-0 flex items-center justify-between gap-2 border-b bg-white px-4 py-3" style={{ borderColor: C.border }}>
+          <p className="text-[15px] font-semibold" style={{ color: C.dark }}>Filters</p>
+          <button onClick={onClose} title="Close" className="-mr-2 flex size-10 shrink-0 items-center justify-center text-[20px] leading-none" style={{ color: C.dark }}>×</button>
+        </div>
+
+        <SheetGroup label="Group by">
+          <Segmented
+            value={groupBy}
+            onChange={(v) => onGroupBy(v as "customer" | "none")}
+            options={[{ value: "customer", label: "Customer" }, { value: "none", label: "None" }]}
+          />
+          <p className="mt-1.5 text-[11px]" style={{ color: C.sub }}>
+            {groupBy === "customer" ? "One row per customer — every channel merged into one thread." : "One row per conversation."}
+          </p>
+        </SheetGroup>
+
+        {/* Channel only exists for the flat list (the team endpoint's `type`); hidden otherwise so it
+            isn't a dead control, exactly as on desktop. */}
+        {groupBy === "none" && (
+          <SheetGroup label="Channel">
+            <div className="flex flex-wrap gap-1.5">
+              {([["all", "All"], ["sms", "SMS"], ["chat", "Chat"], ["call", "Calls"], ["email", "Email"]] as const).map(([v, label]) => (
+                <button key={v} onClick={() => onChannel(v)}
+                  className="rounded-full border px-3 py-2 text-[12px] font-medium transition-colors"
+                  style={channel === v ? { borderColor: C.primary, background: C.primaryAccent, color: C.primary } : { borderColor: C.border, color: C.sub }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </SheetGroup>
+        )}
+
+        {/* Date + temperature apply to the Customer (leads/v2) view only — same rule as the desktop header. */}
+        {groupBy !== "none" && (
+          <div className="border-t px-4 py-3.5" style={{ borderColor: C.border }}>
+            <FilterSections
+              leadType={leadType} onLeadType={onLeadType}
+              dateRange={dateRange} onDateRange={onDateRange}
+              customStart={customStart} onCustomStart={onCustomStart}
+              customEnd={customEnd} onCustomEnd={onCustomEnd}
+              dateBasis={dateBasis} onDateBasis={onDateBasis}
+            />
+          </div>
+        )}
+
+        <SheetGroup label="Export">
+          <button onClick={() => { onExport(); onClose(); }}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border py-2.5 text-[12px] font-medium"
+            style={{ borderColor: C.border, color: C.dark }}>
+            <IconDownload size={13} /> Download CSV
+          </button>
+        </SheetGroup>
+
+        {/* sticky: the sheet is taller than the viewport once every section is open, and the primary
+            action must not be the one thing you have to scroll to find. */}
+        <div className="sticky bottom-0 border-t bg-white px-4 py-3" style={{ borderColor: C.border }}>
+          <button onClick={onClose} className="w-full rounded-xl py-3 text-[13px] font-semibold text-white" style={{ background: C.primary }}>
+            Show results
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* The date / basis / temperature controls themselves. Shared verbatim by the desktop popover above and
+ * the mobile sheet, so the two can never drift apart. */
+function FilterSections({
+  leadType, onLeadType, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
+}: {
+  leadType: string[]; onLeadType: (v: string[]) => void;
+  dateRange: DateRange; onDateRange: (v: DateRange) => void;
+  customStart: string; onCustomStart: (v: string) => void;
+  customEnd: string; onCustomEnd: (v: string) => void;
+  dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
+}) {
+  const toggle = (arr: string[], set: (v: string[]) => void, t: string) =>
+    set(arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t]);
+  const anyActive = leadType.length || dateRange !== "all";
+  return (
+    <>
+      <div>
         <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Date range</p>
         <div className="mb-2 flex flex-col gap-1">
           {DATE_RANGES.map((d) => (
-            <label key={d.v} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] hover:bg-[#fafafa]" style={{ color: C.dark }}>
+            <label key={d.v} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2.5 text-[12px] hover:bg-[#fafafa] lg:py-1.5" style={{ color: C.dark }}>
               <input type="radio" name="daterange" checked={dateRange === d.v} onChange={() => onDateRange(d.v)} className="accent-[#4600f2]" />
               {d.label}
             </label>
@@ -3201,7 +3363,7 @@ function FiltersPopover({
         <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Lead temperature</p>
         <div className="mb-3 flex flex-col gap-1">
           {LEAD_TYPES.map((t) => (
-            <label key={t} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] hover:bg-[#fafafa]" style={{ color: C.dark }}>
+            <label key={t} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2.5 text-[12px] hover:bg-[#fafafa] lg:py-1.5" style={{ color: C.dark }}>
               <input type="checkbox" checked={leadType.includes(t)} onChange={() => toggle(leadType, onLeadType, t)} className="accent-[#4600f2]" />
               <span className="capitalize">{t.toLowerCase()}</span>
             </label>
@@ -3209,7 +3371,7 @@ function FiltersPopover({
         </div>
         {anyActive ? (
           <button onClick={() => { onLeadType([]); onDateRange("all"); onCustomStart(""); onCustomEnd(""); }}
-            className="mt-3 w-full rounded-lg border py-1.5 text-[11px] font-medium" style={{ borderColor: C.border, color: C.sub }}>
+            className="mt-1 w-full rounded-lg border py-2 text-[11px] font-medium lg:py-1.5" style={{ borderColor: C.border, color: C.sub }}>
             Clear all
           </button>
         ) : null}
