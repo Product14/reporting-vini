@@ -1199,6 +1199,10 @@ function messageImages(m: SmsMessage): string[] {
 
 function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; focusConvId?: string | null; onHandoverChanged?: () => void; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
+  // A conversation clicked from the None-mode list that's OLDER than the loaded window (heavy customers can
+  // have hundreds of conversations; the thread only loads the recent ~50). Fetched on demand + merged into
+  // the thread so we can scroll to it (RETCONVAI None-mode jump-to-conversation).
+  const [focusedConv, setFocusedConv] = useState<ConvRecord | null>(null);
   // SMS human handover (RETCONVAI-2997) — UAT-only. `hoOverride` optimistically holds the post-toggle phase
   // until the re-fetched v2 (derivedHandover) catches up (writes lag the read ~1s).
   const [hoOverride, setHoOverride] = useState<HandoverState | null>(null);
@@ -1239,6 +1243,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     let on = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset thread state on customer change
     setConv(null);
+    setFocusedConv(null);
     setFbMap({});
     setSummary("");
     // Reset handover UI on customer change (phase itself is derived from conv below).
@@ -1258,6 +1263,21 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     });
     return () => { on = false; };
   }, [auth, customer.customer_id]);
+
+  // On-demand: if a None-mode click targets a conversation OLDER than the loaded window (not in conv),
+  // fetch just that one (v2 conversation_id filter) and merge it so the thread can scroll to it. Fetches
+  // once per focus target; re-checks cheaply on each poll but won't refetch what it already has.
+  useEffect(() => {
+    if (!focusConvId || !conv) return;
+    if (conv.conversations?.some((c) => c.conversationId === focusConvId)) return; // already in the window
+    if (focusedConv?.conversationId === focusConvId) return; // already fetched
+    let on = true;
+    fetchInboxConversations(auth, customer.customer_id, { conversationId: focusConvId, limit: 1 }).then((d) => {
+      const rec = d.conversations?.find((c) => c.conversationId === focusConvId) ?? d.conversations?.[0];
+      if (on && rec) setFocusedConv(rec);
+    });
+    return () => { on = false; };
+  }, [focusConvId, conv, focusedConv, auth, customer.customer_id]);
 
   const voteFeedback = useCallback(
     (conversationId: string, messageIndex: number, message: string, rating: "up" | "down", channel: "sms" | "call" | "chat", note?: string, reason?: string, emailOverride?: string) => {
@@ -1307,7 +1327,11 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   const nodes = useMemo<ThreadNode[]>(() => {
     if (!conv) return [];
     const out: ThreadNode[] = [];
-    for (const rec of conv.conversations) {
+    // Merge an on-demand-loaded focused conversation (a None-mode click on a conversation older than the
+    // loaded window) so its messages render and the thread can scroll to it. Sorted by time below.
+    const base = conv.conversations ?? [];
+    const threadConvs = focusedConv && !base.some((c) => c.conversationId === focusedConv.conversationId) ? [...base, focusedConv] : base;
+    for (const rec of threadConvs) {
       // Direction filter — skip conversations that don't match the selected inbound/outbound view.
       if (dir !== "all" && convDirection(rec) !== dir) continue;
       const base = +new Date(rec.createdAt) || 0;
@@ -1438,7 +1462,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
       }
     }
     return out.sort((a, b) => a.t - b.t);
-  }, [conv, dir, aiAgentName, custFirst]);
+  }, [conv, dir, aiAgentName, custFirst, focusedConv]);
 
   // Scroll behaviour: when opened from a None-mode row, JUMP to that conversation (once); otherwise keep
   // the thread pinned to the newest message as it grows. The focus guard stops the 8s poll from re-yanking.

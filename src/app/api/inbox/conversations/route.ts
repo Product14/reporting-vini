@@ -35,6 +35,10 @@ export async function GET(request: Request): Promise<Response> {
   up.set("limit", String(Math.max(1, Math.min(100, Number(searchParams.get("limit")) || 20))));
   const type = (searchParams.get("type") || "").toLowerCase();
   if (type === "call" || type === "sms" || type === "chat" || type === "email") up.set("type", type);
+  // v2 supports filtering to ONE conversation — used to load a specific (older, beyond-limit) conversation
+  // clicked from the None-mode list so the thread can scroll to it (RETCONVAI).
+  const convId = (searchParams.get("conversation_id") || "").trim();
+  if (convId && convId.length <= 128) up.set("conversation_id", convId);
   // Forward serviceType: conversations/v2 DEFAULTS to sales when it's absent, so Service customers come
   // back empty ("No conversation history") without it. Sales space → sales thread, Service → service.
   const dept = (searchParams.get("serviceType") || "").toLowerCase();

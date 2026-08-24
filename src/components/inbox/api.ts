@@ -337,11 +337,13 @@ const EMPTY_CONV: ConversationsV2 = {
 export async function fetchInboxConversations(
   a: InboxAuth,
   customerId: string,
-  opts: { type?: "call" | "sms" | "chat" | "email"; page?: number; limit?: number } = {},
+  opts: { type?: "call" | "sms" | "chat" | "email"; page?: number; limit?: number; conversationId?: string } = {},
 ): Promise<ConversationsV2> {
   if (!a.teamId || !a.enterpriseId || !customerId) return EMPTY_CONV;
   const p = new URLSearchParams({ team_id: a.teamId, enterprise_id: a.enterpriseId, customer_id: customerId });
   if (opts.type) p.set("type", opts.type);
+  if (opts.conversationId) p.set("conversation_id", opts.conversationId); // load ONE specific conversation
+
   p.set("page", String(opts.page ?? 1));
   p.set("limit", String(opts.limit ?? 30));
   // MUST send serviceType matching the space: conversations/v2 DEFAULTS to sales when it's absent, so a
