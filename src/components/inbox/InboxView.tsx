@@ -709,6 +709,11 @@ function Inbox() {
   // Active list has zero results (a channel/filter with no conversations). Once loaded, the middle pane
   // shows a "No conversation found" state instead of the previously-opened thread (RETCONVAI batch-3 #1).
   const listEmpty = groupBy === "none" ? (!teamLoadingList && teamConvs.length === 0) : (!loadingList && displayCustomers.length === 0);
+  // The one condition that decides mobile's single pane: a thread is open AND there's a list behind it to
+  // go back to. Everything mobile-conditional keys off this, so list / thread / header controls can never
+  // disagree — the old split conditions could hide the list AND the thread at once (blank screen) when a
+  // filter emptied the list while a customer was still selected.
+  const threadOnly = !!selected && !listEmpty;
   // Channel-/dept-aware empty text so a blank Calls/Chat/Email tab explains WHY (e.g. this space has none
   // of that channel) rather than a bare "not found". Only meaningful in None mode with a channel picked.
   const channelWord = channel === "call" ? "call" : channel === "sms" ? "SMS" : channel === "email" ? "email" : channel === "chat" ? "chat" : "";
@@ -749,7 +754,10 @@ function Inbox() {
           {account?.name && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
           {tz && <span className="ml-1 hidden text-[11px] lg:inline" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
-        <div className="relative flex w-full flex-wrap items-center justify-start gap-2 lg:w-auto lg:flex-nowrap lg:justify-end lg:gap-3.5">
+        {/* Group by / CSV / Filters all act on the LIST. Mobile is single-pane, so while a thread is open
+            the list they act on isn't even on screen — hiding them there buys back a whole header row
+            (~50px of an 844px phone, on top of the console's own chrome and the browser's). */}
+        <div className={`${threadOnly ? "hidden lg:flex" : "flex"} relative w-full flex-wrap items-center justify-start gap-2 lg:w-auto lg:flex-nowrap lg:justify-end lg:gap-3.5`}>
           {/* Group by: one row per CUSTOMER (merged thread) vs NONE (flat, one row per conversation). */}
           <div className="flex items-center gap-1.5">
             <span className="hidden text-[11px] font-medium lg:inline" style={{ color: C.sub }}>Group by</span>
@@ -807,8 +815,9 @@ function Inbox() {
 
       {/* Two panes */}
       <div className="flex min-h-0 flex-1">
-        {/* LEFT — list. Mobile is single-pane: the list is full-width and hides once a customer is opened. */}
-        <aside className={`${selected ? "hidden lg:flex" : "flex"} w-full shrink-0 flex-col border-r bg-white lg:w-[360px]`} style={{ borderColor: C.border }}>
+        {/* LEFT — list. Mobile is single-pane: full-width, and it yields to the thread only when there IS a
+            thread to show (threadOnly) — an emptied list stays visible instead of leaving a blank screen. */}
+        <aside className={`${threadOnly ? "hidden lg:flex" : "flex"} w-full shrink-0 flex-col border-r bg-white lg:w-[360px]`} style={{ borderColor: C.border }}>
           <div className="relative flex h-[68px] shrink-0 items-center px-4">
             <div className="flex flex-1 items-center gap-2.5 rounded-[5px] border px-4 py-2.5"
               style={{ borderColor: showSuggest ? C.primary : C.border }}>
@@ -943,8 +952,8 @@ function Inbox() {
         </aside>
 
         {/* MIDDLE — chat. Mobile single-pane: shown only once a customer is opened. */}
-        <section className={`${selected && !listEmpty ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`} style={{ background: C.bg }}>
-          {selected && !listEmpty ? (
+        <section className={`${threadOnly ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`} style={{ background: C.bg }}>
+          {threadOnly && selected ? (
             <ThreadPane
               key={selected.customer_id}
               auth={auth}
@@ -962,7 +971,7 @@ function Inbox() {
         </section>
 
         {/* RIGHT — lead details. Hidden < lg (mobile opens it via the header ⓘ → DetailsDrawer). */}
-        {selected && !listEmpty && (
+        {threadOnly && selected && (
           <RightPanel key={`rp-${selected.customer_id}`} auth={auth} customer={selected} onExpand={() => setDetailsOpen(true)} />
         )}
 
@@ -2204,12 +2213,17 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
   return (
     <div className="w-full max-w-[560px] lg:w-[90%]">
       <div className="overflow-hidden rounded-[14px] border bg-white" style={{ borderColor: C.border }}>
-        {/* Tighter gaps below lg — six controls on one row left the title ~40px on a phone. */}
+        {/* Six controls fought over one 338px row on a phone and the TITLE lost — "Outbound call" rendered
+            as "Outb…". Below lg the timestamp drops under the title and the chevron (redundant with the
+            Play pill, which toggles the same state) is dropped, which hands the title ~200px back. */}
         <div className="flex items-center gap-1.5 px-2.5 py-3 lg:gap-3 lg:px-3.5">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full" style={{ background: V.bg, color: V.fg }}><V.Icon size={15} /></span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-semibold" style={{ color: C.dark }}>{V.title}</p>
-            {rec.callTitle && <p className="truncate text-[12px]" style={{ color: C.sub }}>{rec.callTitle}</p>}
+            <div className="flex items-center gap-1.5">
+              {rec.callTitle && <p className="min-w-0 truncate text-[12px]" style={{ color: C.sub }}>{rec.callTitle}</p>}
+              <span className="shrink-0 text-[11px] lg:hidden" style={{ color: C.sub }}>{fmtTime(rec.createdAt)}</span>
+            </div>
           </div>
           {recording && (
             <button onClick={() => setOpen((v) => !v)} className="flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors hover:bg-[#f7f4ff]"
@@ -2225,9 +2239,9 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: C.sub }}><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg>
             </button>
           )}
-          <span className="shrink-0 text-[12px]" style={{ color: C.sub }}>{fmtTime(rec.createdAt)}</span>
+          <span className="hidden shrink-0 text-[12px] lg:inline" style={{ color: C.sub }}>{fmtTime(rec.createdAt)}</span>
           {recording && (
-            <button onClick={() => setOpen((v) => !v)} className="shrink-0" title={open ? "Collapse" : "Expand"}>
+            <button onClick={() => setOpen((v) => !v)} className="hidden shrink-0 lg:block" title={open ? "Collapse" : "Expand"}>
               <IconChevron size={14} className={open ? "rotate-180" : ""} style={{ color: C.sub }} />
             </button>
           )}
