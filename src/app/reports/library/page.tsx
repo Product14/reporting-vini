@@ -74,6 +74,9 @@ function LibraryView() {
   const [actionStats, setActionStats] = useState<ActionItemStats | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
   const [insights, setInsights] = useState<InsightsPayload | null>(null);
+  // Distinguishes "still fetching" from "genuinely nothing" — a deep link opened a report before the
+  // ClickHouse datasets landed and it rendered the empty state, which reads as broken.
+  const [insightsLoading, setInsightsLoading] = useState(true);
 
   useEffect(() => { track("report_viewed", { tab: "library", team_id: teamId }); }, [teamId]);
 
@@ -99,6 +102,7 @@ function LibraryView() {
       setActionStats(s?.stats ?? null);
       setActionItems(Array.isArray(i) ? i : []);
       setInsights(ins);
+      setInsightsLoading(false);
     });
     return () => { on = false; };
   }, [teamId, dept, spyneToken, bucket, custom]);
@@ -169,7 +173,7 @@ function LibraryView() {
           {!teamId ? (
             <Card title="No rooftop selected"><p className="text-[12.5px] text-[#6b7280]">Open this page from the console so it knows which store to report on.</p></Card>
           ) : open ? (
-            <ReportPane report={open} ctx={ctx} onBack={() => setOpenId(null)} enabled={liveIds.has(open.id)} />
+            <ReportPane report={open} ctx={ctx} onBack={() => setOpenId(null)} enabled={liveIds.has(open.id)} loading={!ready || insightsLoading} />
           ) : (
             <Gallery ctx={ctx} live={liveIds} ready={ready} onOpen={openReport} accountName={account?.name ?? ""} />
           )}
@@ -260,7 +264,7 @@ function Gallery({ ctx, live, ready, onOpen, accountName }: { ctx: ReportCtx; li
 }
 
 /** One opened report: header with the question and its source, then the report itself. */
-function ReportPane({ report, ctx, onBack, enabled }: { report: ReportDef; ctx: ReportCtx; onBack: () => void; enabled: boolean }) {
+function ReportPane({ report, ctx, onBack, enabled, loading }: { report: ReportDef; ctx: ReportCtx; onBack: () => void; enabled: boolean; loading?: boolean }) {
   // A takeaway that throws (odd feed shape) must not take the report down with it.
   let takeaway: string | null = null;
   try {
@@ -293,6 +297,11 @@ function ReportPane({ report, ctx, onBack, enabled }: { report: ReportDef; ctx: 
 
       {enabled ? (
         report.render(ctx)
+      ) : loading ? (
+        <div className="flex flex-col gap-3">
+          <div className="h-24 animate-pulse rounded-2xl border border-[#e5e7eb] bg-white" />
+          <div className="h-56 animate-pulse rounded-2xl border border-[#e5e7eb] bg-white" />
+        </div>
       ) : (
         <Card title="Nothing to show for this period">
           <p className="text-[12.5px] leading-snug text-[#6b7280]">

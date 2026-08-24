@@ -33,12 +33,16 @@ export interface InsightsPayload {
   routing: { department: string; destinationType: string; transfers: number }[] | null;
   sms: { outbound: number; inbound: number; threads: number; repliedThreads: number } | null;
   hours: { hour: number; weekday: number; calls: number }[] | null;
-  vehicles: { make: string; model: string; leads: number; newCount: number; usedCount: number; years: string }[] | null;
+  vehicles: { make: string; model: string; key: string; leads: number; newCount: number; usedCount: number; years: string }[] | null;
   /* Call handling on the FULL sales-call population (not the reviewed sample): how each connected call
    * ended, and the talk minutes behind it. Drives end-to-end handling and minutes saved. */
   handling: { reason: string; calls: number; minutes: number }[] | null;
   /* Per-intent resolution from the intent-resolution analysis: did the customer's question get answered? */
   resolution: { intent: string; raised: number; resolved: number }[] | null;
+  /* Units currently listed for sale, by model — pairs with `vehicles` to show demand against stock. */
+  stock: { make: string; model: string; key: string; units: number }[] | null;
+  /* Outbound dials per lead: how hard a lead is worked before it connects (or is given up on). */
+  effort: { attempts: number; leads: number }[] | null;
 }
 
 /* CRM status → the bucket a dealer thinks in. Statuses are free-form per CRM, so this matches on the
@@ -83,6 +87,12 @@ export async function GET(request: Request): Promise<Response> {
     start = r.start;
     end = r.end;
   }
+
+  /* Demand records "Sportage Hybrid"; the stock book records "Sportage". Folding a trailing hybrid
+   * variant into its base model is what lets the two be compared at all — without it every hybrid row
+   * reads as "0 in stock". Deliberately only strips a trailing hybrid/PHEV: EV9 is its own model, not a
+   * variant of anything. */
+  const modelKey = (col: string) => `upper(trim(replaceRegexpOne(${col}, '(?i)[[:space:]]+(plug-?in[[:space:]]+)?hybrid$|(?i)[[:space:]]+phev$', '')))`;
 
   const T = chEsc(teamId);
   const TZ = chEsc(tz);
@@ -136,6 +146,7 @@ export async function GET(request: Request): Promise<Response> {
     )
     SELECT trim(toString(v.doc.make)) AS make,
            trim(toString(v.doc.model)) AS model,
+           ${modelKey("trim(toString(v.doc.model))")} AS modelKeyOut,
            count() AS leads,
            countIf(upper(toString(v.doc.metadata.condition))='NEW') AS newCount,
            countIf(upper(toString(v.doc.metadata.condition))='USED') AS usedCount,
@@ -149,7 +160,7 @@ export async function GET(request: Request): Promise<Response> {
     ) AS v
     INNER JOIN touched AS t ON t.leadId = toString(v.doc.sales_lead_id)
     WHERE make != '' AND model != ''
-    GROUP BY make, model ORDER BY leads DESC LIMIT 25`;
+    GROUP BY make, model, modelKeyOut ORDER BY leads DESC LIMIT 25`;
 
   /* HANDLING — every SALES call by how it ended, with talk minutes. `report_useCase` scopes to sales, and
    * duration comes from the call's own start/end stamps. The caller decides which reasons count as
@@ -179,6 +190,39 @@ export async function GET(request: Request): Promise<Response> {
     )
     WHERE intent != '' GROUP BY intent ORDER BY raised DESC LIMIT 25`;
 
+  /* STOCK — vehicles listed for sale right now, counted as DISTINCT VINs.
+   *
+   * Two traps here, both of which silently inflate the count:
+   *   1. `dealerVinMapping` holds several rows per vehicle (534 rows for 136 actual VINs on the rooftop
+   *      this was built against) — counting rows overstates stock roughly 4x.
+   *   2. The unsold flag alone leaves years of stale mappings in; `liveOnWeb=1` is what means "listed".
+   * vinMaster is also filtered by the VIN set BEFORE grouping — grouping the whole table first ran past
+   * the client's timeout and returned nothing at all. */
+  const stockSql = `
+    SELECT make AS mk,
+           ${modelKey("model")} AS modelKeyOut,
+           any(model) AS modelName,
+           count() AS units
+    FROM (
+      SELECT vin, any(make) AS make, any(model) AS model
+      FROM inventory.vinMaster
+      WHERE vin IN (SELECT vin FROM inventory.dealerVinMapping WHERE teamId='${T}' AND sold=0 AND liveOnWeb=1)
+      GROUP BY vin
+    )
+    WHERE ifNull(make,'') != '' AND ifNull(model,'') != ''
+    GROUP BY mk, modelKeyOut ORDER BY units DESC LIMIT 60`;
+
+  /* EFFORT — outbound dials per lead. Answers "how many attempts does it take to reach someone", and its
+   * tail answers "are we calling the same person too many times". */
+  const effortSql = `
+    SELECT attempts, count() AS leads FROM (
+      SELECT leadId, uniqExact(callId) AS attempts
+      FROM dealer_leads.endcallreports FINAL
+      WHERE teamId='${T}' AND isTestCall=0 AND leadId != ''
+        AND callDetails_callType='outboundPhoneCall' AND ${win("createdAt")}
+      GROUP BY leadId
+    ) GROUP BY attempts ORDER BY attempts LIMIT 40`;
+
   const hoursSql = `
     SELECT toHour(toTimeZone(createdAt,'${TZ}')) AS hour,
            toDayOfWeek(toTimeZone(createdAt,'${TZ}')) AS weekday,
@@ -196,14 +240,16 @@ export async function GET(request: Request): Promise<Response> {
     }
   };
 
-  const [soldRows, routingRows, smsRows, hourRows, vehicleRows, handlingRows, resolutionRows] = await Promise.all([
+  const [soldRows, routingRows, smsRows, hourRows, vehicleRows, handlingRows, resolutionRows, stockRows, effortRows] = await Promise.all([
     safe<{ status: string; leads: string | number }>(soldSql),
     safe<{ department: string; destinationType: string; transfers: string | number }>(routingSql),
     safe<{ outbound: string | number; inbound: string | number; threads: string | number; repliedThreads: string | number }>(smsSql),
     safe<{ hour: string | number; weekday: string | number; calls: string | number }>(hoursSql),
-    safe<{ make: string; model: string; leads: string | number; newCount: string | number; usedCount: string | number; minYear: string; maxYear: string }>(vehiclesSql),
+    safe<{ make: string; model: string; modelKeyOut: string; leads: string | number; newCount: string | number; usedCount: string | number; minYear: string; maxYear: string }>(vehiclesSql),
     safe<{ reason: string; calls: string | number; minutes: string | number }>(handlingSql),
     safe<{ intent: string; raised: string | number; resolved: string | number }>(resolutionSql),
+    safe<{ mk: string; modelName: string; modelKeyOut: string; units: string | number }>(stockSql),
+    safe<{ attempts: string | number; leads: string | number }>(effortSql),
   ]);
 
   const n = (v: string | number | undefined) => Number(v ?? 0) || 0;
@@ -239,6 +285,7 @@ export async function GET(request: Request): Promise<Response> {
           return {
             make: r.make,
             model: r.model,
+            key: `${r.make}|${r.modelKeyOut}`.toUpperCase(),
             leads: n(r.leads),
             newCount: n(r.newCount),
             usedCount: n(r.usedCount),
@@ -248,6 +295,8 @@ export async function GET(request: Request): Promise<Response> {
       : null,
     handling: handlingRows ? handlingRows.map((r) => ({ reason: r.reason, calls: n(r.calls), minutes: n(r.minutes) })) : null,
     resolution: resolutionRows ? resolutionRows.map((r) => ({ intent: r.intent, raised: n(r.raised), resolved: n(r.resolved) })) : null,
+    stock: stockRows ? stockRows.map((r) => ({ make: r.mk, model: r.modelName, key: `${r.mk}|${r.modelKeyOut}`.toUpperCase(), units: n(r.units) })) : null,
+    effort: effortRows ? effortRows.map((r) => ({ attempts: n(r.attempts), leads: n(r.leads) })) : null,
   };
 
   return Response.json({ ...payload, window: { start, end, timezone: tz }, degraded: false });

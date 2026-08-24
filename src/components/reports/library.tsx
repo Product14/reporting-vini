@@ -51,6 +51,9 @@ export interface ReportDef {
   who: string;
   /** Live source, shown on the report so a number can always be traced back. */
   source: string;
+  /* Which sales agent this report belongs under, driving the "more reports" strip on the By-agent page.
+   * Omitted = relevant to both, which is the common case (most reports are rooftop-wide). */
+  agents?: ("sales_ib" | "sales_ob")[];
   /* One plain sentence telling the reader what this period's numbers actually mean — computed from the
    * data, not canned copy, so it changes with the figures. Rendered at the top of the report. */
   takeaway?: (c: ReportCtx) => string | null;
@@ -142,6 +145,47 @@ function fmtHours(mins: number): string {
   const h = Math.floor(mins / 60);
   const m = Math.round(mins % 60);
   return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+
+/* DEMAND vs STOCK. Both sides are keyed by make + base model (see the API's modelKey), so a demand row
+ * for "Sportage Hybrid" lands on the "Sportage" stock row instead of falsely reading as out of stock.
+ * Models present on only ONE side are kept — stock with no interest and interest with no stock are both
+ * things a dealer wants to see — sorted by demand first, then by units. */
+function demandVsStock(c: ReportCtx): { make: string; model: string; leads: number; units: number }[] {
+  const demand = c.insights?.vehicles ?? [];
+  const stock = c.insights?.stock ?? [];
+  if (!demand.length && !stock.length) return [];
+  const byKey = new Map<string, { make: string; model: string; leads: number; units: number }>();
+  for (const d of demand) {
+    /* Demand can carry SEVERAL rows per key — "Sportage" and "Sportage Hybrid" both fold to SPORTAGE.
+     * They must be summed; overwriting drops one variant's leads entirely, which is the exact case this
+     * report exists to handle. The shorter label wins so the row reads as the base model, matching how
+     * stock names it. */
+    const hit = byKey.get(d.key);
+    if (hit) {
+      hit.leads += d.leads;
+      if (d.model.length < hit.model.length) hit.model = d.model;
+    } else {
+      byKey.set(d.key, { make: d.make, model: d.model, leads: d.leads, units: 0 });
+    }
+  }
+  for (const s of stock) {
+    const hit = byKey.get(s.key);
+    if (hit) hit.units += s.units;
+    else byKey.set(s.key, { make: s.make, model: s.model, leads: 0, units: s.units });
+  }
+  return [...byKey.values()].sort((a, b) => b.leads - a.leads || b.units - a.units);
+}
+
+/** Dials-per-lead rolled up: totals plus the heavily-chased tail. */
+function effortTotals(c: ReportCtx): { leads: number; dials: number; avg: number; heavy: number } | null {
+  const rows = c.insights?.effort;
+  if (!rows?.length) return null;
+  const leads = rows.reduce((s, r) => s + r.leads, 0);
+  const dials = rows.reduce((s, r) => s + r.leads * r.attempts, 0);
+  const heavy = rows.filter((r) => r.attempts >= 6).reduce((s, r) => s + r.leads, 0);
+  return leads ? { leads, dials, avg: dials / leads, heavy } : null;
 }
 
 const anyOutcome = (c: ReportCtx) => c.outcomes.inbound ?? c.outcomes.outbound ?? null;
@@ -1101,6 +1145,123 @@ export const REPORTS: ReportDef[] = [
       );
     },
   },
+
+  // 23 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "demand-vs-stock",
+    title: "Demand vs what's on the lot",
+    question: "Are we stocked for what customers are actually asking us about?",
+    category: "Lead quality",
+    who: "GM · inventory manager",
+    source: "Vehicle interest on the leads the AI called, against units listed for sale",
+    agents: ["sales_ib", "sales_ob"],
+    available: (c) => demandVsStock(c).length > 0,
+    takeaway: (c) => {
+      const rows = demandVsStock(c);
+      const short = rows.filter((r) => r.units > 0 && r.leads / r.units >= 2).sort((a, b) => b.leads / b.units - a.leads / a.units)[0];
+      const cold = rows.filter((r) => r.units >= 10 && r.leads === 0).sort((a, b) => b.units - a.units)[0];
+      const parts: string[] = [];
+      if (short) parts.push(`${short.make} ${short.model} is your tightest fit — ${fmtInt(short.leads)} interested leads against ${fmtInt(short.units)} in stock.`);
+      if (cold) parts.push(`${fmtInt(cold.units)} ${cold.make} ${cold.model} are listed with no recorded interest this period.`);
+      return parts.join(" ") || `${fmtInt(rows.length)} models matched between customer interest and your listed stock.`;
+    },
+    render: (c) => {
+      const rows = demandVsStock(c);
+      const matched = rows.filter((r) => r.units > 0 && r.leads > 0);
+      const tight = rows.filter((r) => r.units > 0 && r.leads / r.units >= 2);
+      const noInterest = rows.filter((r) => r.units >= 5 && r.leads === 0);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Models customers asked about", value: fmtInt(rows.filter((r) => r.leads > 0).length) },
+              { label: "Units listed", value: fmtInt(rows.reduce((s, r) => s + r.units, 0)), sub: "currently on your website" },
+              { label: "Running tight", value: fmtInt(tight.length), sub: "2+ interested leads per unit", accent: tight.length ? "#dc2626" : undefined },
+              { label: "Sitting quiet", value: fmtInt(noInterest.length), sub: "5+ in stock, nobody asked", accent: noInterest.length ? "#d97706" : undefined },
+            ]}
+          />
+
+          <Card title="Interest against stock, model by model" sub="Leads per unit is the number to scan — high means demand is outrunning supply" pad={false}>
+            <Table
+              head={[{ label: "Vehicle" }, { label: "Interested leads", align: "right" }, { label: "In stock", align: "right" }, { label: "Leads per unit", align: "right" }, { label: "", align: "right" }]}
+              rows={rows.slice(0, 20).map((r) => {
+                const ratio = r.units ? r.leads / r.units : null;
+                const flag = ratio !== null && ratio >= 2 ? "Stock up" : r.units >= 5 && r.leads === 0 ? "Needs promotion" : r.units === 0 && r.leads > 0 ? "None listed" : "";
+                return [
+                  <span key="v" className="font-semibold text-[#111]">{r.make} {r.model}</span>,
+                  fmtInt(r.leads),
+                  r.units ? fmtInt(r.units) : <span key="u" className="text-[#9ca3af]">none</span>,
+                  ratio === null ? "—" : ratio.toFixed(1),
+                  flag ? (
+                    <span key="f" className="rounded-full px-2 py-0.5 text-[10.5px] font-bold"
+                          style={{ background: flag === "Stock up" || flag === "None listed" ? "#fef2f2" : "#fffbeb", color: flag === "Stock up" || flag === "None listed" ? "#dc2626" : "#b45309" }}>
+                      {flag}
+                    </span>
+                  ) : "",
+                ];
+              })}
+            />
+          </Card>
+
+          <Note>
+            Interest comes from the vehicle recorded against each lead the AI called; stock is what is
+            listed for sale on your site right now. Hybrid versions are counted with their base model
+            because stock is recorded that way. Matched on {fmtInt(matched.length)} models.
+          </Note>
+        </div>
+      );
+    },
+  },
+
+  // 24 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "contact-effort",
+    title: "How hard we chase a lead",
+    question: "How many calls does it take to reach someone — and are we calling anyone too often?",
+    category: "Outbound",
+    who: "BDC manager",
+    source: "Outbound dials per lead across the period",
+    agents: ["sales_ob"],
+    available: (c) => (c.insights?.effort?.length ?? 0) > 0,
+    takeaway: (c) => {
+      const e = effortTotals(c)!;
+      return `${fmtInt(e.leads)} leads were dialled ${fmtInt(e.dials)} times — ${e.avg.toFixed(1)} calls each on average. ${fmtInt(e.heavy)} leads (${pct(e.heavy, e.leads)}%) were called 6 or more times.`;
+    },
+    render: (c) => {
+      const e = effortTotals(c)!;
+      const rows = c.insights!.effort!;
+      const bucket = (lo: number, hi: number) => rows.filter((r) => r.attempts >= lo && r.attempts <= hi).reduce((s, r) => s + r.leads, 0);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Leads dialled", value: fmtInt(e.leads) },
+              { label: "Calls placed", value: fmtInt(e.dials) },
+              { label: "Calls per lead", value: e.avg.toFixed(1), sub: "on average", accent: "#813fed" },
+              { label: "Called 6+ times", value: fmtInt(e.heavy), sub: `${pct(e.heavy, e.leads)}% of leads`, accent: e.heavy / e.leads > 0.25 ? "#dc2626" : undefined },
+            ]}
+          />
+          <Card title="How many times each lead was called" sub="A long tail on the right is worth a look — those customers are hearing from you a lot">
+            <RankBars
+              rows={[
+                { label: "Once", value: bucket(1, 1) },
+                { label: "2–3 times", value: bucket(2, 3) },
+                { label: "4–5 times", value: bucket(4, 5) },
+                { label: "6–9 times", value: bucket(6, 9) },
+                { label: "10 or more", value: bucket(10, 999) },
+              ].filter((r) => r.value > 0)}
+              accent="#813fed"
+            />
+            <Note>
+              Counts outbound calls only, per lead, for this period. Repeated attempts are how outbound
+              works — but a large group at the far end usually means the cadence is running past the point
+              where anyone is going to pick up.
+            </Note>
+          </Card>
+        </div>
+      );
+    },
+  },
 ];
 
 const hourLabel = (h: number) => (h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`);
@@ -1121,3 +1282,60 @@ export function availableReports(c: ReportCtx): ReportDef[] {
 export const REPORT_CATEGORIES = ["Appointments", "Speed & response", "Lead quality", "Conversations", "Team", "Outbound"] as const;
 
 export { Stats as ReportStats, Table as ReportTable, RankBars as ReportRankBars, MetricTile };
+
+/* ── By-agent → report library bridge ─────────────────────────────────────────────────────────────
+ * The agent report answers "how is this agent doing"; the library answers everything around it. Rather
+ * than duplicate reports onto the agent page, the page offers the ones that bear on the agent you're
+ * looking at and links straight into them.
+ *
+ * Availability is NOT evaluated here: the agent page doesn't load the library's data sources (that would
+ * mean four extra fetches on every agent view), so the strip lists what's relevant and the library shows
+ * the real state on arrival. */
+export function reportsForAgent(agentId: string): ReportDef[] {
+  const id = agentId as "sales_ib" | "sales_ob";
+  const relevant = REPORTS.filter((r) => !r.agents || r.agents.includes(id));
+  /* Reports that name this agent explicitly come FIRST. Catalog order alone put the six oldest entries
+   * at the front of the strip regardless of which agent you were looking at — an outbound agent led with
+   * inbound speed-to-lead. Beyond that, the direction's own category is preferred. */
+  const preferred = id === "sales_ob" ? "Outbound" : "Speed & response";
+  const rank = (r: ReportDef) => (r.agents?.includes(id) ? 0 : r.category === preferred ? 1 : 2);
+  return relevant.slice().sort((a, b) => rank(a) - rank(b));
+}
+
+/** Deep link into one library report, carrying the rooftop + window already on screen. */
+export function libraryHref(reportId: string, navQuery: string): string {
+  const sep = navQuery ? (navQuery.startsWith("?") ? "&" : "?") : "?";
+  return `/reports/library${navQuery}${sep}report=${encodeURIComponent(reportId)}`;
+}
+
+/* The strip itself. Six is deliberate: enough to feel like a library, few enough to scan without
+ * turning the bottom of the agent report into a second navigation problem. */
+export function MoreReports({ agentId, navQuery, max = 6 }: { agentId: string; navQuery: string; max?: number }) {
+  const picks = reportsForAgent(agentId).slice(0, max);
+  if (!picks.length) return null;
+  return (
+    <Card
+      title="More reports on this data"
+      sub="Same period, same rooftop — open any of these for the detail behind the numbers above"
+      right={
+        <a href={libraryHref("", navQuery).replace(/[?&]report=$/, "")} className="no-print flex-none rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">
+          All reports →
+        </a>
+      }
+    >
+      <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
+        {picks.map((r) => (
+          <a
+            key={r.id}
+            href={libraryHref(r.id, navQuery)}
+            className="flex h-full flex-col gap-1 rounded-xl border border-[#e5e7eb] bg-white px-4 py-3 transition-shadow hover:border-[#d6c9f5] hover:shadow-md"
+          >
+            <span className="text-[10px] font-bold uppercase tracking-wide text-[#c3b5e8]">{r.category}</span>
+            <span className="text-[12.5px] font-bold leading-tight text-[#111]">{r.title}</span>
+            <span className="text-[11px] leading-snug text-[#6b7280]">{r.question}</span>
+          </a>
+        ))}
+      </div>
+    </Card>
+  );
+}

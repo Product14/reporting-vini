@@ -38,6 +38,7 @@ import { goCrossPage } from "@/components/reports/parentNav";
 import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
 import { useOutcomes, OutcomeKpis, CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
+import { MoreReports } from "@/components/reports/library";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
@@ -1219,6 +1220,9 @@ function AgentReportsView() {
               </div>
           </Card>
           )}
+
+          {/* Sales only: the rest of the library, one click away, scoped to this agent. */}
+          {isSales && <MoreReports agentId={a.id} navQuery={navQuery} />}
 
           </>
           )}
