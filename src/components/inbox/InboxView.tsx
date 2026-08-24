@@ -42,6 +42,7 @@ import {
   type LeadsPage,
   type ConversationsV2,
   type ConvRecord,
+  type SmsMessage,
   type LeadJourneyEvent,
   type AppointmentItem,
   type ActionItem,
@@ -494,14 +495,16 @@ function Inbox() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- clear stale icons on scope change
     setRowMeta({});
   }, [teamId, enterpriseId, spyneEnv]);
+  // In None mode a row is ONE conversation; clicking it opens the customer's merged thread AND scrolls to
+  // that specific conversation (focusConvId). Customer-mode clicks clear it (default = scroll to newest).
+  const [focusConvId, setFocusConvId] = useState<string | null>(null);
   const openCustomer = useCallback((c: InboxCustomer) => {
     setSelected(c);
     setDetailsOpen(false);
     setReadIds((prev) => (prev.has(c.customer_id) ? prev : new Set(prev).add(c.customer_id)));
   }, []);
-  // Flat-list (None) row → open the conversation's customer in the main thread. No modal from the list —
-  // the expanded Listen/Transcript drawer is only reachable from a call card inside the main chat.
-  const openTeamConv = useCallback((c: TeamConversation) => { openCustomer(teamConvToCustomer(c)); }, [openCustomer]);
+  // Flat-list (None) row → open the conversation's customer in the main thread and jump to that conversation.
+  const openTeamConv = useCallback((c: TeamConversation) => { setFocusConvId(c.conversationId || null); openCustomer(teamConvToCustomer(c)); }, [openCustomer]);
 
   // Debounce the search box → searchTerm query.
   useEffect(() => {
@@ -894,7 +897,7 @@ function Inbox() {
                     meta={rowMeta[c.customer_id]}
                     active={selected?.customer_id === c.customer_id}
                     read={readIds.has(c.customer_id)}
-                    onClick={() => openCustomer(c)}
+                    onClick={() => { setFocusConvId(null); openCustomer(c); }}
                     onVisible={requestEnrich}
                   />
                 ))}
@@ -916,6 +919,7 @@ function Inbox() {
               key={selected.customer_id}
               auth={auth}
               customer={selected}
+              focusConvId={focusConvId}
               onBack={() => setSelected(null)}
               onDetails={() => setDetailsOpen(true)}
             />
@@ -1094,14 +1098,15 @@ function ListSkeleton() {
 /* ══════════════════════════════════════════════════════════════════════════════
  * Thread pane
  * ════════════════════════════════════════════════════════════════════════════ */
-type ThreadNode =
-  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; human?: boolean; fb?: { conversationId: string; messageIndex: number } }
+type ThreadNode = (
+  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; human?: boolean; images?: string[]; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "handover"; claim: boolean } // rep took over / handed back — a state change, not a message
   | { t: number; kind: "email"; side: "in" | "out"; sender: string; subject?: string; text: string; status?: string }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
   | { t: number; kind: "event"; emoji: string; title: string; detail: string; subtle?: boolean; dateOnly?: boolean } // lead-journey milestone, interleaved in the chat
-  | { t: number; kind: "call"; rec: ConvRecord };
+  | { t: number; kind: "call"; rec: ConvRecord }
+) & { cid?: string }; // source conversationId — lets None-mode "jump to this conversation" scroll to it
 
 const EVENT_GRADIENT =
   "linear-gradient(90deg, rgba(91,109,246,0.10) 1%, rgba(127,106,242,0.10) 23%, rgba(182,81,215,0.10) 66%, rgba(232,62,84,0.10) 86%, rgba(237,137,57,0.10) 113%)";
@@ -1131,7 +1136,27 @@ function deriveHandover(conv: ConversationsV2 | null, on: boolean): HandoverStat
   };
 }
 
-function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; onBack?: () => void; onDetails?: () => void }) {
+// Image URLs a customer (or rep) attached to a message (MMS / chat upload). The exact v2 media field is
+// unconfirmed on UAT (no MMS seen yet), so look DEFENSIVELY across the likely shapes + any image URL in the
+// text. NB: if the real URL turns out to be auth-gated (e.g. a raw Twilio media URL), it'll need the same
+// CORS/auth proxy the call recording uses — revisit once a real media message exists.
+const IMG_URL_RE = /https?:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|gif|webp|heic)(?:\?[^\s"'<>]*)?/gi;
+function messageImages(m: SmsMessage): string[] {
+  const out: string[] = [];
+  const add = (u: unknown) => { if (typeof u === "string" && /^https?:\/\//i.test(u)) out.push(u); };
+  const any = m as unknown as Record<string, unknown>;
+  add(any.mediaUrl); add(any.imageUrl); add(any.image); add(any.url);
+  for (const key of ["mediaUrls", "media", "images", "attachments"]) {
+    const arr = any[key];
+    if (Array.isArray(arr)) for (const x of arr) add(typeof x === "string" ? x : ((x as Record<string, unknown>)?.url ?? (x as Record<string, unknown>)?.mediaUrl ?? (x as Record<string, unknown>)?.link));
+  }
+  for (const k of Object.keys(any)) if (/^mediaurl\d+$/i.test(k)) add(any[k]); // Twilio-style mediaUrl0, mediaUrl1…
+  const c = typeof m.content === "string" ? m.content : "";
+  for (const mt of c.matchAll(IMG_URL_RE)) out.push(mt[0]);
+  return Array.from(new Set(out));
+}
+
+function ThreadPane({ auth, customer, focusConvId, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; focusConvId?: string | null; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   // SMS human handover (RETCONVAI-2997) — UAT-only. `hoOverride` optimistically holds the post-toggle phase
   // until the re-fetched v2 (derivedHandover) catches up (writes lag the read ~1s).
@@ -1267,7 +1292,7 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
             // hand-back notice on the precise "handed it back" (which only it carries), not a loose "handed back".
             const handback = /handed it back/.test(c);
             const claim = /claimed this conversation|has claimed|taken over|taking over/.test(c);
-            if (m.human_assistant_id || handback || claim) out.push({ t, kind: "handover", claim: !handback });
+            if (m.human_assistant_id || handback || claim) out.push({ t, kind: "handover", claim: !handback, cid: rec.conversationId });
             return;
           }
           const rc = (m.toolCalls ?? undefined)?.[0];
@@ -1275,21 +1300,24 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
             // §03 — a tool step: action + query params + result, as an expandable "AI action" card.
             const name = rc.function?.name || rc.name || "";
             const res = rc.id ? resultByCallId[rc.id] : undefined;
-            out.push({ t, kind: "toolstep", label: toolLabel(name), rawName: name, args: formatArgs(rc.function?.arguments), result: res?.text, resultExtra: res?.extra });
+            out.push({ t, kind: "toolstep", label: toolLabel(name), rawName: name, args: formatArgs(rc.function?.arguments), result: res?.text, resultExtra: res?.extra, cid: rec.conversationId });
             return;
           }
           const parsed = parseSmsText(m.content);
           if (parsed.kind === "tool") { // orphan tool result (no linked call in this list)
-            out.push({ t, kind: "toolstep", label: "Ran a tool", rawName: "", args: [], result: parsed.summary });
+            out.push({ t, kind: "toolstep", label: "Ran a tool", rawName: "", args: [], result: parsed.summary, cid: rec.conversationId });
             return;
           }
-          if (!parsed.text) return;
+          // A customer (or rep) may attach image(s) (MMS/media) — render them even when there's no text.
+          const imgs = messageImages(m);
+          if (!parsed.text && imgs.length === 0) return;
           const side = role === "user" ? "in" : "out";
           // Human handover (RETCONVAI-2997): an outbound turn with an authorUserId was sent by a REP, not
           // Vini — label it with the rep's name and mark it human (v2 tags only human turns this way).
           const byHuman = side === "out" && !!m.authorUserId;
           out.push({
             t, kind: "msg", side, text: parsed.text, chat: isChat || undefined, human: byHuman || undefined,
+            images: imgs.length ? imgs : undefined, cid: rec.conversationId,
             sender: side === "out" ? (byHuman ? m.authorName || "Team member" : aiAgentName) : custFirst,
             // Feedback attaches to AI messages only (never a rep's own message), keyed by conversation + index (§03).
             fb: side === "out" && !byHuman ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
@@ -1312,10 +1340,11 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
             // "received" on inbound is implicit; sent/opened/replied on outbound is worth showing.
             status: side === "out" ? m.status || undefined : undefined,
             sender: side === "out" ? aiAgentName : custFirst,
+            cid: rec.conversationId,
           });
         }
       } else if (rec.type === "call") {
-        out.push({ t: base, kind: "call", rec });
+        out.push({ t: base, kind: "call", rec, cid: rec.conversationId });
       }
     }
     // Direction of each conversation by id — so appointments/action items (which reference their source
@@ -1369,9 +1398,18 @@ function ThreadPane({ auth, customer, onBack, onDetails }: { auth: InboxAuth; cu
     return out.sort((a, b) => a.t - b.t);
   }, [conv, dir, aiAgentName, custFirst]);
 
+  // Scroll behaviour: when opened from a None-mode row, JUMP to that conversation (once); otherwise keep
+  // the thread pinned to the newest message as it grows. The focus guard stops the 8s poll from re-yanking.
+  const scrolledFocus = useRef<string | null>(null);
   useEffect(() => {
+    if (focusConvId) {
+      if (scrolledFocus.current === focusConvId) return;
+      const el = document.querySelector(`[data-cid="${focusConvId}"]`);
+      if (el) { el.scrollIntoView({ block: "start" }); scrolledFocus.current = focusConvId; }
+      return;
+    }
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [nodes.length]);
+  }, [nodes.length, focusConvId]);
 
   const lead = conv?.leads?.[0];
   const phone = customer.mobile_number || conv?.conversations?.[0]?.customerDetails?.phone || "";
@@ -1743,7 +1781,13 @@ function renderWithDividers(nodes: ThreadNode[], fb: FbCtx, auth: InboxAuth, cus
       out.push(<DayDivider key={`d${i}`} label={dl} />);
       lastDay = dl;
     }
-    out.push(<ThreadNodeView key={`n${i}`} node={n} fb={fb} auth={auth} customerName={customerName} customerSeed={customerSeed} />);
+    // data-cid tags each node with its source conversation so None-mode "jump to this conversation" can
+    // scroll to it. scroll-mt keeps the target off the sticky header when jumped to.
+    out.push(
+      <div key={`n${i}`} data-cid={n.cid || undefined} className="scroll-mt-4">
+        <ThreadNodeView node={n} fb={fb} auth={auth} customerName={customerName} customerSeed={customerSeed} />
+      </div>,
+    );
   });
   return out;
 }
@@ -1812,7 +1856,7 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
       </div>
     );
   }
-  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} human={node.human} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
+  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} human={node.human} images={node.images} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
 }
 
 /* §03 — a tool-use "behind the scenes" step: action + query params + result, expandable. Modeled on
@@ -1911,19 +1955,33 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   );
 }
 
-function MessageBubble({ side, sender, text, at, chat, human, fbNode, fb, custName, custSeed }: {
+function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb, custName, custSeed }: {
   side: "in" | "out"; sender: string; text: string; at: string;
   chat?: boolean; // website-chat message → "Web chat" tag distinguishes it from a text
   human?: boolean; // outbound turn sent by a REP during a handover (not Vini) → person avatar + "Team" tag
+  images?: string[]; // image(s) the customer/rep attached (MMS/media) — rendered inline
   fbNode?: { conversationId: string; messageIndex: number }; fb?: FbCtx;
   custName?: string; custSeed?: string; // full customer name + seed → customer avatar matches the header
 }) {
   const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span>{human && <span className="font-medium" style={{ color: C.green }}> · Team</span>} · {fmtTime(at)}{chat && <> · Web chat</>}</span>;
+  // Attached image(s). Click opens the full-size original in a new tab. (If a media URL turns out to be
+  // auth-gated the <img> would 404 → then route it through a proxy like the call-recording shim.)
+  const imgBlock = images && images.length > 0 ? (
+    <div className={`flex flex-wrap gap-1.5 ${side === "out" ? "justify-end" : "justify-start"}`}>
+      {images.map((u, k) => (
+        <a key={k} href={u} target="_blank" rel="noreferrer" className="block">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={u} alt="Attachment" loading="lazy" className="max-h-[220px] max-w-[240px] rounded-[12px] border object-cover" style={{ borderColor: C.border }} />
+        </a>
+      ))}
+    </div>
+  ) : null;
   if (side === "out") {
     const rating = fbNode && fb ? fb.map[`${fbNode.conversationId}#${fbNode.messageIndex}`] : undefined;
     return (
       <div className="group flex justify-end gap-2">
         <div className="flex max-w-[70%] flex-col items-end gap-1.5">
+          {imgBlock}
           {text && (
             // A rep's manual reply is HIGHLIGHTED — green tint + a left accent stripe — so a human message
             // stands out from Vini's (blue) at a glance.
@@ -1953,9 +2011,12 @@ function MessageBubble({ side, sender, text, at, chat, human, fbNode, fb, custNa
     <div className="flex justify-start gap-2">
       <Avatar kind="customer" name={custName || sender} seed={custSeed} />
       <div className="flex max-w-[70%] flex-col items-start gap-1.5">
-        <div className="rounded-[15px] rounded-bl-none border px-5 py-3.5 text-[12px] leading-[18px]" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
-          {text}
-        </div>
+        {imgBlock}
+        {text && (
+          <div className="rounded-[15px] rounded-bl-none border px-5 py-3.5 text-[12px] leading-[18px]" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
+            {text}
+          </div>
+        )}
         {meta}
       </div>
     </div>
