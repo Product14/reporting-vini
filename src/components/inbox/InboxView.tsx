@@ -1012,7 +1012,7 @@ function Segmented({ value, onChange, options }: { value: string; onChange: (v: 
           <button
             key={o.value}
             onClick={() => onChange(o.value)}
-            className="rounded-[12px] px-2.5 py-1 text-[12px] font-medium transition-colors lg:px-3 lg:py-1.5"
+            className="rounded-[12px] px-2.5 py-2 text-[12px] font-medium transition-colors lg:px-3 lg:py-1.5"
             style={on ? { background: C.primary, color: "#fff" } : { color: C.sub }}
           >
             {o.label}
@@ -1088,7 +1088,9 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: Inb
         borderLeft: active ? `4px solid ${C.primary}` : "4px solid transparent",
       }}
     >
-      <div className="flex items-center justify-between">
+      {/* gap-2: without it the name cluster's shrink-0 badges butted straight into the timestamp on a
+          narrow list — "…2Feb 24" with no space between them. */}
+      <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(c.customer_id || name) }}>
@@ -1585,17 +1587,21 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
         <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 items-center gap-2 lg:gap-2.5">
             {/* mobile: back to the list (single-pane on small screens) */}
+            {/* Mobile's ONLY way back to the list, and it was a 22x22 hit box. -mx-2 keeps the glyph where
+                it was while the tappable area grows to 40px. */}
             {onBack && (
-              <button onClick={onBack} title="Back to list" className="-ml-1 shrink-0 lg:hidden" style={{ color: C.sub }}>
+              <button onClick={onBack} title="Back to list" className="-mx-2 flex size-10 shrink-0 items-center justify-center lg:hidden" style={{ color: C.sub }}>
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
               </button>
             )}
             <span className="flex size-8 shrink-0 items-center justify-center rounded-full text-[14px] font-medium text-white" style={{ background: avatarColor(customer.customer_id || customer.customer_name) }}>
               {initials(customer.customer_name || phone)}
             </span>
-            <div className="flex min-w-0 flex-col gap-1.5">
+            {/* flex-1, not just min-w-0: with basis:auto this column's min-content was the un-truncated
+                name (201px), so it refused to give ground and the header row overflowed by 8px. */}
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
               <p className="truncate text-[15px] font-semibold leading-none lg:text-[16px]" style={{ color: C.dark }}>{customer.customer_name || "Unknown"}</p>
-              {phone && <a href={`tel:${phone}`} className="text-[14px] font-medium leading-none hover:underline" style={{ color: C.sub }}>{phone}</a>}
+              {phone && <a href={`tel:${phone}`} className="inline-block py-1 text-[14px] font-medium leading-none hover:underline" style={{ color: C.sub }}>{phone}</a>}
             </div>
             {lead?.temperature && <TempBadge temp={lead.temperature} />}
             {engagementStopped && (
@@ -1603,7 +1609,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
             )}
             {/* mobile: open Lead Details (right panel is hidden < lg) */}
             {onDetails && (
-              <button onClick={onDetails} title="Lead details" className="ml-auto shrink-0 lg:hidden" style={{ color: C.sub }}><IconInfo size={20} /></button>
+              <button onClick={onDetails} title="Lead details" className="-mr-2 ml-auto flex size-10 shrink-0 items-center justify-center lg:hidden" style={{ color: C.sub }}><IconInfo size={20} /></button>
             )}
           </div>
           <div className="flex items-center gap-2.5">
@@ -1923,23 +1929,25 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
     if (node.subtle) {
       return (
         <div className="flex justify-center">
-          <span className="flex items-center gap-1.5 px-2 py-0.5 text-[11px]" style={{ color: C.sub }}>
+          <span className="flex flex-wrap items-center justify-center gap-x-1.5 px-2 py-0.5 text-[11px]" style={{ color: C.sub }}>
             <span className="opacity-60">{node.emoji}</span>
-            <span className="font-medium">{node.title}</span>
+            <span className="whitespace-nowrap font-medium">{node.title}</span>
             {node.detail && <span className="opacity-80">· {node.detail}</span>}
-            <span className="opacity-70">· {node.dateOnly ? fmtDateOnly(new Date(node.t).toISOString()) : fmtTime(new Date(node.t).toISOString())}</span>
+            <span className="whitespace-nowrap opacity-70">· {node.dateOnly ? fmtDateOnly(new Date(node.t).toISOString()) : fmtTime(new Date(node.t).toISOString())}</span>
           </span>
         </div>
       );
     }
-    // Lead-journey milestone pill, interleaved in the chat.
+    /* Lead-journey milestone pill, interleaved in the chat. flex-wrap + nowrap on the atoms: as a rigid
+     * one-line flex row on a phone the children got squeezed and broke MID-LABEL — "Lead created" split
+     * into "Lead / created" and the stamp into "3:05 / PM". Now the pill wraps between atoms instead. */
     return (
       <div className="flex justify-center">
-        <span className="flex items-center gap-2 rounded-[15px] px-5 py-1.5 text-[12px]" style={{ background: EVENT_GRADIENT }}>
+        <span className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 rounded-[15px] px-3.5 py-1.5 text-[12px] lg:px-5" style={{ background: EVENT_GRADIENT }}>
           <span className="text-[11px]">{node.emoji}</span>
-          <span className="font-semibold" style={{ color: C.dark }}>{node.title}</span>
+          <span className="whitespace-nowrap font-semibold" style={{ color: C.dark }}>{node.title}</span>
           {node.detail && <span style={{ color: C.dark }}>{node.detail}</span>}
-          <span style={{ color: C.sub }}>{fmtTime(new Date(node.t).toISOString())}</span>
+          <span className="whitespace-nowrap" style={{ color: C.sub }}>{fmtTime(new Date(node.t).toISOString())}</span>
         </span>
       </div>
     );
@@ -1969,7 +1977,7 @@ function ToolStepCard({ node }: { node: Extract<ThreadNode, { kind: "toolstep" }
     (node.args.length ? node.args.map((a) => a.v).join(" · ") : "");
   return (
     <div className="flex justify-end px-0.5">
-      <div className="max-w-[90%] overflow-hidden rounded-[12px] border lg:max-w-[75%]" style={{ borderColor: `${C.primary}2e`, background: `${C.primary}08` }}>
+      <div className="min-w-0 max-w-[90%] overflow-hidden rounded-[12px] border lg:max-w-[75%]" style={{ borderColor: `${C.primary}2e`, background: `${C.primary}08` }}>
         <button onClick={() => hasDetail && setOpen((v) => !v)} className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${hasDetail ? "" : "cursor-default"}`}>
           <span className="flex size-5 shrink-0 items-center justify-center rounded-full" style={{ background: `${C.primary}1a`, color: C.primary }}><IconBolt size={11} /></span>
           <span className="text-[11px] font-semibold" style={{ color: C.dark }}>{node.label}</span>
@@ -2034,7 +2042,7 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   const statusTag = status && status !== "received" ? ` · ${status.charAt(0).toUpperCase()}${status.slice(1)}` : "";
   const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)} · Email{statusTag}</span>;
   const card = (
-    <div className={`break-words rounded-[15px] ${side === "out" ? "rounded-br-none" : "rounded-bl-none border"} px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5`}
+    <div className={`min-w-0 [overflow-wrap:anywhere] rounded-[15px] ${side === "out" ? "rounded-br-none" : "rounded-bl-none border"} px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5`}
       style={side === "out" ? { background: C.blueAccent, color: C.dark } : { borderColor: C.border, background: "#fff", color: C.dark }}>
       {subject && <p className="mb-1.5 flex items-start gap-1.5 font-semibold"><IconMail size={12} className="mt-0.5 shrink-0" /><span className="min-w-0">{subject}</span></p>}
       {text && <p className="whitespace-pre-line">{text}</p>}
@@ -2043,7 +2051,7 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   if (side === "out") {
     return (
       <div className="flex justify-end gap-2">
-        <div className="flex max-w-[86%] flex-col items-end gap-1.5 lg:max-w-[70%]">{card}<div className="flex items-center gap-2 px-0.5">{meta}</div></div>
+        <div className="flex max-w-[74%] flex-col items-end gap-1.5 lg:max-w-[70%]">{card}<div className="flex items-center gap-2 px-0.5">{meta}</div></div>
         <Avatar kind="agent" name={sender} />
       </div>
     );
@@ -2051,7 +2059,7 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   return (
     <div className="flex justify-start gap-2">
       <Avatar kind="customer" name={custName || sender} seed={custSeed} />
-      <div className="flex max-w-[86%] flex-col items-start gap-1.5 lg:max-w-[70%]">{card}{meta}</div>
+      <div className="flex max-w-[74%] flex-col items-start gap-1.5 lg:max-w-[70%]">{card}{meta}</div>
     </div>
   );
 }
@@ -2081,12 +2089,12 @@ function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb
     const rating = fbNode && fb ? fb.map[`${fbNode.conversationId}#${fbNode.messageIndex}`] : undefined;
     return (
       <div className="group flex justify-end gap-2">
-        <div className="flex max-w-[86%] flex-col items-end gap-1.5 lg:max-w-[70%]">
+        <div className="flex max-w-[74%] flex-col items-end gap-1.5 lg:max-w-[70%]">
           {imgBlock}
           {text && (
             // A rep's manual reply is HIGHLIGHTED — green tint + a left accent stripe — so a human message
             // stands out from Vini's (blue) at a glance.
-            <div className="break-words rounded-[15px] rounded-br-none px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5"
+            <div className="min-w-0 [overflow-wrap:anywhere] rounded-[15px] rounded-br-none px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5"
               style={human ? { background: "#e6f7ee", color: C.dark, boxShadow: `inset 3px 0 0 ${C.green}` } : { background: C.blueAccent, color: C.dark }}>
               {text}
             </div>
@@ -2095,9 +2103,9 @@ function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb
             {fbNode && fb && text && (
               <span className={`flex items-center gap-2 transition-opacity ${rating ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
                 <button onClick={() => fb.vote(fbNode.conversationId, fbNode.messageIndex, text, "up", chat ? "chat" : "sms")}
-                  title="Good reply" style={{ color: rating === "up" ? C.primary : C.sub }}><IconThumbUp size={13} /></button>
+                  title="Good reply" className="flex size-7 items-center justify-center" style={{ color: rating === "up" ? C.primary : C.sub }}><IconThumbUp size={13} /></button>
                 <button onClick={() => fb.openReport(fbNode.conversationId, fbNode.messageIndex, text, chat ? "chat" : "sms")}
-                  title="Report this message" style={{ color: rating === "down" ? C.red : C.sub }}><IconThumbDown size={13} /></button>
+                  title="Report this message" className="flex size-7 items-center justify-center" style={{ color: rating === "down" ? C.red : C.sub }}><IconThumbDown size={13} /></button>
               </span>
             )}
             {meta}
@@ -2111,10 +2119,10 @@ function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb
   return (
     <div className="flex justify-start gap-2">
       <Avatar kind="customer" name={custName || sender} seed={custSeed} />
-      <div className="flex max-w-[86%] flex-col items-start gap-1.5 lg:max-w-[70%]">
+      <div className="flex max-w-[74%] flex-col items-start gap-1.5 lg:max-w-[70%]">
         {imgBlock}
         {text && (
-          <div className="break-words rounded-[15px] rounded-bl-none border px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
+          <div className="min-w-0 [overflow-wrap:anywhere] rounded-[15px] rounded-bl-none border px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
             {text}
           </div>
         )}
@@ -2235,7 +2243,7 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
           {fb.openDrawer && (
             <button
               onClick={() => fb.openDrawer!({ kind: "call", title: V.title, sub: dur ? `Duration ${dur}` : undefined, agentName: cd.agentName || currentAgentName(), conversationId: rec.conversationId, callId: rec.callId, recordingUrl: recording, inlineTranscript: turns ?? undefined })}
-              className="flex shrink-0 items-center justify-center rounded-md p-1 transition-colors hover:bg-[#f2f2f4]" title="Open expanded view">
+              className="flex size-9 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-[#f2f2f4] lg:size-auto lg:p-1" title="Open expanded view">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: C.sub }}><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg>
             </button>
           )}
@@ -2261,14 +2269,14 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
               <div className="flex items-center gap-4">
                 {(["transcript", "review"] as const).map((t) => (
                   <button key={t} onClick={() => setTab(t)}
-                    className="px-1 pb-1.5 text-[12px] font-semibold transition-colors"
+                    className="px-1 pb-1.5 pt-1.5 text-[12px] font-semibold transition-colors"
                     style={tab === t ? { borderBottom: `2px solid ${C.primary}`, color: C.primary } : { color: C.sub }}>
                     {t === "transcript" ? "Transcript" : "AI Review"}
                   </button>
                 ))}
               </div>
               <button onClick={() => fb.openReport(rec.conversationId, 0, rec.callTitle || "Call", "call")}
-                className="flex items-center gap-1 pb-1.5 text-[11px] font-medium" style={{ color: rating === "down" ? C.red : C.sub }} title="Report this call">
+                className="flex items-center gap-1 pb-1.5 pt-1.5 text-[11px] font-medium" style={{ color: rating === "down" ? C.red : C.sub }} title="Report this call">
                 <IconFlag size={11} /> {rating === "down" ? "Reported" : "Report"}
               </button>
             </div>
@@ -2284,7 +2292,7 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
                     return (
                       <div key={i} className="flex gap-2.5 rounded-[8px] px-2 py-1" style={isAI ? undefined : { background: "#fff9e6" }}>
                         <span className="shrink-0 pt-0.5 text-[10px] tabular-nums" style={{ color: C.sub }}>{fmtSecs(t.secondsFromStart)}</span>
-                        <p className="min-w-0 break-words text-[12px] leading-[17px]" style={{ color: C.dark }}>
+                        <p className="min-w-0 [overflow-wrap:anywhere] text-[12px] leading-[17px]" style={{ color: C.dark }}>
                           <span className="font-semibold" style={{ color: isAI ? C.primary : "#0a6029" }}>{isAI ? cd.agentName || AI_AGENT.name || "Vini" : custFirst}:</span> {t.content}
                         </p>
                       </div>
@@ -2589,7 +2597,7 @@ function DrawerActionItemRow({ a, auth, onResolved }: { a: ActionItem; auth: Inb
       </div>
       {id && (
         <button onClick={resolve} disabled={busy}
-          className="mt-3 flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors enabled:hover:bg-[#f0fdf4] disabled:opacity-50"
+          className="mt-3 flex items-center gap-1 rounded-full border px-3 py-2 text-[11px] font-medium transition-colors enabled:hover:bg-[#f0fdf4] disabled:opacity-50 lg:px-2.5 lg:py-1"
           style={{ borderColor: `${C.green}55`, color: C.green }}>
           <IconCheck size={11} /> {busy ? "Resolving…" : "Mark resolved"}
         </button>
@@ -2970,7 +2978,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
         {/* header */}
         <div className="flex shrink-0 items-center justify-between gap-2 px-5 pb-2 pt-5">
           <h2 className="truncate text-[15px] font-semibold lg:text-[16px]" style={{ color: C.dark }}>{customer.customer_name ? `${customer.customer_name} · Lead Details` : "Lead Details"}</h2>
-          <button onClick={onClose} className="shrink-0 text-[20px] leading-none" style={{ color: C.dark }}>×</button>
+          <button onClick={onClose} title="Close" className="-mr-2 flex size-10 shrink-0 items-center justify-center text-[20px] leading-none" style={{ color: C.dark }}>×</button>
         </div>
         {/* tabs */}
         <div className="flex shrink-0 px-1">
