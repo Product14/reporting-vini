@@ -1156,10 +1156,10 @@ function deriveHandover(conv: ConversationsV2 | null, on: boolean): HandoverStat
   };
 }
 
-// Image URLs a customer (or rep) attached to a message (MMS / chat upload). The exact v2 media field is
-// unconfirmed on UAT (no MMS seen yet), so look DEFENSIVELY across the likely shapes + any image URL in the
-// text. NB: if the real URL turns out to be auth-gated (e.g. a raw Twilio media URL), it'll need the same
-// CORS/auth proxy the call recording uses — revisit once a real media message exists.
+// Image URLs a customer attached (MMS / chat upload). CONFIRMED UAT shape: a media message is role:"user"
+// with content = a JSON envelope {text:"", media:"https://…s3….png", contentType:"image/png"} — the URL is
+// a public S3 object (loads directly in <img>, no auth). We read content.media precisely, plus a few
+// defensive fallbacks (top-level fields / any image URL in the text) in case other shapes appear.
 const IMG_URL_RE = /https?:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|gif|webp|heic)(?:\?[^\s"'<>]*)?/gi;
 function messageImages(m: SmsMessage): string[] {
   const out: string[] = [];
@@ -1172,6 +1172,14 @@ function messageImages(m: SmsMessage): string[] {
   }
   for (const k of Object.keys(any)) if (/^mediaurl\d+$/i.test(k)) add(any[k]); // Twilio-style mediaUrl0, mediaUrl1…
   const c = typeof m.content === "string" ? m.content : "";
+  // The customer MMS envelope: {text, media, contentType}. Only surface it when it's an image.
+  if (c.trim().startsWith("{")) {
+    try {
+      const j = JSON.parse(c) as { media?: unknown; mediaUrl?: unknown; contentType?: unknown };
+      const ct = typeof j.contentType === "string" ? j.contentType : "";
+      if (!ct || /^image\//i.test(ct)) { add(j.media); add(j.mediaUrl); }
+    } catch { /* not JSON */ }
+  }
   for (const mt of c.matchAll(IMG_URL_RE)) out.push(mt[0]);
   return Array.from(new Set(out));
 }
