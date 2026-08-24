@@ -1177,13 +1177,21 @@ function messageImages(m: SmsMessage): string[] {
   }
   for (const k of Object.keys(any)) if (/^mediaurl\d+$/i.test(k)) add(any[k]); // Twilio-style mediaUrl0, mediaUrl1…
   const c = typeof m.content === "string" ? m.content : "";
-  // The customer MMS envelope: {text, media, contentType}. Only surface it when it's an image.
+  // The customer MMS envelope: {text, media, contentType, mediaWithExpiration}. `media` and
+  // `mediaWithExpiration` are the SAME image (plain public URL vs a presigned copy) — take exactly ONE
+  // (prefer the plain, non-expiring one) so a single image isn't rendered twice. When we've handled a
+  // structured envelope we DON'T also regex-scan it (that's what double-counted the presigned URL).
   if (c.trim().startsWith("{")) {
     try {
-      const j = JSON.parse(c) as { media?: unknown; mediaUrl?: unknown; contentType?: unknown };
+      const j = JSON.parse(c) as { media?: unknown; mediaUrl?: unknown; mediaWithExpiration?: unknown; contentType?: unknown };
       const ct = typeof j.contentType === "string" ? j.contentType : "";
-      if (!ct || /^image\//i.test(ct)) { add(j.media); add(j.mediaUrl); }
-    } catch { /* not JSON */ }
+      if (!ct || /^image\//i.test(ct)) {
+        if (typeof j.media === "string") add(j.media);
+        else if (typeof j.mediaUrl === "string") add(j.mediaUrl);
+        else add(j.mediaWithExpiration);
+      }
+      return Array.from(new Set(out));
+    } catch { /* not JSON — fall through to the plain-text URL scan */ }
   }
   for (const mt of c.matchAll(IMG_URL_RE)) out.push(mt[0]);
   return Array.from(new Set(out));
@@ -1224,7 +1232,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   // Re-pull just the conversations (not persona/feedback) — used after a handover claim/hand-back/send so
   // the thread reflects the new phase without wiping the in-session thumbs (fbMap) or summary.
   const reloadConv = useCallback(() => {
-    fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((data) => setConv(data));
+    fetchInboxConversations(auth, customer.customer_id, { limit: 50 }).then((data) => setConv(data));
   }, [auth, customer.customer_id]);
 
   useEffect(() => {
@@ -1244,7 +1252,8 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     // NOTE: prior feedback state is NOT pre-loaded — the new feedbacks/entries API has no per-conversation
     // GET (it's team-scoped for reporting), and pre-fetching per conversation was also a needless per-open
     // cost. Thumb state is in-session/optimistic (fbMap), and each vote POSTs to the reporting endpoint.
-    fetchInboxConversations(auth, customer.customer_id, { limit: 30 }).then((data) => {
+    // limit 50 (not 30) so a conversation clicked from the None-mode list is loaded and can be scrolled to.
+    fetchInboxConversations(auth, customer.customer_id, { limit: 50 }).then((data) => {
       if (on) setConv(data);
     });
     return () => { on = false; };
@@ -1437,9 +1446,15 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   useEffect(() => {
     if (focusConvId) {
       if (scrolledFocus.current === focusConvId) return;
-      const el = document.querySelector(`[data-cid="${focusConvId}"]`);
-      if (el) { el.scrollIntoView({ block: "start" }); scrolledFocus.current = focusConvId; }
-      return;
+      const jump = () => document.querySelector(`[data-cid="${CSS.escape(focusConvId)}"]`)?.scrollIntoView({ block: "start" });
+      const el = document.querySelector(`[data-cid="${CSS.escape(focusConvId)}"]`);
+      if (!el) return; // nodes not rendered yet — retry when nodes.length changes
+      scrolledFocus.current = focusConvId;
+      jump();
+      // Re-assert the jump as late content (images, call waveforms) loads and shifts layout — otherwise the
+      // target drifts off-screen right after the first scroll. Bounded so it can't fight the user for long.
+      const timers = [120, 400, 900, 1600].map((ms) => setTimeout(jump, ms));
+      return () => timers.forEach(clearTimeout);
     }
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [nodes.length, focusConvId]);
