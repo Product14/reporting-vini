@@ -407,6 +407,11 @@ function Inbox() {
   const handoverOn = spyneEnv === "uat";
   const [needsAttention, setNeedsAttention] = useState(false);
   const [needsCount, setNeedsCount] = useState(0);
+  // Customers already being handled (a rep claimed them → phase ACTIVE). The lead-level PENDING flag the
+  // Needs-Attention filter uses can LAG/STICK on the backend (a customer shows in both PENDING and ACTIVE),
+  // so we exclude anyone ACTIVE — "Needs Attention" = flagged AND not yet taken over.
+  const [activeCustomerIds, setActiveCustomerIds] = useState<Set<string>>(new Set());
+  const [needsRefreshKey, setNeedsRefreshKey] = useState(0); // bumped after a claim/hand-back → refresh count now
   const pageRef = useRef(1);
   const [loadingMore, setLoadingMore] = useState(false);
   const listBottomRef = useRef<HTMLDivElement | null>(null);
@@ -568,12 +573,24 @@ function Inbox() {
   useEffect(() => {
     if (!handoverOn || !teamId || !enterpriseId) return;
     let on = true;
-    const tick = () => fetchInboxCustomers(auth, { humanTransferPhase: "PENDING", limit: 1 }).then((p) => { if (on) setNeedsCount(p.pagination.totalCustomers); });
+    const tick = async () => {
+      // Fetch flagged (PENDING) + being-handled (ACTIVE) customers; Needs Attention = PENDING not already ACTIVE.
+      const [pend, act] = await Promise.all([
+        fetchInboxCustomers(auth, { humanTransferPhase: "PENDING", limit: 100 }),
+        fetchInboxCustomers(auth, { humanTransferPhase: "ACTIVE", limit: 100 }),
+      ]);
+      if (!on) return;
+      const activeSet = new Set(act.customers.map((c) => c.customer_id));
+      setActiveCustomerIds(activeSet);
+      const net = pend.customers.filter((c) => !activeSet.has(c.customer_id)).length;
+      // Exact when the pending queue fits one page (it's meant to be small); else fall back to the raw total.
+      setNeedsCount(pend.pagination.totalCustomers > pend.customers.length ? pend.pagination.totalCustomers : net);
+    };
     tick();
     const id = setInterval(tick, 10000);
     return () => { on = false; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handoverOn, teamId, enterpriseId, spyneToken, spyneEnv, serviceType]);
+  }, [handoverOn, teamId, enterpriseId, spyneToken, spyneEnv, serviceType, needsRefreshKey]);
 
   // Append the next page (infinite scroll). Deduped by customer_id (page boundaries can repeat a row).
   const loadMore = useCallback(() => {
@@ -682,7 +699,9 @@ function Inbox() {
   const totalUnread = Math.max(0, (counts?.unread ?? pageInfo?.unreadCount ?? 0) - readInSession);
   // On the Unread tab, drop conversations read this session so they leave the list on open (there's no
   // read-state write API, so the server still returns them until a refetch — filter them out here).
-  const displayCustomers = tab === "unread" ? customers.filter((c) => !readIds.has(c.customer_id)) : customers;
+  const displayCustomers = needsAttention
+    ? customers.filter((c) => !activeCustomerIds.has(c.customer_id)) // drop anyone already taken over (ACTIVE)
+    : tab === "unread" ? customers.filter((c) => !readIds.has(c.customer_id)) : customers;
   // Active list has zero results (a channel/filter with no conversations). Once loaded, the middle pane
   // shows a "No conversation found" state instead of the previously-opened thread (RETCONVAI batch-3 #1).
   const listEmpty = groupBy === "none" ? (!teamLoadingList && teamConvs.length === 0) : (!loadingList && displayCustomers.length === 0);
@@ -920,6 +939,7 @@ function Inbox() {
               auth={auth}
               customer={selected}
               focusConvId={focusConvId}
+              onHandoverChanged={() => setNeedsRefreshKey((k) => k + 1)}
               onBack={() => setSelected(null)}
               onDetails={() => setDetailsOpen(true)}
             />
@@ -1156,7 +1176,7 @@ function messageImages(m: SmsMessage): string[] {
   return Array.from(new Set(out));
 }
 
-function ThreadPane({ auth, customer, focusConvId, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; focusConvId?: string | null; onBack?: () => void; onDetails?: () => void }) {
+function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; focusConvId?: string | null; onHandoverChanged?: () => void; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   // SMS human handover (RETCONVAI-2997) — UAT-only. `hoOverride` optimistically holds the post-toggle phase
   // until the re-fetched v2 (derivedHandover) catches up (writes lag the read ~1s).
@@ -1458,7 +1478,8 @@ function ThreadPane({ auth, customer, focusConvId, onBack, onDetails }: { auth: 
     if (res.phase) setHoOverride({ ...handoverState, phase: res.phase, conversationId: res.conversationId ?? actOnConvId });
     reloadConv();
     setTimeout(() => reloadConv(), 2000);
-  }, [auth, actOnConvId, handoverState, reloadConv]);
+    onHandoverChanged?.(); // claim/hand-back changes the Needs-Attention set → refresh the badge now
+  }, [auth, actOnConvId, handoverState, reloadConv, onHandoverChanged]);
   const sendManual = useCallback(async () => {
     if (!handoverConvId) return;
     const body = draft.trim();
