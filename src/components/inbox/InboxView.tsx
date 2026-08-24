@@ -1135,10 +1135,15 @@ const EVENT_GRADIENT =
 // carries humanTransferDetails per conversation. Prefer ACTIVE (a rep is on it), else the newest PENDING by
 // aiFlaggedAt. Reading from v2 (not v1) means the banner reflects exactly the data the thread shows and is
 // naturally serviceType-scoped (a service handover appears in the service space, not sales). UAT-only via `on`.
-function deriveHandover(conv: ConversationsV2 | null, on: boolean): HandoverState {
+function deriveHandover(conv: ConversationsV2 | null, on: boolean, dir: "all" | "in" | "out"): HandoverState {
   if (!on || !conv) return { phase: "NONE" };
+  // Scope to the direction being viewed so inbound and outbound handovers are handled SEPARATELY — an
+  // Inbound view takes over the inbound conversation, Outbound the outbound one (RETCONVAI). This also
+  // means at most one actionable handover per view, so the footer never stacks multiple take-over prompts.
   const flagged = (conv.conversations ?? []).filter(
-    (c) => (c.type === "sms" || c.type === "chat") && (c.humanTransferDetails?.phase === "PENDING" || c.humanTransferDetails?.phase === "ACTIVE"),
+    (c) => (c.type === "sms" || c.type === "chat")
+      && (dir === "all" || convDirection(c) === dir)
+      && (c.humanTransferDetails?.phase === "PENDING" || c.humanTransferDetails?.phase === "ACTIVE"),
   );
   const active = flagged.find((c) => c.humanTransferDetails?.phase === "ACTIVE");
   const pending = flagged
@@ -1451,7 +1456,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   // humanTransferDetails). `hoOverride` briefly overrides the derived phase after a toggle, until the
   // re-fetched conv catches up (the write lags the read ~1s).
   const handoverOn = auth.spyneEnv === "uat";
-  const derivedHandover = useMemo(() => deriveHandover(conv, handoverOn), [conv, handoverOn]);
+  const derivedHandover = useMemo(() => deriveHandover(conv, handoverOn, dir), [conv, handoverOn, dir]);
   const handoverState = hoOverride ?? derivedHandover;
   const handoverPhase = handoverState.phase;
   const handoverConvId = handoverState.conversationId; // the flagged/claimed conv (send + hand-back target)
@@ -1462,9 +1467,9 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   const latestSmsConvId = useMemo(() => {
     if (!handoverOn) return undefined;
     return (conv?.conversations ?? [])
-      .filter((c) => c.type === "sms" || c.type === "chat")
+      .filter((c) => (c.type === "sms" || c.type === "chat") && (dir === "all" || convDirection(c) === dir))
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0]?.conversationId;
-  }, [conv, handoverOn]);
+  }, [conv, handoverOn, dir]);
   const actOnConvId = handoverConvId ?? latestSmsConvId;
   // Drop the optimistic override the moment the fetched (server) state actually changes phase/target —
   // keyed on primitives so a lagged re-fetch (same phase) doesn't clear it prematurely.
@@ -1492,10 +1497,10 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     if (!handoverConvId) return;
     const body = draft.trim();
     if (!body) return;
-    setHoBusy(true); setHoErr(""); setSendState("sending");
+    setHoBusy(true); setSendState("sending"); // send status shows under the sent message, not here (hoErr is toggle-only)
     const res = await postHandoverSend(auth, handoverConvId, body);
     setHoBusy(false);
-    if (!res.ok) { setHoErr(res.error || "Couldn't send — try again."); setSendState("failed"); return; }
+    if (!res.ok) { setSendState("failed"); return; }
     setDraft(""); setSendState("sent");
     reloadConv();
     setTimeout(() => reloadConv(), 2000); // the sent SMS lands in the v2 thread a beat later
@@ -1578,6 +1583,15 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
         ) : (
           <div className="mx-auto flex w-full max-w-[760px] flex-col gap-6">
             {renderWithDividers(nodes, fbCtx, auth, customer.customer_name || "", customer.customer_id || customer.customer_name || "")}
+            {/* SMS delivery status — shown BELOW the sent message (not under the composer). v2 has no
+                per-message delivered/received status yet, so this reflects the send call. */}
+            {handoverOn && sendState !== "idle" && (
+              <div className="-mt-4 flex justify-end px-0.5">
+                <span className="text-[11px] font-medium" style={{ color: sendState === "failed" ? C.red : sendState === "sent" ? C.green : C.sub }}>
+                  {sendState === "sending" ? "Sending…" : sendState === "sent" ? "✓ Sent" : "⚠ Failed to send — tap Send to retry"}
+                </span>
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
         )}
@@ -1634,15 +1648,8 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
                 {sendState === "sending" ? "Sending…" : "Send"}
               </button>
             </div>
-            {/* Send delivery feedback (v2 exposes no per-message delivered/received status yet, so this
-                reflects the send call: sending → sent/failed). */}
-            {hoErr ? (
-              <p className="text-[11px]" style={{ color: C.red }}>⚠ {hoErr}</p>
-            ) : sendState === "sent" ? (
-              <p className="text-[11px]" style={{ color: C.green }}>✓ Sent</p>
-            ) : sendState === "sending" ? (
-              <p className="text-[11px]" style={{ color: C.sub }}>Sending…</p>
-            ) : null}
+            {/* toggle/hand-back errors surface here; the SMS delivery status is shown under the sent message. */}
+            {hoErr && <p className="text-[11px]" style={{ color: C.red }}>⚠ {hoErr}</p>}
           </div>
         </div>
       ) : (
