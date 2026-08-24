@@ -720,21 +720,25 @@ function Inbox() {
 
   if (!teamId || !enterpriseId) return <NoScope hasTeam={!!teamId} />;
 
+  // overflow-x-clip, not -hidden: `hidden` on one axis promotes the other to `auto`, which would make this
+  // a second vertical scroll container on top of the panes' own. `clip` just clips the stray overflow.
   return (
-    <div className="flex h-[100dvh] flex-col bg-white" style={{ color: C.dark }}>
-      {/* Header bar */}
-      <header className="flex shrink-0 items-center justify-between gap-2 border-b bg-white px-4 py-3 lg:px-8" style={{ borderColor: C.border }}>
-        <div className="flex items-center gap-2.5">
-          <span className="flex size-7 items-center justify-center rounded-lg text-white" style={{ background: C.primary }}>
+    <div className="flex h-[100dvh] flex-col overflow-x-clip bg-white" style={{ color: C.dark }}>
+      {/* Header bar. Mobile stacks it: the title claims row 1, the controls wrap onto row 2 (they total
+          ~330px on their own, so keeping them on one line with the title forced the whole page to scroll
+          sideways). Everything that can't shrink is shrink-0; the title truncates instead of pushing. */}
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-2 border-b bg-white px-4 py-2.5 lg:flex-nowrap lg:px-8 lg:py-3" style={{ borderColor: C.border }}>
+        <div className="flex min-w-0 flex-1 items-center gap-2 lg:gap-2.5">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg text-white" style={{ background: C.primary }}>
             <IconList size={16} />
           </span>
-          <h1 className="text-[16px] font-semibold" style={{ color: C.dark }}>Conversations</h1>
+          <h1 className="truncate text-[15px] font-semibold lg:text-[16px]" style={{ color: C.dark }}>Conversations</h1>
           {/* Department SPACE from the ?serviceType= embed param — this iframe is scoped to Sales or Service. */}
           {serviceTypeExplicit ? (
-            <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: C.primaryAccent, color: C.primary }}>{serviceType}</span>
+            <span className="ml-1 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: C.primaryAccent, color: C.primary }}>{serviceType}</span>
           ) : (
             // Department wasn't passed by the console → let the operator choose (fallback for RETCONVAI-4580).
-            <span className="ml-1 inline-flex" title="Department wasn't set by the console — choose it here">
+            <span className="ml-1 inline-flex shrink-0" title="Department wasn't set by the console — choose it here">
               <Segmented
                 value={serviceType}
                 onChange={(v) => pickDept(v as "sales" | "service")}
@@ -745,7 +749,7 @@ function Inbox() {
           {account?.name && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
           {tz && <span className="ml-1 hidden text-[11px] lg:inline" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
-        <div className="relative flex flex-wrap items-center justify-end gap-2.5 lg:gap-3.5">
+        <div className="relative flex w-full flex-wrap items-center justify-start gap-2 lg:w-auto lg:flex-nowrap lg:justify-end lg:gap-3.5">
           {/* Group by: one row per CUSTOMER (merged thread) vs NONE (flat, one row per conversation). */}
           <div className="flex items-center gap-1.5">
             <span className="hidden text-[11px] font-medium lg:inline" style={{ color: C.sub }}>Group by</span>
@@ -771,7 +775,7 @@ function Inbox() {
           )}
           <button
             onClick={() => exportCsv(customers)}
-            className="flex items-center gap-2 rounded-[15px] border px-4 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8] lg:px-6"
+            className="flex shrink-0 items-center gap-1.5 rounded-[15px] border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8] lg:gap-2 lg:px-6 lg:py-2"
             style={{ borderColor: C.border, color: C.dark }}
           >
             <IconDownload size={13} /> CSV
@@ -782,7 +786,7 @@ function Inbox() {
             <button
               data-filters-toggle
               onClick={() => setFiltersOpen((v) => !v)}
-              className="flex items-center gap-2 rounded-[15px] border px-6 py-2 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8]"
+              className="flex shrink-0 items-center gap-1.5 rounded-[15px] border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[#f7f7f8] lg:gap-2 lg:px-6 lg:py-2"
               style={{ borderColor: filtersOpen ? C.primary : C.border, color: filtersOpen ? C.primary : C.dark }}
             >
               <IconFilter size={13} /> Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}
@@ -849,7 +853,8 @@ function Inbox() {
               </div>
             )}
           </div>
-          <div className="flex shrink-0" style={{ borderColor: C.border }}>
+          {/* Tab strip scrolls horizontally on very narrow phones instead of spilling out of the pane. */}
+          <div className="flex shrink-0 overflow-x-auto" style={{ borderColor: C.border }}>
             {/* In None mode the flat endpoint returns a total but no unread count, so Unread shows no number. */}
             <TabBtn active={tab === "all" && !needsAttention} onClick={() => { setNeedsAttention(false); setTab("all"); }} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
             <TabBtn active={tab === "unread" && !needsAttention} onClick={() => { setNeedsAttention(false); setTab("unread"); }} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
@@ -859,7 +864,7 @@ function Inbox() {
               <button
                 onClick={() => setNeedsAttention((v) => !v)}
                 title="Conversations Vini flagged for a rep"
-                className="flex items-center gap-1.5 border-b px-3 py-2.5 text-[12px] transition-colors"
+                className="flex shrink-0 items-center gap-1.5 border-b px-2.5 py-2.5 text-[12px] transition-colors lg:px-3"
                 style={{
                   borderColor: needsAttention ? C.orange : C.border,
                   borderBottomWidth: needsAttention ? 2 : 1,
@@ -868,7 +873,9 @@ function Inbox() {
                   opacity: needsCount > 0 || needsAttention ? 1 : 0.65,
                 }}
               >
-                <span>⚑ Needs Attention</span>
+                {/* Shortened below lg — the full label pushed the tab strip past a phone's width. */}
+                <span className="lg:hidden">⚑ Attention</span>
+                <span className="hidden lg:inline">⚑ Needs Attention</span>
                 <span
                   className="inline-flex min-w-[18px] items-center justify-center rounded-full px-1.5 text-[11px] font-semibold"
                   style={needsCount > 0 ? { background: C.orange, color: "#fff" } : { background: "#eef1f4", color: C.sub }}
@@ -973,7 +980,7 @@ function TabBtn({ active, onClick, label }: { active: boolean; onClick: () => vo
   return (
     <button
       onClick={onClick}
-      className="flex w-[120px] items-center justify-center border-b px-4 py-2.5 text-[12px] transition-colors"
+      className="flex w-[96px] shrink-0 items-center justify-center border-b px-2 py-2.5 text-[12px] transition-colors lg:w-[120px] lg:px-4"
       style={{
         borderColor: active ? C.primary : C.border,
         borderBottomWidth: active ? 2 : 1,
@@ -989,14 +996,14 @@ function TabBtn({ active, onClick, label }: { active: boolean; onClick: () => vo
 // Compact pill segmented control (Group by · channel filter).
 function Segmented({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
   return (
-    <div className="flex items-center rounded-[15px] border p-0.5" style={{ borderColor: C.border }}>
+    <div className="flex shrink-0 items-center rounded-[15px] border p-0.5" style={{ borderColor: C.border }}>
       {options.map((o) => {
         const on = o.value === value;
         return (
           <button
             key={o.value}
             onClick={() => onChange(o.value)}
-            className="rounded-[12px] px-3 py-1.5 text-[12px] font-medium transition-colors"
+            className="rounded-[12px] px-2.5 py-1 text-[12px] font-medium transition-colors lg:px-3 lg:py-1.5"
             style={on ? { background: C.primary, color: "#fff" } : { color: C.sub }}
           >
             {o.label}
@@ -1565,9 +1572,9 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   return (
     <>
       {/* header */}
-      <div className="shrink-0 border-b bg-white px-5 py-5 shadow-[0px_1px_1px_rgba(0,0,0,0.06)]" style={{ borderColor: C.border }}>
+      <div className="shrink-0 border-b bg-white px-4 py-3.5 shadow-[0px_1px_1px_rgba(0,0,0,0.06)] lg:px-5 lg:py-5" style={{ borderColor: C.border }}>
         <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex min-w-0 items-center gap-2 lg:gap-2.5">
             {/* mobile: back to the list (single-pane on small screens) */}
             {onBack && (
               <button onClick={onBack} title="Back to list" className="-ml-1 shrink-0 lg:hidden" style={{ color: C.sub }}>
@@ -1578,7 +1585,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
               {initials(customer.customer_name || phone)}
             </span>
             <div className="flex min-w-0 flex-col gap-1.5">
-              <p className="truncate text-[16px] font-semibold leading-none" style={{ color: C.dark }}>{customer.customer_name || "Unknown"}</p>
+              <p className="truncate text-[15px] font-semibold leading-none lg:text-[16px]" style={{ color: C.dark }}>{customer.customer_name || "Unknown"}</p>
               {phone && <a href={`tel:${phone}`} className="text-[14px] font-medium leading-none hover:underline" style={{ color: C.sub }}>{phone}</a>}
             </div>
             {lead?.temperature && <TempBadge temp={lead.temperature} />}
@@ -1611,7 +1618,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
 
       {/* sticky summary — stays pinned below the header while the conversation scrolls */}
       {summary && (
-        <div className="shrink-0 border-b px-5 py-2.5" style={{ borderColor: `${C.primary}33`, background: C.primaryAccent }}>
+        <div className="shrink-0 border-b px-4 py-2.5 lg:px-5" style={{ borderColor: `${C.primary}33`, background: C.primaryAccent }}>
           <div className="mx-auto w-full max-w-[760px]">
             <p className="mb-0.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.primary }}>✦ Summary</p>
             <p className="line-clamp-2 text-[12px] font-medium leading-[17px]" style={{ color: C.dark }}>{summary}</p>
@@ -1620,7 +1627,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
       )}
 
       {/* body */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 lg:px-5 lg:py-5">
         {conv === null ? (
           <ThreadSkeleton />
         ) : nodes.length === 0 ? (
@@ -1702,7 +1709,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
           </div>
         </div>
       ) : (
-        <div className="flex shrink-0 items-center justify-center gap-3 border-t bg-white px-4 py-2.5 shadow-[0px_-1px_15px_rgba(0,0,0,0.04)]" style={{ borderColor: C.border }}>
+        <div className="flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t bg-white px-4 py-2.5 shadow-[0px_-1px_15px_rgba(0,0,0,0.04)]" style={{ borderColor: C.border }}>
           <p className="text-[12px]" style={{ color: C.sub }}>
             {engagementStopped
               ? "🛑 AI engagement is paused for this lead"
@@ -1760,7 +1767,7 @@ function ReportModal({ initialEmail, onClose, onSubmit }: { initialEmail: string
   const [email, setEmail] = useState(initialEmail);
   const emailOk = isEmail(email);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 lg:p-6" onClick={onClose}>
       <div className="absolute inset-0 bg-black/30" />
       <div className="animate-dropdown-in relative w-full max-w-[540px] rounded-[16px] bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2">
@@ -1818,7 +1825,7 @@ function FeedbackEmailModal({ initial, onClose, onSave }: { initial: string; onC
   const [email, setEmail] = useState(initial);
   const emailOk = isEmail(email);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 lg:p-6" onClick={onClose}>
       <div className="absolute inset-0 bg-black/30" />
       <div className="animate-dropdown-in relative w-full max-w-[440px] rounded-[16px] bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-[16px] font-semibold" style={{ color: C.dark }}>Your email</h2>
@@ -1953,7 +1960,7 @@ function ToolStepCard({ node }: { node: Extract<ThreadNode, { kind: "toolstep" }
     (node.args.length ? node.args.map((a) => a.v).join(" · ") : "");
   return (
     <div className="flex justify-end px-0.5">
-      <div className="max-w-[75%] overflow-hidden rounded-[12px] border" style={{ borderColor: `${C.primary}2e`, background: `${C.primary}08` }}>
+      <div className="max-w-[90%] overflow-hidden rounded-[12px] border lg:max-w-[75%]" style={{ borderColor: `${C.primary}2e`, background: `${C.primary}08` }}>
         <button onClick={() => hasDetail && setOpen((v) => !v)} className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${hasDetail ? "" : "cursor-default"}`}>
           <span className="flex size-5 shrink-0 items-center justify-center rounded-full" style={{ background: `${C.primary}1a`, color: C.primary }}><IconBolt size={11} /></span>
           <span className="text-[11px] font-semibold" style={{ color: C.dark }}>{node.label}</span>
@@ -2018,16 +2025,16 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   const statusTag = status && status !== "received" ? ` · ${status.charAt(0).toUpperCase()}${status.slice(1)}` : "";
   const meta = <span className="px-0.5 text-[11px]" style={{ color: C.sub }}><span className="font-medium" style={{ color: C.dark }}>{sender}</span> · {fmtTime(at)} · Email{statusTag}</span>;
   const card = (
-    <div className={`rounded-[15px] ${side === "out" ? "rounded-br-none" : "rounded-bl-none border"} px-5 py-3.5 text-[12px] leading-[18px]`}
+    <div className={`break-words rounded-[15px] ${side === "out" ? "rounded-br-none" : "rounded-bl-none border"} px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5`}
       style={side === "out" ? { background: C.blueAccent, color: C.dark } : { borderColor: C.border, background: "#fff", color: C.dark }}>
-      {subject && <p className="mb-1.5 flex items-center gap-1.5 font-semibold"><IconMail size={12} /><span>{subject}</span></p>}
+      {subject && <p className="mb-1.5 flex items-start gap-1.5 font-semibold"><IconMail size={12} className="mt-0.5 shrink-0" /><span className="min-w-0">{subject}</span></p>}
       {text && <p className="whitespace-pre-line">{text}</p>}
     </div>
   );
   if (side === "out") {
     return (
       <div className="flex justify-end gap-2">
-        <div className="flex max-w-[70%] flex-col items-end gap-1.5">{card}<div className="flex items-center gap-2 px-0.5">{meta}</div></div>
+        <div className="flex max-w-[86%] flex-col items-end gap-1.5 lg:max-w-[70%]">{card}<div className="flex items-center gap-2 px-0.5">{meta}</div></div>
         <Avatar kind="agent" name={sender} />
       </div>
     );
@@ -2035,7 +2042,7 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   return (
     <div className="flex justify-start gap-2">
       <Avatar kind="customer" name={custName || sender} seed={custSeed} />
-      <div className="flex max-w-[70%] flex-col items-start gap-1.5">{card}{meta}</div>
+      <div className="flex max-w-[86%] flex-col items-start gap-1.5 lg:max-w-[70%]">{card}{meta}</div>
     </div>
   );
 }
@@ -2065,12 +2072,12 @@ function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb
     const rating = fbNode && fb ? fb.map[`${fbNode.conversationId}#${fbNode.messageIndex}`] : undefined;
     return (
       <div className="group flex justify-end gap-2">
-        <div className="flex max-w-[70%] flex-col items-end gap-1.5">
+        <div className="flex max-w-[86%] flex-col items-end gap-1.5 lg:max-w-[70%]">
           {imgBlock}
           {text && (
             // A rep's manual reply is HIGHLIGHTED — green tint + a left accent stripe — so a human message
             // stands out from Vini's (blue) at a glance.
-            <div className="rounded-[15px] rounded-br-none px-5 py-3.5 text-[12px] leading-[18px]"
+            <div className="break-words rounded-[15px] rounded-br-none px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5"
               style={human ? { background: "#e6f7ee", color: C.dark, boxShadow: `inset 3px 0 0 ${C.green}` } : { background: C.blueAccent, color: C.dark }}>
               {text}
             </div>
@@ -2095,10 +2102,10 @@ function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb
   return (
     <div className="flex justify-start gap-2">
       <Avatar kind="customer" name={custName || sender} seed={custSeed} />
-      <div className="flex max-w-[70%] flex-col items-start gap-1.5">
+      <div className="flex max-w-[86%] flex-col items-start gap-1.5 lg:max-w-[70%]">
         {imgBlock}
         {text && (
-          <div className="rounded-[15px] rounded-bl-none border px-5 py-3.5 text-[12px] leading-[18px]" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
+          <div className="break-words rounded-[15px] rounded-bl-none border px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
             {text}
           </div>
         )}
@@ -2195,9 +2202,10 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
   }, [open]);
 
   return (
-    <div className="w-[90%] max-w-[560px]">
+    <div className="w-full max-w-[560px] lg:w-[90%]">
       <div className="overflow-hidden rounded-[14px] border bg-white" style={{ borderColor: C.border }}>
-        <div className="flex items-center gap-3 px-3.5 py-3">
+        {/* Tighter gaps below lg — six controls on one row left the title ~40px on a phone. */}
+        <div className="flex items-center gap-1.5 px-2.5 py-3 lg:gap-3 lg:px-3.5">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full" style={{ background: V.bg, color: V.fg }}><V.Icon size={15} /></span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-semibold" style={{ color: C.dark }}>{V.title}</p>
@@ -2262,7 +2270,7 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
                     return (
                       <div key={i} className="flex gap-2.5 rounded-[8px] px-2 py-1" style={isAI ? undefined : { background: "#fff9e6" }}>
                         <span className="shrink-0 pt-0.5 text-[10px] tabular-nums" style={{ color: C.sub }}>{fmtSecs(t.secondsFromStart)}</span>
-                        <p className="text-[12px] leading-[17px]" style={{ color: C.dark }}>
+                        <p className="min-w-0 break-words text-[12px] leading-[17px]" style={{ color: C.dark }}>
                           <span className="font-semibold" style={{ color: isAI ? C.primary : "#0a6029" }}>{isAI ? cd.agentName || AI_AGENT.name || "Vini" : custFirst}:</span> {t.content}
                         </p>
                       </div>
@@ -2943,11 +2951,12 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
   return (
     <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
       <div className="absolute inset-0 bg-black/20" />
-      <div className="relative flex h-full w-[440px] flex-col border-l bg-white shadow-xl" style={{ borderColor: C.border }} onClick={(e) => e.stopPropagation()}>
+      {/* Full-width on a phone (a hard 440px hung off the side of the screen), capped on desktop. */}
+      <div className="relative flex h-full w-full max-w-[440px] flex-col border-l bg-white shadow-xl" style={{ borderColor: C.border }} onClick={(e) => e.stopPropagation()}>
         {/* header */}
-        <div className="flex shrink-0 items-center justify-between px-5 pb-2 pt-5">
-          <h2 className="text-[16px] font-semibold" style={{ color: C.dark }}>{customer.customer_name ? `${customer.customer_name} · Lead Details` : "Lead Details"}</h2>
-          <button onClick={onClose} className="text-[20px] leading-none" style={{ color: C.dark }}>×</button>
+        <div className="flex shrink-0 items-center justify-between gap-2 px-5 pb-2 pt-5">
+          <h2 className="truncate text-[15px] font-semibold lg:text-[16px]" style={{ color: C.dark }}>{customer.customer_name ? `${customer.customer_name} · Lead Details` : "Lead Details"}</h2>
+          <button onClick={onClose} className="shrink-0 text-[20px] leading-none" style={{ color: C.dark }}>×</button>
         </div>
         {/* tabs */}
         <div className="flex shrink-0 px-1">
@@ -2955,7 +2964,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
             const on = tab === t.id;
             return (
               <button key={t.id} onClick={() => setTab(t.id)}
-                className="flex flex-1 items-center justify-center gap-1.5 border-b px-3 py-2.5 text-[12px] transition-colors"
+                className="flex flex-1 items-center justify-center gap-1 whitespace-nowrap border-b px-1.5 py-2.5 text-[11px] transition-colors lg:gap-1.5 lg:px-3 lg:text-[12px]"
                 style={{ borderColor: on ? C.primary : C.border, borderBottomWidth: on ? 2 : 1, color: on ? C.primary : C.sub, fontWeight: on ? 600 : 500 }}>
                 {t.label}
                 {t.count ? <span className="flex size-[14px] items-center justify-center rounded-full text-[9px] font-medium text-white" style={{ background: C.red }}>{t.count}</span> : null}
@@ -2965,7 +2974,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
         </div>
 
         {/* body */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 lg:px-5 lg:py-5">
           {conv === null && persona === "loading" ? (
             <div className="space-y-3">{[0, 1, 2].map((i) => <div key={i} className="h-16 animate-pulse rounded-xl bg-[#eef0f3]" />)}</div>
           ) : tab === "activity" ? (

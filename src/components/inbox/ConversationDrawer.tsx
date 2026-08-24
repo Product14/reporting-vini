@@ -106,8 +106,8 @@ export function ConversationDrawer({ auth, target, onClose }: { auth: InboxAuth;
   return createPortal(
     <>
       <div onClick={onClose} className="fixed inset-0 z-[199]" style={{ background: "rgba(15,23,42,0.45)" }} />
-      <div className="fixed right-0 top-0 z-[200] flex h-screen w-[500px] max-w-[96vw] flex-col bg-white shadow-2xl" role="dialog" aria-modal="true" aria-label="Call detail">
-        <div className="flex-none border-b border-gray-100 bg-white px-6 pb-5 pt-4">
+      <div className="fixed right-0 top-0 z-[200] flex h-[100dvh] w-[500px] max-w-[96vw] flex-col bg-white shadow-2xl" role="dialog" aria-modal="true" aria-label="Call detail">
+        <div className="flex-none border-b border-gray-100 bg-white px-4 pb-4 pt-4 lg:px-6 lg:pb-5">
           <div className="flex items-start gap-3">
             <div className="flex size-10 flex-shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500"><Svg d={D_PHONE} size={20} stroke /></div>
             <div className="min-w-0 flex-1">
@@ -118,11 +118,11 @@ export function ConversationDrawer({ auth, target, onClose }: { auth: InboxAuth;
           </div>
         </div>
 
-        <div className="flex-none border-b border-gray-100 bg-white px-6 py-4">
+        <div className="flex-none border-b border-gray-100 bg-white px-4 py-4 lg:px-6">
           <WaveformPlayer ref={waveRef} url={recordingUrl || ""} onTimeUpdate={setAudioTime} onPlay={() => setAudioPlaying(true)} onPause={() => setAudioPlaying(false)} />
         </div>
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto bg-gray-50/50 px-6 py-6">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto bg-gray-50/50 px-4 py-5 lg:px-6 lg:py-6">
           <h3 className="mb-4 flex items-center gap-2 text-sm font-medium text-gray-900"><Svg d={D_FILE} size={16} stroke className="text-gray-400" /> Transcript</h3>
           {turns === null ? (
             <p className="py-8 text-center text-sm text-gray-500">Loading…</p>
@@ -148,7 +148,7 @@ export function ConversationDrawer({ auth, target, onClose }: { auth: InboxAuth;
                             <span className={`font-semibold ${active ? "text-[#4600f2]" : "text-gray-900"}`}>{m.role === "ai" ? agentName : "Customer"}</span>
                             {m.atSec != null && <span className={`text-xs hover:underline ${active ? "font-medium text-[#4600f2]" : "text-[#4600f2]"}`}>{fmtClock(m.atSec)}</span>}
                           </div>
-                          <div className={`text-[13px] leading-relaxed ${active ? "text-gray-800" : "text-gray-700"}`}>{m.text}</div>
+                          <div className={`text-[13px] leading-relaxed break-words ${active ? "text-gray-800" : "text-gray-700"}`}>{m.text}</div>
                         </div>
                       </div>
                     </div>
