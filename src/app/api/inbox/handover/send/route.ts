@@ -9,6 +9,7 @@
  * Auth REQUIRED (token team_id must equal the requested team_id).
  */
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { handoverEnabled } from "@/lib/inbox/handover";
 import { spyneServiceSend, svcIdOk } from "@/lib/spyne/conversationApi";
 
 export const runtime = "nodejs";
@@ -19,6 +20,9 @@ export async function POST(request: Request): Promise<Response> {
   const teamId = (searchParams.get("team_id") || "").trim();
   if (!svcIdOk(teamId)) return Response.json({ error: "valid team_id is required" }, { status: 400 });
   // GA: live on prod + uat (was uat-gated). Forwards to the request's env; auth still required.
+
+  // Sends a REAL SMS — the feature switch is the kill path if this ever needs stopping in prod.
+  if (!handoverEnabled()) return Response.json({ error: "not_available" }, { status: 404 });
 
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });

@@ -9,6 +9,7 @@
  * gated). Auth REQUIRED (token team_id must equal the requested team_id).
  */
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { handoverEnabled } from "@/lib/inbox/handover";
 import { spyneServiceSend, svcIdOk } from "@/lib/spyne/conversationApi";
 
 export const runtime = "nodejs";
@@ -20,6 +21,9 @@ export async function POST(request: Request): Promise<Response> {
   if (!svcIdOk(teamId)) return Response.json({ error: "valid team_id is required" }, { status: 400 });
   // GA: the handover backend is live on prod + uat, so this forwards to whichever env the request targets
   // (previously hard-gated to uat). Auth is still required.
+
+  // Feature switch (NEXT_PUBLIC_INBOX_HANDOVER=off) — the only thing that disables handover now.
+  if (!handoverEnabled()) return Response.json({ error: "not_available" }, { status: 404 });
 
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });

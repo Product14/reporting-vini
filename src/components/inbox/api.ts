@@ -2,6 +2,8 @@
  * doc); every fetcher hits our own /api/inbox/* proxy (which authorizes the team + forwards the Spyne
  * token downstream) and degrades to a safe empty value on any error, exactly like liveData.ts. */
 
+import { handoverEnabled } from "@/lib/inbox/handover";
+
 export interface InboxAuth {
   teamId: string;
   enterpriseId: string;
@@ -707,7 +709,8 @@ export interface HandoverResult {
   conversationId?: string | null; // echoed back — the conversation the toggle acted on
   error?: string;
 }
-const HANDOVER_ENABLED = (a: InboxAuth) => Boolean(a.teamId); // GA — enabled wherever a team is scoped
+// Live wherever a team is scoped, unless the feature switch turns it off.
+const HANDOVER_ENABLED = (a: InboxAuth) => handoverEnabled() && Boolean(a.teamId);
 
 // The actionable handover for a customer, resolved server-side from the V1 endpoint (V2 lacks the field).
 export interface HandoverState {

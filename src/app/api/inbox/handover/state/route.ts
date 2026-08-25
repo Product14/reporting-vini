@@ -12,6 +12,7 @@
  * NOTE: V1 rejects serviceType/page/limit (400) — send ONLY the three ids.
  */
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { handoverEnabled } from "@/lib/inbox/handover";
 import { spyneServiceGet, svcIdOk } from "@/lib/spyne/conversationApi";
 
 export const runtime = "nodejs";
@@ -39,6 +40,9 @@ export async function GET(request: Request): Promise<Response> {
   if (!svcIdOk(teamId)) return Response.json({ error: "valid team_id is required" }, { status: 400 });
   // Prod never has handover → answer "no handover" (a read; benign) rather than erroring the thread load.
   if (spyneEnvFrom(request) !== "uat") return Response.json(NONE, { status: 200 });
+
+  // Feature switch off → answer "no handover" (a read; benign) rather than erroring the thread load.
+  if (!handoverEnabled()) return Response.json(NONE, { status: 200 });
 
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });

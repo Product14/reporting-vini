@@ -15,6 +15,7 @@
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useScenario } from "@/components/reports/scenario";
+import { handoverEnabled } from "@/lib/inbox/handover";
 import {
   fetchInboxCustomers,
   fetchInboxTeamConversations,
@@ -411,9 +412,13 @@ function Inbox() {
   // rep (PENDING), with a LIVE count badge (polled). Toggling it filters the list to PENDING.
   // GA: the handover backend is now live on prod AND uat (was uat-gated). Degrades gracefully on any env
   // where it isn't present (missing field ⇒ no flag; filter 400 ⇒ graceful retry). `spyneEnv` kept referenced.
-  const handoverOn = spyneEnv === "uat" || spyneEnv === "stag" || spyneEnv === "prod" || spyneEnv === "";
+  // One switch for the whole feature (NEXT_PUBLIC_INBOX_HANDOVER=off kills it) instead of an env allowlist.
+  const handoverOn = handoverEnabled();
   const [needsAttention, setNeedsAttention] = useState(false);
   const [needsCount, setNeedsCount] = useState(0);
+  // Latest UNFILTERED customer total, for the badge sanity guard below. A ref so the poll reads the current
+  // value without re-subscribing whenever the list reloads.
+  const allTotalRef = useRef<number | null>(null);
   // Customers already being handled (a rep claimed them → phase ACTIVE). The lead-level PENDING flag the
   // Needs-Attention filter uses can LAG/STICK on the backend (a customer shows in both PENDING and ACTIVE),
   // so we exclude anyone ACTIVE — "Needs Attention" = flagged AND not yet taken over.
@@ -555,7 +560,10 @@ function Inbox() {
       // scoped to unread rows, so never overwrite the cached counts from it.
       // Capture the true All/Unread totals ONLY from the unfiltered query — the unread-tab and the
       // Needs-Attention filter both return scoped totals that would otherwise clobber the tab labels.
-      if (!listQuery.unreadOnly && !needsAttention) setCounts({ all: p.pagination.totalCustomers, unread: p.pagination.unreadCount });
+      if (!listQuery.unreadOnly && !needsAttention) {
+        setCounts({ all: p.pagination.totalCustomers, unread: p.pagination.unreadCount });
+        allTotalRef.current = p.pagination.totalCustomers;
+      }
       setLoadingList(false);
       // Auto-select: the deep-linked customer if any (synthesize a stub row if it's not on this page so
       // the thread still loads), else the first conversation. Only when nothing is selected yet.
@@ -575,7 +583,7 @@ function Inbox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, enterpriseId, spyneToken, spyneEnv, serviceType, listQuery]);
 
-  // Live PENDING-handover count for the "Needs Attention" badge (UAT-only). Polled (no websocket) so the
+  // Live PENDING-handover count for the "Needs Attention" badge. Polled (no websocket) so the
   // badge tracks conversations entering/leaving PENDING in ~real time. Cheap: a limit:1 query, total only.
   useEffect(() => {
     if (!handoverOn || !teamId || !enterpriseId) return;
@@ -590,8 +598,17 @@ function Inbox() {
       const activeSet = new Set(act.customers.map((c) => c.customer_id));
       setActiveCustomerIds(activeSet);
       const net = pend.customers.filter((c) => !activeSet.has(c.customer_id)).length;
-      // Exact when the pending queue fits one page (it's meant to be small); else fall back to the raw total.
-      setNeedsCount(pend.pagination.totalCustomers > pend.customers.length ? pend.pagination.totalCustomers : net);
+      /* Exact when the pending queue fits one page (it's meant to be small); else fall back to the raw
+       * total — but ONLY if that total looks filtered. Our proxy retries WITHOUT humanTransferPhase when a
+       * backend 400s on it, and a backend that silently ignores the param is indistinguishable from here;
+       * either way the response is the whole customer list and this badge would read "Needs Attention
+       * 4213". Every conversation needing a human at once isn't a real state, so a pending total that
+       * reaches the unfiltered total means the filter didn't apply — trust the net count instead. A missed
+       * badge is recoverable; a fleet-sized one destroys trust in it. */
+      const all = allTotalRef.current;
+      const overflowed = pend.pagination.totalCustomers > pend.customers.length;
+      const looksUnfiltered = all !== null && all > 1 && pend.pagination.totalCustomers >= all;
+      setNeedsCount(overflowed && !looksUnfiltered ? pend.pagination.totalCustomers : net);
     };
     tick();
     const id = setInterval(tick, 10000);
@@ -1550,7 +1567,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   // humanTransferDetails). `hoOverride` briefly overrides the derived phase after a toggle, until the
   // re-fetched conv catches up (the write lags the read ~1s).
   // GA: handover backend live on prod + uat (was uat-gated). Enabled on every env; degrades gracefully.
-  const handoverOn = auth.spyneEnv === "uat" || auth.spyneEnv === "stag" || auth.spyneEnv === "prod" || auth.spyneEnv === "";
+  const handoverOn = handoverEnabled();
   const derivedHandover = useMemo(() => deriveHandover(conv, handoverOn, dir), [conv, handoverOn, dir]);
   const handoverState = hoOverride ?? derivedHandover;
   const handoverPhase = handoverState.phase;
