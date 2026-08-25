@@ -424,6 +424,10 @@ function Inbox() {
   // so we exclude anyone ACTIVE — "Needs Attention" = flagged AND not yet taken over.
   const [activeCustomerIds, setActiveCustomerIds] = useState<Set<string>>(new Set());
   const [needsRefreshKey, setNeedsRefreshKey] = useState(0); // bumped after a claim/hand-back → refresh count now
+  // Customers this rep took over while the Needs-Attention filter is on. They stop matching the PENDING
+  // query, so the whole ROW is kept here and re-inserted — otherwise the conversation being worked on
+  // disappears from the list mid-reply. Dropped on hand-back or on leaving the filter.
+  const [pinnedRows, setPinnedRows] = useState<InboxCustomer[]>([]);
   const pageRef = useRef(1);
   const [loadingMore, setLoadingMore] = useState(false);
   const listBottomRef = useRef<HTMLDivElement | null>(null);
@@ -724,7 +728,14 @@ function Inbox() {
   // On the Unread tab, drop conversations read this session so they leave the list on open (there's no
   // read-state write API, so the server still returns them until a refetch — filter them out here).
   const displayCustomers = needsAttention
-    ? customers.filter((c) => !activeCustomerIds.has(c.customer_id)) // drop anyone already taken over (ACTIVE)
+    ? (() => {
+        const pinnedIds = new Set(pinnedRows.map((c) => c.customer_id));
+        // Still flagged and not taken over by someone else — plus anything this rep claimed (pinned).
+        const rows = customers.filter((c) => !activeCustomerIds.has(c.customer_id) || pinnedIds.has(c.customer_id));
+        // Re-insert claimed rows the PENDING query no longer returns at all.
+        const present = new Set(rows.map((c) => c.customer_id));
+        return [...pinnedRows.filter((c) => !present.has(c.customer_id)), ...rows];
+      })()
     : tab === "unread" ? customers.filter((c) => !readIds.has(c.customer_id)) : customers;
   // Active list has zero results (a channel/filter with no conversations). Once loaded, the middle pane
   // shows a "No conversation found" state instead of the previously-opened thread (RETCONVAI batch-3 #1).
@@ -895,13 +906,15 @@ function Inbox() {
           {/* Tab strip scrolls horizontally on very narrow phones instead of spilling out of the pane. */}
           <div className="flex shrink-0 overflow-x-auto" style={{ borderColor: C.border }}>
             {/* In None mode the flat endpoint returns a total but no unread count, so Unread shows no number. */}
-            <TabBtn active={tab === "all" && !needsAttention} onClick={() => { setNeedsAttention(false); setTab("all"); }} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
-            <TabBtn active={tab === "unread" && !needsAttention} onClick={() => { setNeedsAttention(false); setTab("unread"); }} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
+            <TabBtn active={tab === "all" && !needsAttention} onClick={() => { setNeedsAttention(false); setPinnedRows([]); setTab("all"); }} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
+            <TabBtn active={tab === "unread" && !needsAttention} onClick={() => { setNeedsAttention(false); setPinnedRows([]); setTab("unread"); }} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
             {/* Needs Attention — UAT-only quick filter for PENDING handovers, with a live count badge. Only
                 in Customer mode (leads/v2 backs the filter; the None/team endpoint has no phase filter). */}
             {handoverOn && groupBy === "customer" && (
               <button
-                onClick={() => setNeedsAttention((v) => !v)}
+                // Leaving the filter drops the pins — they only exist to hold a claimed row in place
+                // while the rep is working in it.
+                onClick={() => setNeedsAttention((v) => { if (v) setPinnedRows([]); return !v; })}
                 title="Conversations Vini flagged for a rep"
                 className="flex shrink-0 items-center gap-1.5 border-b px-2.5 py-2.5 text-[12px] transition-colors"
                 style={{
@@ -989,7 +1002,21 @@ function Inbox() {
               auth={auth}
               customer={selected}
               focusConvId={focusConvId}
-              onHandoverChanged={() => setNeedsRefreshKey((k) => k + 1)}
+              onHandoverChanged={(phase) => {
+                setNeedsRefreshKey((k) => k + 1);
+                /* Taking over flips PENDING→ACTIVE, so the customer instantly stops matching the
+                 * Needs-Attention filter — the row vanished from under the rep and, when it was the only
+                 * flagged one, the list emptied and the thread was replaced by "nothing needs attention".
+                 * You then had to switch to All and find the customer again just to type the reply you
+                 * took the conversation over to send. Pin it instead: a claimed row stays until hand-back. */
+                const c = selected;
+                if (!c) return;
+                if ((phase || "").toUpperCase() === "ACTIVE") {
+                  setPinnedRows((prev) => (prev.some((p) => p.customer_id === c.customer_id) ? prev : [...prev, c]));
+                } else {
+                  setPinnedRows((prev) => prev.filter((p) => p.customer_id !== c.customer_id));
+                }
+              }}
               onBack={() => setSelected(null)}
               onDetails={() => setDetailsOpen(true)}
             />
@@ -1265,7 +1292,7 @@ function messageImages(m: SmsMessage): string[] {
   return Array.from(new Set(out));
 }
 
-function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; focusConvId?: string | null; onHandoverChanged?: () => void; onBack?: () => void; onDetails?: () => void }) {
+function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; focusConvId?: string | null; onHandoverChanged?: (phase: string | null) => void; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   // A conversation clicked from the None-mode list that's OLDER than the loaded window (heavy customers can
   // have hundreds of conversations; the thread only loads the recent ~50). Fetched on demand + merged into
@@ -1603,7 +1630,9 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     if (res.phase) setHoOverride({ ...handoverState, phase: res.phase, conversationId: res.conversationId ?? actOnConvId });
     reloadConv();
     setTimeout(() => reloadConv(), 2000);
-    onHandoverChanged?.(); // claim/hand-back changes the Needs-Attention set → refresh the badge now
+    // Report the RESULTING phase, not just "something changed": the list needs to tell a claim
+    // (ACTIVE — keep this row pinned so the rep can reply) from a hand-back (NONE — let it go).
+    onHandoverChanged?.(res.phase ?? null);
   }, [auth, actOnConvId, handoverState, reloadConv, onHandoverChanged]);
   const sendManual = useCallback(async () => {
     if (!handoverConvId) return;
