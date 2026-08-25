@@ -1517,7 +1517,10 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     // "All" view everything shows; under a specific direction, only chips whose source matches it.
     const dirByConvId: Record<string, "in" | "out" | "unknown"> = {};
     for (const rec of conv.conversations) dirByConvId[rec.conversationId] = convDirection(rec);
-    const matchesDir = (cid?: string) => dir === "all" || (!!cid && dirByConvId[cid] === dir);
+    // Unknown-direction sources pass every filter, mirroring the conversation-level rule above: the
+    // thread already shows an unclassified conversation under both views, so hiding its appointment /
+    // action-item chips there would make them vanish exactly the way RETCONVAI-4779's messages did.
+    const matchesDir = (cid?: string) => dir === "all" || (!!cid && (dirByConvId[cid] === dir || dirByConvId[cid] === "unknown"));
 
     // Inline "created" events in the chat: appointment booked + action item created (at their createdAt).
     for (const a of conv.nextAppointments ?? []) {
