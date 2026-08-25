@@ -269,7 +269,9 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
     if (c.type === "call") {
       // a call record is real content only if it actually happened (has a callId / duration / transcript)
       if (c.callId || c.callData?.callDuration || c.callData?.transcript) {
-        return (c.callData?.callType || "").toLowerCase().includes("inbound") ? "Inbound call" : "Outbound call";
+        // Same rule as the call card: callType, else the record's direction, else no claimed direction.
+        const d = convDirection(c);
+        return d === "in" ? "Inbound call" : d === "out" ? "Outbound call" : "Call";
       }
       continue;
     }
@@ -1334,8 +1336,12 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     const base = conv.conversations ?? [];
     const threadConvs = focusedConv && !base.some((c) => c.conversationId === focusedConv.conversationId) ? [...base, focusedConv] : base;
     for (const rec of threadConvs) {
-      // Direction filter — skip conversations that don't match the selected inbound/outbound view.
-      if (dir !== "all" && convDirection(rec) !== dir) continue;
+      /* Direction filter — skip conversations that don't match the selected view, but NEVER drop one whose
+       * direction we couldn't determine. Excluding unknowns made them absent from Inbound AND Outbound, so
+       * picking either filter silently hid real messages (RETCONVAI-4779). An unclassified conversation now
+       * shows under both; it's unlabelled, not missing. */
+      const recDir = convDirection(rec);
+      if (dir !== "all" && recDir !== "unknown" && recDir !== dir) continue;
       const base = +new Date(rec.createdAt) || 0;
       if ((rec.type === "sms" || rec.type === "chat") && Array.isArray(rec.smsMessages)) {
         // Website-chat conversations reuse the SMS message array (same roles + JSON envelope); only the
@@ -2135,7 +2141,13 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
   const [tab, setTab] = useState<"transcript" | "review">("transcript");
   const [detail, setDetail] = useState<CallAnalysis | null | undefined>(undefined); // undefined=unfetched, null=none
   const cd = rec.callData || {};
-  const inbound = (cd.callType || "").toLowerCase().includes("inbound");
+  /* Direction for the CARD LABEL. `inbound` alone can't express "we don't know": defaulting the unknown
+   * case to outbound is what printed "Outbound call to <customer>" over inbound calls whenever prod
+   * omitted callData.callType (RETCONVAI-4803). Fall back to the record's direction, and when even that
+   * is missing say plain "Call" rather than asserting a direction we don't have. */
+  const recDir = convDirection(rec);
+  const inbound = (cd.callType || "").toLowerCase().includes("inbound") || recDir === "in";
+  const dirKnown = !!(cd.callType || "").trim() || recDir !== "unknown";
   const durSec = callDurationSec(cd.callDuration); // normalized (callDuration is ms on prod, sec on uat)
   const recording = cd.recordingUrl || null;
   // Whether the call actually connected — driven by endedReason, NOT by recording presence. A connected
@@ -2153,12 +2165,17 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
     if (!c || c.startsWith("{")) return false;
     return ["bot", "assistant", "agent", "user"].includes((t.role || "").toLowerCase());
   });
-  const variant = inbound ? (connected ? "inbound" : "missed") : connected ? "outbound" : "didnt";
+  const variant = !dirKnown
+    ? (connected ? "unknownDir" : "unknownDirNoAnswer")
+    : inbound ? (connected ? "inbound" : "missed") : connected ? "outbound" : "didnt";
   const V = {
     inbound: { title: `Inbound call from ${name}`, Icon: IconCallIn, bg: C.blueAccent, fg: "#2f7bff" },
     outbound: { title: `Outbound call to ${name}`, Icon: IconCallOut, bg: "#e3ffea", fg: "#0a6029" },
     missed: { title: `Missed call from ${name}`, Icon: IconCallIn, bg: "#fdecee", fg: C.red },
     didnt: { title: `Call to ${name} didn't connect`, Icon: IconCallOut, bg: "#fdecee", fg: C.red },
+    // Direction genuinely unavailable — name the call without inventing a direction.
+    unknownDir: { title: `Call with ${name}`, Icon: IconPhone, bg: C.primaryAccent, fg: C.primary },
+    unknownDirNoAnswer: { title: `Call with ${name} didn't connect`, Icon: IconPhone, bg: "#fdecee", fg: C.red },
   }[variant];
 
   // Fetch the timestamped transcript on first expand (falls back to the inline callData transcript).
@@ -3283,24 +3300,39 @@ function apptLabel(a: AppointmentItem): string {
 
 // Direction of a conversation for the inbound/outbound filter + appointment attribution.
 // Calls: from callData.callType. SMS: inferred from who sent the earliest message (user = inbound).
+/* The record's OWN direction field — the v2 thread carries it per conversation. Read as a fallback
+ * everywhere the per-channel inference comes up empty (RETCONVAI-4803/-4779): on prod the thread payload
+ * often omits callData.callType entirely, which classified every call "unknown" — so the Inbound count
+ * read 0 while call cards were plainly on screen, and (because the direction filter dropped unknowns) the
+ * same calls vanished from BOTH the Inbound and Outbound views. */
+function recDirection(rec: ConvRecord): "in" | "out" | "unknown" {
+  const d = (rec.direction || "").toLowerCase();
+  if (d.includes("inbound")) return "in";
+  if (d.includes("outbound")) return "out";
+  return "unknown";
+}
+
 function convDirection(rec: ConvRecord): "in" | "out" | "unknown" {
   // Website chat is always customer-initiated (widget on the dealer site) — inbound even when the
   // stored thread opens with the assistant's greeting.
   if (rec.type === "chat") return "in";
   if (rec.type === "email") {
     const ms = rec.emailMessages ?? [];
-    if (!ms.length) return "unknown";
+    if (!ms.length) return recDirection(rec);
     const first = [...ms].sort((a, b) => +new Date(a.sentAt || a.createdAt || 0) - +new Date(b.sentAt || b.createdAt || 0))[0];
-    return (first.direction || "").toLowerCase() === "inbound" ? "in" : "out";
+    const d = (first.direction || "").toLowerCase();
+    if (d === "inbound") return "in";
+    if (d === "outbound") return "out";
+    return recDirection(rec);
   }
   if (rec.type === "call") {
     const t = (rec.callData?.callType || "").toLowerCase();
     if (t.includes("inbound")) return "in";
     if (t.includes("outbound")) return "out";
-    return "unknown";
+    return recDirection(rec); // prod frequently sends no callData.callType — this is the real signal there
   }
   const msgs = rec.smsMessages ?? [];
-  if (!msgs.length) return "unknown";
+  if (!msgs.length) return recDirection(rec);
   const earliest = [...msgs].sort((a, b) => (a._ts || 0) - (b._ts || 0))[0];
   return earliest.role === "user" ? "in" : "out";
 }
