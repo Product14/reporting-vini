@@ -339,6 +339,46 @@ const EMPTY_CONV: ConversationsV2 = {
   conversations: [], nextActionItems: [], nextAppointments: [], nextScheduledTasks: [], leadJourney: [], leads: [], stopAiEngagement: false,
 };
 
+/* The thread fetched a SINGLE page of conversations and stopped, so a customer with more than the page
+ * size simply lost the rest — silently. Real case (RETCONVAI-4779): a customer whose direction counts read
+ * "Inbound (48) / Outbound (2)", summing to exactly the 50-conversation limit. When the inbound and
+ * outbound agents are both working a customer, the two streams compete for those slots and messages go
+ * missing from the console while they exist on the carrier.
+ *
+ * Pages until a page comes back short, adds nothing new, or the cap is hit. Self-limiting either way: if
+ * the endpoint ignores `page` we just get the same ids back, the merge dedupes them and the loop stops. */
+export async function fetchInboxConversationsPaged(
+  a: InboxAuth,
+  customerId: string,
+  opts: { limit?: number; maxPages?: number } = {},
+): Promise<ConversationsV2> {
+  const limit = opts.limit ?? 50;
+  const maxPages = opts.maxPages ?? 4;
+  const first = await fetchInboxConversations(a, customerId, { limit, page: 1 });
+  if (first.conversations.length < limit) return first;
+  const seen = new Set(first.conversations.map((c) => c.conversationId));
+  const all = [...first.conversations];
+  for (let page = 2; page <= maxPages; page++) {
+    const next = await fetchInboxConversations(a, customerId, { limit, page });
+    const fresh = next.conversations.filter((c) => !seen.has(c.conversationId));
+    if (!fresh.length) break; // short page, or an endpoint that ignores `page` — either way we're done
+    for (const c of fresh) seen.add(c.conversationId);
+    all.push(...fresh);
+    if (next.conversations.length < limit) break;
+  }
+  return { ...first, conversations: all };
+}
+
+/* Merge a freshly-polled page into the thread already on screen: same conversation → take the new record
+ * (it carries the new messages), unseen conversation → add it. Lets the live poll stay a cheap single page
+ * without discarding the older pages the initial load walked. */
+export function mergeConversations(prev: ConversationsV2 | null, fresh: ConversationsV2): ConversationsV2 {
+  if (!prev) return fresh;
+  const byId = new Map(prev.conversations.map((c) => [c.conversationId, c]));
+  for (const c of fresh.conversations) byId.set(c.conversationId, c);
+  return { ...fresh, conversations: [...byId.values()] };
+}
+
 export async function fetchInboxConversations(
   a: InboxAuth,
   customerId: string,

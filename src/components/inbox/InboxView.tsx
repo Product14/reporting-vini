@@ -22,6 +22,8 @@ import {
   type TeamConversation,
   type TeamConversationsPage,
   fetchInboxConversations,
+  fetchInboxConversationsPaged,
+  mergeConversations,
   fetchInboxTimezone,
   fetchInboxAgents,
   type OnboardedAgent,
@@ -1331,7 +1333,10 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   // Re-pull just the conversations (not persona/feedback) — used after a handover claim/hand-back/send so
   // the thread reflects the new phase without wiping the in-session thumbs (fbMap) or summary.
   const reloadConv = useCallback(() => {
-    fetchInboxConversations(auth, customer.customer_id, { limit: 50 }).then((data) => setConv(data));
+    // Newest page only — cheap enough to poll — merged over what's on screen so the older pages walked by
+    // the initial load survive the refresh.
+    fetchInboxConversations(auth, customer.customer_id, { limit: 50 })
+      .then((data) => setConv((prev) => mergeConversations(prev, data)));
   }, [auth, customer.customer_id]);
 
   useEffect(() => {
@@ -1352,8 +1357,9 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     // NOTE: prior feedback state is NOT pre-loaded — the new feedbacks/entries API has no per-conversation
     // GET (it's team-scoped for reporting), and pre-fetching per conversation was also a needless per-open
     // cost. Thumb state is in-session/optimistic (fbMap), and each vote POSTs to the reporting endpoint.
-    // limit 50 (not 30) so a conversation clicked from the None-mode list is loaded and can be scrolled to.
-    fetchInboxConversations(auth, customer.customer_id, { limit: 50 }).then((data) => {
+    // Paged: one page silently truncated customers with more conversations than the page size — the case
+    // behind "Inbound (48) / Outbound (2)" summing to exactly the 50 limit (RETCONVAI-4779).
+    fetchInboxConversationsPaged(auth, customer.customer_id, { limit: 50, maxPages: 4 }).then((data) => {
       if (on) setConv(data);
     });
     return () => { on = false; };
@@ -1649,14 +1655,25 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     reloadConv();
     setTimeout(() => reloadConv(), 2000); // the sent SMS lands in the v2 thread a beat later
   }, [auth, handoverConvId, draft, reloadConv]);
-  // Real-time-ish (no websocket exists): poll the open thread so new customer SMS + phase changes appear
-  // without a manual refresh. Scoped to an ACTIVE/PENDING handover only — that's when a rep needs live
-  // updates — so we don't poll every thread now that handover is GA on prod. Gentle 8s cadence.
+  /* Real-time-ish (no websocket exists): poll the OPEN thread so new customer messages appear without a
+   * manual refresh. This used to run only during a PENDING/ACTIVE handover — which meant that on every
+   * ordinary conversation an inbound SMS arriving while the rep watched the thread never showed up at all
+   * (RETCONVAI-4779, "not displayed in real time"). It now always runs, with the cost controls that
+   * motivated the original gate kept: 8s while a rep is mid-handover and needs immediacy, 25s otherwise,
+   * and nothing at all while the tab/iframe is hidden — the console frequently sits on a background tab. */
+  const liveMs = handoverPhase === "PENDING" || handoverPhase === "ACTIVE" ? 8000 : 25000;
   useEffect(() => {
-    if (!handoverOn || (handoverPhase !== "PENDING" && handoverPhase !== "ACTIVE")) return;
-    const id = setInterval(() => reloadConv(), 8000);
-    return () => clearInterval(id);
-  }, [handoverOn, handoverPhase, reloadConv]);
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => { if (id === null) id = setInterval(() => reloadConv(), liveMs); };
+    const stop = () => { if (id !== null) { clearInterval(id); id = null; } };
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") stop();
+      else { reloadConv(); start(); } // catch up immediately on return, then resume
+    };
+    if (typeof document === "undefined" || document.visibilityState !== "hidden") start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => { stop(); document.removeEventListener("visibilitychange", onVisibility); };
+  }, [liveMs, reloadConv]);
 
   return (
     <>
