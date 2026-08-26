@@ -3555,6 +3555,12 @@ function recDirection(rec: ConvRecord): "in" | "out" | "unknown" {
 }
 
 function convDirection(rec: ConvRecord): "in" | "out" | "unknown" {
+  // Prefer the backend's authoritative direction (conversationType: inbound|outbound), on conversations/v2
+  // (RETCONVAI-4779/-4803/-4777). Fall back to the per-type heuristic below where the field is absent
+  // (older backend / envs without it) so nothing regresses.
+  const ct = (rec.conversationType || "").toLowerCase();
+  if (ct === "inbound") return "in";
+  if (ct === "outbound") return "out";
   // Website chat is always customer-initiated (widget on the dealer site) — inbound even when the
   // stored thread opens with the assistant's greeting.
   if (rec.type === "chat") return "in";

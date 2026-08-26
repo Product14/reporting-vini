@@ -260,6 +260,9 @@ export interface ConvRecord {
   customerDetails?: { customerId: string; name: string; email?: string[]; phone?: string; createdAt?: string };
   stats?: { message_count: number; email_count: number; sms_count: number; last_activity: string; duration_days: number };
   direction?: string | null;
+  // AUTHORITATIVE direction from the backend ("inbound" | "outbound"), on conversations/v2 (RETCONVAI, UAT+).
+  // Preferred over the earliest-message heuristic in convDirection() — fixes Inbound-count-0 + parallel in/out.
+  conversationType?: string | null;
 }
 export interface LeadJourneyEvent {
   eventType: string;
