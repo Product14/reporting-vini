@@ -759,6 +759,7 @@ const HANDOVER_ENABLED = (a: InboxAuth) => handoverEnabled() && Boolean(a.teamId
 export interface HandoverState {
   phase: "NONE" | "PENDING" | "ACTIVE" | string;
   conversationId?: string; // the conversation /handover/toggle + /send operate on
+  channel?: string; // "sms" | "chat" — manual send only works for sms (chat has no SMS number)
   handoverSummary?: string | null;
   triggerReason?: string | null;
   claimedByName?: string | null;

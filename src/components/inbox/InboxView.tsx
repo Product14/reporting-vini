@@ -1237,11 +1237,18 @@ function deriveHandover(conv: ConversationsV2 | null, on: boolean, dir: "all" | 
   // Scope to the direction being viewed so inbound and outbound handovers are handled SEPARATELY — an
   // Inbound view takes over the inbound conversation, Outbound the outbound one (RETCONVAI). This also
   // means at most one actionable handover per view, so the footer never stacks multiple take-over prompts.
-  const flagged = (conv.conversations ?? []).filter(
-    (c) => (c.type === "sms" || c.type === "chat")
-      && (dir === "all" || convDirection(c) === dir)
-      && (c.humanTransferDetails?.phase === "PENDING" || c.humanTransferDetails?.phase === "ACTIVE"),
-  );
+  // The manual-send endpoint is SMS-only (/twilio/sms/send → Twilio, `to: conversation.number`). A WEB-CHAT
+  // conversation has no phone `number`, so a rep reply fails ("Failed to send" — Inver Grove Ford, live).
+  // So we do NOT offer take-over on a PENDING chat (Vini keeps answering the customer); we only surface an
+  // already-ACTIVE chat so a rep who claimed one before this fix can hand it back. SMS is unchanged.
+  const flagged = (conv.conversations ?? []).filter((c) => {
+    if (!(c.type === "sms" || c.type === "chat")) return false;
+    if (!(dir === "all" || convDirection(c) === dir)) return false;
+    const p = c.humanTransferDetails?.phase;
+    if (p === "ACTIVE") return true;
+    if (p === "PENDING") return c.type === "sms"; // chat PENDING is not actionable → don't surface it
+    return false;
+  });
   const active = flagged.find((c) => c.humanTransferDetails?.phase === "ACTIVE");
   const pending = flagged
     .filter((c) => c.humanTransferDetails?.phase === "PENDING")
@@ -1252,6 +1259,7 @@ function deriveHandover(conv: ConversationsV2 | null, on: boolean, dir: "all" | 
   return {
     phase: h.phase || "NONE",
     conversationId: pick.conversationId,
+    channel: pick.type, // "sms" | "chat" — chat can't be replied to via the SMS send endpoint
     handoverSummary: h.handoverSummary ?? null,
     triggerReason: h.triggerReason ?? null,
     claimedByName: h.claimedByName ?? null,
@@ -1610,12 +1618,12 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   const handoverConvId = handoverState.conversationId; // the flagged/claimed conv (send + hand-back target)
   // >1 conversation flagged at once for one customer = backend data inconsistency → show an error, not a picker.
   const handoverConflict = handoverOn && !!conv?.humanTransferConflict?.hasConflict;
-  // Direct take-over (RETCONVAI-4553): when nothing is flagged, a rep can still step into the customer's
-  // latest sms/chat conversation. Toggle acts on the flagged conv if there is one, else this.
+  // Direct take-over (RETCONVAI-4553): when nothing is flagged, a rep can step into the customer's latest
+  // conversation. SMS ONLY — a rep can't reply to web-chat via the SMS send endpoint (see deriveHandover).
   const latestSmsConvId = useMemo(() => {
     if (!handoverOn) return undefined;
     return (conv?.conversations ?? [])
-      .filter((c) => (c.type === "sms" || c.type === "chat") && (dir === "all" || convDirection(c) === dir))
+      .filter((c) => c.type === "sms" && (dir === "all" || convDirection(c) === dir))
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0]?.conversationId;
   }, [conv, handoverOn, dir]);
   const actOnConvId = handoverConvId ?? latestSmsConvId;
@@ -1799,23 +1807,33 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
                 {hoBusy ? "…" : "Hand back to Vini"}
               </button>
             </div>
-            <div className="flex items-end gap-2">
-              <textarea
-                value={draft}
-                onChange={(e) => { setDraft(e.target.value); if (sendState !== "idle") setSendState("idle"); }}
-                // Enter sends; Shift+Enter inserts a newline.
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendManual(); } }}
-                rows={1}
-                placeholder="Type a reply to the customer…  (Enter to send · Shift+Enter for a new line)"
-                className="max-h-[120px] min-h-[40px] flex-1 resize-y rounded-lg border px-3 py-2 text-[13px] outline-none"
-                style={{ borderColor: C.border, color: C.dark }}
-              />
-              <button onClick={sendManual} disabled={hoBusy || !draft.trim()} className="shrink-0 rounded-lg px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50" style={{ background: C.primary }}>
-                {sendState === "sending" ? "Sending…" : "Send"}
-              </button>
-            </div>
-            {/* toggle/hand-back errors surface here; the SMS delivery status is shown under the sent message. */}
-            {hoErr && <p className="text-[11px]" style={{ color: C.red }}>⚠ {hoErr}</p>}
+            {handoverState.channel === "chat" ? (
+              // Web chat has no SMS number → the manual-send endpoint can't reach the customer. Don't show a
+              // compose box that only 400s; tell the rep and let them hand back so Vini keeps the conversation.
+              <p className="rounded-lg border px-3 py-2 text-[12px] leading-snug" style={{ borderColor: C.border, background: C.bg, color: C.sub }}>
+                Replying to a web-chat conversation from the console isn&apos;t supported yet. Hand this back so Vini keeps responding, or reach the customer another way.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={draft}
+                    onChange={(e) => { setDraft(e.target.value); if (sendState !== "idle") setSendState("idle"); }}
+                    // Enter sends; Shift+Enter inserts a newline.
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendManual(); } }}
+                    rows={1}
+                    placeholder="Type a reply to the customer…  (Enter to send · Shift+Enter for a new line)"
+                    className="max-h-[120px] min-h-[40px] flex-1 resize-y rounded-lg border px-3 py-2 text-[13px] outline-none"
+                    style={{ borderColor: C.border, color: C.dark }}
+                  />
+                  <button onClick={sendManual} disabled={hoBusy || !draft.trim()} className="shrink-0 rounded-lg px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50" style={{ background: C.primary }}>
+                    {sendState === "sending" ? "Sending…" : "Send"}
+                  </button>
+                </div>
+                {/* toggle/hand-back errors surface here; the SMS delivery status is shown under the sent message. */}
+                {hoErr && <p className="text-[11px]" style={{ color: C.red }}>⚠ {hoErr}</p>}
+              </>
+            )}
           </div>
         </div>
       ) : (
