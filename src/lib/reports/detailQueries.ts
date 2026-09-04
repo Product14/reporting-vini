@@ -15,7 +15,12 @@
  * their originating campaign (endcallreports.callbackCampaignId); countDistinct(meeting_id) dedupes a
  * meeting reachable via both an outbound task and a callback. outcomesSql needs NO callback change — it
  * is lead/mapping grain (buckets campaignLeadMappings.outcome per lead), never call-direction.
+ *
+ * Rooftop scope: the "real rooftops only" reseller screen comes from enterpriseScope.ts, the same
+ * source the spine uses — these queries decide whether a rooftop's DRILL-DOWNS have rows, so a scope
+ * change applied to only one side yields a report with populated tiles and empty lists.
  */
+import { resellerScope } from "./enterpriseScope";
 
 const esc = (v: string): string => String(v ?? "").replace(/'/g, "''").replace(/\\/g, "\\\\");
 
@@ -192,7 +197,7 @@ WITH ob_leads AS (
     JOIN eventila.enterprise_details ed FINAL ON l.enterprise_id = ed.enterprise_id
     WHERE l.is_deleted = 0 AND l.__deleted = 0
       AND l.service_type IN ('sales','service')
-      AND ed.is_test_account = 0 AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+      AND ed.is_test_account = 0 AND ${resellerScope("ed")}
       AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
@@ -271,7 +276,7 @@ WITH ob_leads AS (
         ON clm.lead_id = l.lead_id
     WHERE l.is_deleted = 0 AND l.__deleted = 0
       AND l.service_type IN ('sales','service')
-      AND ed.is_test_account = 0 AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+      AND ed.is_test_account = 0 AND ${resellerScope("ed")}
       AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
@@ -322,7 +327,7 @@ WITH eligible_leads AS (
     JOIN eventila.enterprise_details ed FINAL ON l.enterprise_id = ed.enterprise_id
     WHERE l.is_deleted = 0 AND l.__deleted = 0
       AND l.service_type IN ('sales','service')
-      AND ed.is_test_account = 0 AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+      AND ed.is_test_account = 0 AND ${resellerScope("ed")}
       AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
@@ -463,7 +468,7 @@ meet AS (
       AND m.service_type IN ('sales','service')
       AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
       AND toDate(m.created_at) >= ${startFloor}
-      AND ed.is_test_account = 0 AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+      AND ed.is_test_account = 0 AND ${resellerScope("ed")}
       AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'

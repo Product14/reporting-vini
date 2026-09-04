@@ -16,6 +16,28 @@
  *   npx tsx scripts/backfill.ts --months=12       # historical bootstrap: last N months (30d each), chunked.
  *   npx tsx scripts/backfill.ts --days=7          # force a fixed trailing hot window (chunked).
  *   npx tsx scripts/backfill.ts /tmp/q.json       # aggregate a local RawRow[] dump (dev; single window).
+ *   npx tsx scripts/backfill.ts --enterprise=62f962c8e --from=2025-09-01   # SCOPED, ADDITIVE-ONLY
+ *   npx tsx scripts/backfill.ts --teams=a1b2,c3d4 --from=2025-09-01        # (see below)
+ *
+ * SCOPED MODE (--teams / --enterprise) — the safe way to bootstrap history for rooftops that were
+ * previously screened out of reporting (e.g. an enterprise newly added to
+ * src/lib/reports/enterpriseScope.ts RESELLER_ALLOWLIST). It keeps the partition-replace semantics of
+ * the other modes but confines EVERY write to the named teams:
+ *   • the spine is filtered in ClickHouse, so only those rooftops' rows cross the wire;
+ *   • the per-chunk DELETE gains `team_id IN scope`. This is the whole point. The unscoped delete has
+ *     no team predicate — DELETE activity_day ∈ [a,b) hits the WHOLE FLEET — so reusing an unscoped
+ *     mode to bring in one enterprise's back history would rewrite every other rooftop's rows for
+ *     those days with today's spine logic, and lose the window outright if an insert then failed;
+ *   • a leak assertion aborts the chunk if the spine ever returns a team outside the scope.
+ * Because the delete is scoped rather than skipped, this is a true replace within the scope: stale
+ * rows a spine change no longer produces are pruned, so it is safe on teams that ALREADY hold rows
+ * (partial history from before a filter was added), not just on empty ones.
+ * Scoped runs also behave like historical segments: no watermark advance, and no detail-snapshot
+ * rebuild (report_campaigns / report_outcomes / … are fleet-wide full-replace snapshots, so rebuilding
+ * them from a team-scoped pull would blank every other rooftop). The detail tables pick the new
+ * rooftops up on the next normal scheduled run.
+ * The scoped delete passes team ids as a PostgREST `in` filter in the query string, so keep a scope to
+ * the size of an enterprise (tens), not thousands, or the URL will overflow.
  *
  * Env (process.env or .env.local): CLICKHOUSE_HOST/PORT/USER/PASSWORD, SUPABASE_URL,
  * SUPABASE_SERVICE_ROLE_KEY, CHUNK_DAYS (default 14), SYNC_WINDOW_DAYS (hot window, default 3),
@@ -137,10 +159,32 @@ function deltaSql(effWm: string, cap: string): string {
   // watermark or re-sync the (current-snapshot) detail tables.
   const fromArg = (args.find((a) => a.startsWith("--from=")) || "").split("=")[1];
   const toArg = (args.find((a) => a.startsWith("--to=")) || "").split("=")[1];
+  const teamsArg = (args.find((a) => a.startsWith("--teams=")) || "").split("=")[1];
+  const enterpriseArg = (args.find((a) => a.startsWith("--enterprise=")) || "").split("=")[1];
   const fileArg = args.find((a) => !a.startsWith("--"));
   const hotDays = daysArg || Number(process.env.SYNC_WINDOW_DAYS) || 3;
   const today = todayUTC();
   const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });
+
+  /* Resolve the scope, if any: explicit team ids plus every rooftop of an enterprise. A scoped run is
+   * additive-only (no delete) — see the SCOPED MODE note in the header. */
+  const scopeIds = new Set<string>((teamsArg ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  if (enterpriseArg) {
+    const teams = await queryRows<{ team_id: string }>(
+      `SELECT DISTINCT team_id FROM eventila.enterprise_team_details FINAL
+       WHERE enterprise_id = '${enterpriseArg.replace(/'/g, "''")}' AND team_id != ''`,
+    );
+    for (const t of teams) if (t.team_id) scopeIds.add(String(t.team_id));
+    console.log(`scope: enterprise ${enterpriseArg} → ${teams.length} rooftop(s)`);
+  }
+  const scoped = scopeIds.size > 0;
+  if (scoped) {
+    if (teamsArg !== undefined && !scopeIds.size) { console.error("--teams= given but empty"); process.exit(1); }
+    console.log(`SCOPED run over ${scopeIds.size} team(s) — deletes carry team_id IN scope; no watermark advance, no detail rebuild.`);
+  }
+  // Quoted list for the spine wrapper. Team ids are opaque ids from our own control plane, but they
+  // reach here from argv, so escape rather than trust.
+  const scopeSqlList = [...scopeIds].map((t) => `'${t.replace(/'/g, "''")}'`).join(", ");
 
   // Resolve store timezones from the persisted map ONCE (it covers every rooftop the sync has seen, so a
   // long backfill reuses it instead of re-hitting the Spyne API). New rooftops are refreshed live, lazily,
@@ -158,8 +202,20 @@ function deltaSql(effWm: string, cap: string): string {
   // STL merges (full=false) so earliest-speed-to-lead-per-lead accumulates correctly across chunks
   // (we walk oldest-first). Returns daily rows written.
   async function syncChunk(a: string, b: string): Promise<number> {
-    const raw = await queryRows<RawRow>(loadSpineSql(`toDate('${shiftDays(a, -1)}')`, `toDate('${shiftDays(b, 1)}')`));
+    const spine = loadSpineSql(`toDate('${shiftDays(a, -1)}')`, `toDate('${shiftDays(b, 1)}')`, [...scopeIds]);
+    // Scoped: filter in ClickHouse, not in Node — the whole point is to move only the target rooftops'
+    // rows over the wire. The spine aliases its team column with a literal dot (see agentBaseFact.sql),
+    // hence the backticks.
+    const raw = await queryRows<RawRow>(
+      scoped ? `SELECT * FROM (\n${spine}\n) WHERE \`cs.team_id\` IN (${scopeSqlList})` : spine,
+    );
     if (!raw.length) { console.log(`  [${a} .. ${b})  0 spine rows — skip`); return 0; }
+    // Cross-tenant isolation: a scoped run must never carry a rooftop it wasn't asked for. Upserts are
+    // keyed on team_id, so a leaked row would write into another dealer's report. Abort the chunk.
+    if (scoped) {
+      const strays = teamsInRows(raw).filter((t) => !scopeIds.has(t));
+      if (strays.length) throw new Error(`scope leak — spine returned team(s) outside scope: ${strays.join(",")}`);
+    }
     // Lazily acquire store-local tz for any rooftop not yet in the persisted map (usually none). The
     // get-working-days endpoint needs NO token (see tzMap.ts), so this must NOT be gated on
     // SPYNE_API_TOKEN — the token-less sync is the NORMAL case, and gating it here left every brand-new
@@ -183,9 +239,14 @@ function deltaSql(effWm: string, cap: string): string {
     const daily = agg.daily.filter(inRange);
     const breakdown = agg.breakdown.filter(inRange);
     const leadDays = agg.leadDays.filter(inRange);
+    // Partition-replace. The unscoped delete carries NO team predicate — correct for a reconcile that
+    // recomputes every rooftop for these days, catastrophic for a scoped run, which would delete the
+    // whole fleet's rows and reinsert only the scope's. A scoped run adds `team_id IN scope` so the
+    // delete can only ever reach rows it is about to rewrite. See SCOPED MODE in the header.
     for (const t of ["agent_daily", "agent_daily_breakdown", "agent_lead_days"]) {
-      const { error } = await sb.from(t).delete().gte("activity_day", a).lt("activity_day", b);
-      if (error) throw new Error(`${t} delete [${a},${b}): ${error.message}`);
+      const q = sb.from(t).delete().gte("activity_day", a).lt("activity_day", b);
+      const { error } = await (scoped ? q.in("team_id", [...scopeIds]) : q);
+      if (error) throw new Error(`${t} delete [${a},${b})${scoped ? " (scoped)" : ""}: ${error.message}`);
     }
     await insertAll(sb, "agent_daily", daily, PK.agent_daily);
     await insertAll(sb, "agent_daily_breakdown", breakdown, PK.agent_daily_breakdown);
@@ -195,6 +256,9 @@ function deltaSql(effWm: string, cap: string): string {
   }
 
   // ── dev convenience: aggregate a local dump as a single window (no chunking) ──
+  // Refused under a scope: this path wipes all three tables all-time and rebuilds from the dump, the
+  // exact opposite of additive — combining it with --teams/--enterprise would erase the fleet.
+  if (fileArg && scoped) { console.error("--teams/--enterprise cannot be combined with a file dump (that path is a full all-time replace)"); process.exit(1); }
   if (fileArg && fs.existsSync(fileArg)) {
     const raw = JSON.parse(fs.readFileSync(fileArg, "utf8")) as RawRow[];
     const { earliest } = await mergeStlEarliest(sb, raw, { full: true, dayOf });
@@ -209,7 +273,10 @@ function deltaSql(effWm: string, cap: string): string {
 
   // ── decide which day-windows to (re)compute, as a list of [a, b) chunks ──
   let newWatermark: string | null = null;
-  const historical = Boolean(fromArg); // a segment of a long backfill — don't touch watermark/detail
+  // A segment of a long backfill, or any scoped run — don't touch the watermark or the fleet-wide
+  // detail snapshots. Scoped is included because those snapshots are full-replace: rebuilding them
+  // from a team-scoped pull would blank every rooftop outside the scope.
+  const historical = Boolean(fromArg) || scoped;
   const ranges: Array<[string, string]> = [];
   const chunkRange = (start: string, end: string) => {
     for (let a = start; a < end; a = shiftDays(a, CHUNK_DAYS)) ranges.push([a, minDay(shiftDays(a, CHUNK_DAYS), end)]);
@@ -370,6 +437,16 @@ function deltaSql(effWm: string, cap: string): string {
     error: partial ? `partial: ${failedChunks.length}/${ranges.length} chunk(s) failed: ${failedChunks.join(",")}`.slice(0, 500) : null,
   };
   if (!historical) update.watermark = newWatermark || new Date().toISOString();
-  await sb.from("sync_state").update(update).eq("id", 1);
-  console.log(`done. ${totalDaily} daily rows across ${firstStart} .. ${lastEnd} in ${ranges.length} chunk(s)${partial ? ` — PARTIAL (${failedChunks.length} failed: ${failedChunks.join(",")})` : ""}.${historical ? " (segment)" : ` watermark=${update.watermark}`}`);
+  /* sync_state is the FLEET health record — /api/sync-health and anyone debugging the ETL read it. A
+   * SCOPED run covers a handful of rooftops on purpose, so its status says nothing about the fleet:
+   * writing "partial: 6/27 chunks failed" there after a one-enterprise backfill sends the next person
+   * chasing a fleet-wide failure that never happened (observed 2026-09-02). Scoped runs therefore
+   * report to the console only. Unscoped historical segments still post status — they DO cover the
+   * whole fleet for their window; they just must not move the watermark. */
+  if (scoped) {
+    console.log(`sync_state left untouched (scoped run — fleet health record is not ours to set).`);
+  } else {
+    await sb.from("sync_state").update(update).eq("id", 1);
+  }
+  console.log(`done. ${totalDaily} daily rows across ${firstStart} .. ${lastEnd} in ${ranges.length} chunk(s)${partial ? ` — PARTIAL (${failedChunks.length} failed: ${failedChunks.join(",")})` : ""}.${scoped ? " (scoped)" : historical ? " (segment)" : ` watermark=${update.watermark}`}`);
 })().catch((e) => { console.error("FAILED:", e.message); process.exit(1); });
