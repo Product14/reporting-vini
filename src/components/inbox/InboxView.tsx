@@ -52,6 +52,17 @@ import {
   type Persona,
 } from "./api";
 import { ConversationDrawer, type DrawerTarget } from "./ConversationDrawer";
+import {
+  sessionIdOf,
+  chatHandoverEnabled,
+  fetchChatMessages,
+  mintChatStreamToken,
+  chatStreamUrl,
+  postChatToggle,
+  postChatMessage,
+  chatTurnToSms,
+  type ChatTurn,
+} from "./chatHandover";
 
 /* ── tokens ─────────────────────────────────────────────────────────────────── */
 const C = {
@@ -1237,16 +1248,18 @@ function deriveHandover(conv: ConversationsV2 | null, on: boolean, dir: "all" | 
   // Scope to the direction being viewed so inbound and outbound handovers are handled SEPARATELY — an
   // Inbound view takes over the inbound conversation, Outbound the outbound one (RETCONVAI). This also
   // means at most one actionable handover per view, so the footer never stacks multiple take-over prompts.
-  // The manual-send endpoint is SMS-only (/twilio/sms/send → Twilio, `to: conversation.number`). A WEB-CHAT
-  // conversation has no phone `number`, so a rep reply fails ("Failed to send" — Inver Grove Ford, live).
-  // So we do NOT offer take-over on a PENDING chat (Vini keeps answering the customer); we only surface an
-  // already-ACTIVE chat so a rep who claimed one before this fix can hand it back. SMS is unchanged.
+  // This drives the SMS path (/twilio/sms/send → Twilio, `to: conversation.number`). A CHATBOT chat (a chat
+  // row carrying a chat-service sessionId) is now driven separately by chat-service (useChatHandover), so it
+  // is excluded here. What remains under "chat" is only a LEGACY chat with no sessionId — a web-chat has no
+  // phone `number` so a rep reply can't go via SMS (Inver Grove Ford, live); we still surface an already-
+  // ACTIVE legacy chat so a rep who claimed one before this fix can hand it back, but never a PENDING one.
   const flagged = (conv.conversations ?? []).filter((c) => {
     if (!(c.type === "sms" || c.type === "chat")) return false;
+    if (c.type === "chat" && sessionIdOf(c)) return false; // chatbot chat → chat-service owns it, not this path
     if (!(dir === "all" || convDirection(c) === dir)) return false;
     const p = c.humanTransferDetails?.phase;
     if (p === "ACTIVE") return true;
-    if (p === "PENDING") return c.type === "sms"; // chat PENDING is not actionable → don't surface it
+    if (p === "PENDING") return c.type === "sms"; // legacy chat PENDING is not actionable → don't surface it
     return false;
   });
   const active = flagged.find((c) => c.humanTransferDetails?.phase === "ACTIVE");
@@ -1302,6 +1315,160 @@ function messageImages(m: SmsMessage): string[] {
   return Array.from(new Set(out));
 }
 
+/* Stable key for de-duping chat-service turns across the initial fetch, the SSE replay (which can overlap
+ * on reconnect) and the safety poll. messageId when present, else turnId, else a content+time fallback. */
+function turnKey(t: ChatTurn): string {
+  return t.messageId || t.turnId || `${t.role || ""}:${t.createdAt || ""}:${(t.content || "").slice(0, 40)}`;
+}
+
+/* Chatbot / receptionist human-takeover for ONE chat-service session (the conversation on screen).
+ *
+ * Owns the whole lifecycle the integration doc spells out: seed from GET messages, open the SSE
+ * console-stream (with a stream token it re-mints before the 30-min TTL — the stream can't refresh its own
+ * credential), apply turn_result / turn_failed / handover_changed live, and expose claim/hand-back (toggle)
+ * + reply (send). The browser's EventSource handles the server's ~120s recycle itself (Last-Event-ID replay,
+ * forwarded by our proxy); we also run a slow safety re-fetch because a customer's INBOUND message may not
+ * arrive over the stream (the doc lists AI replies / rep messages / handover chips, not customer turns).
+ * De-duped by turnKey throughout, so overlap on replay/poll is harmless.
+ *
+ * Inert unless a sessionId is passed (only a chatbot chat row that carries one), so this is a no-op on every
+ * conversation until the backend puts sessionId on the list — same "gated until the backend ships" shape the
+ * SMS handover used. */
+function useChatHandover(auth: InboxAuth, sessionId: string | null) {
+  const [messages, setMessages] = useState<ChatTurn[]>([]);
+  const [phase, setPhase] = useState<string>("NONE");
+  const [claimedByName, setClaimedByName] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [live, setLive] = useState(false);
+  // Refs the action callbacks read so they always see the current session + suppress the poll right after a
+  // local claim/hand-back (the write lags the read). Kept current from the effect below (runs on every
+  // sessionId change, before any user interaction that reads them).
+  const sessionRef = useRef<string | null>(null);
+  const lastActionRef = useRef(0);
+
+  useEffect(() => {
+    sessionRef.current = sessionId;
+    let stopped = false;
+    let es: EventSource | null = null;
+    let tokenTimer: ReturnType<typeof setTimeout> | null = null;
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const store = new Map<string, ChatTurn>();
+    let since = "";
+
+    const flush = () => {
+      const arr = Array.from(store.values()).sort(
+        (a, b) => (+new Date(a.createdAt || 0) || 0) - (+new Date(b.createdAt || 0) || 0),
+      );
+      since = arr.reduce((mx, t) => (t.createdAt && t.createdAt > mx ? t.createdAt : mx), since);
+      if (!stopped) setMessages(arr);
+    };
+    const ingest = (turns: ChatTurn[], reset = false) => {
+      if (reset) store.clear();
+      for (const t of turns) if (t) store.set(turnKey(t), t);
+      flush();
+    };
+    const handleTurn = (data: string) => {
+      let t: ChatTurn | null = null;
+      try { t = JSON.parse(data) as ChatTurn; } catch { return; }
+      if (!t || stopped) return;
+      if ((t.rowType || "").toLowerCase() === "handover_changed") {
+        // Reflect a claim/release the moment it streams — including one made from ANOTHER tab or the 15-min
+        // auto-release, which is the whole point of watching the stream for phase (not just messages).
+        const ev = String(t.metadata?.event ?? "").toLowerCase();
+        if (ev === "claimed") { setPhase("ACTIVE"); setClaimedByName((t.metadata?.userName as string) || t.authorName || null); }
+        else if (/(release|hand.?back)/.test(ev)) { setPhase("NONE"); setClaimedByName(null); }
+      }
+      ingest([t]);
+    };
+
+    // Reset the visible state for the new session (or teardown).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset chat-handover state on session change
+    setMessages([]); setPhase("NONE"); setClaimedByName(null); setError(""); setLive(false);
+    if (!sessionId || !chatHandoverEnabled(auth)) return () => { stopped = true; };
+
+    const openStream = async () => {
+      const tok = await mintChatStreamToken(auth, sessionId);
+      if (stopped) return;
+      if (!tok) { setError("Live chat updates are unavailable right now — messages may lag."); return; }
+      try {
+        es = new EventSource(chatStreamUrl(auth, sessionId, tok.token, since || undefined));
+      } catch { setError("Couldn't open the live chat stream."); return; }
+      const onTurn = (e: Event) => handleTurn((e as MessageEvent).data);
+      es.addEventListener("turn_result", onTurn);
+      es.addEventListener("turn_failed", onTurn);
+      es.addEventListener("message", onTurn); // unnamed events, defensively
+      es.onopen = () => { if (!stopped) setLive(true); };
+      es.onerror = () => { if (!stopped) setLive(false); }; // browser auto-reconnects via Last-Event-ID
+      // Re-mint the stream token and reopen (with the latest `since`) before the 30-min TTL — the EventSource
+      // can't pick up a fresh credential on its own, and its next silent reconnect would fail auth.
+      tokenTimer = setTimeout(() => {
+        if (stopped) return;
+        es?.close(); es = null;
+        void openStream();
+      }, Math.max(30, tok.expiresInSeconds - 60) * 1000);
+    };
+
+    (async () => {
+      const init = await fetchChatMessages(auth, sessionId);
+      if (stopped) return;
+      ingest(init.messages, true);
+      setPhase(init.phase || "NONE");
+      setClaimedByName(init.claimedByName ?? null);
+      await openStream();
+    })();
+
+    // Safety re-fetch: guarantees a customer's inbound message and the current phase show even if the stream
+    // omits customer turns. Merged + de-duped; won't fight a local claim within 5s of the action.
+    poll = setInterval(async () => {
+      const r = await fetchChatMessages(auth, sessionId);
+      if (stopped) return;
+      if (r.messages.length) ingest(r.messages);
+      if (r.phase && Date.now() - lastActionRef.current > 5000) {
+        setPhase(r.phase);
+        setClaimedByName(r.claimedByName ?? null);
+      }
+    }, 20000);
+
+    return () => {
+      stopped = true;
+      es?.close(); es = null;
+      if (tokenTimer) clearTimeout(tokenTimer);
+      if (poll) clearInterval(poll);
+    };
+  }, [sessionId, auth]);
+
+  const toggle = useCallback(async (): Promise<string | null> => {
+    const sid = sessionRef.current;
+    if (!sid) return null;
+    setBusy(true); setError(""); lastActionRef.current = Date.now();
+    const res = await postChatToggle(auth, sid);
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.status === 409 ? "Someone else is handling this now — refresh." : (res.error || "Couldn't update handover — retry."));
+      return null;
+    }
+    if (res.phase) { setPhase(res.phase); setClaimedByName(res.claimedByName ?? null); lastActionRef.current = Date.now(); }
+    return res.phase ?? null;
+  }, [auth]);
+
+  const send = useCallback(async (body: string): Promise<boolean> => {
+    const sid = sessionRef.current;
+    const text = (body || "").trim();
+    if (!sid || !text) return false;
+    setBusy(true); setError("");
+    const res = await postChatMessage(auth, sid, text);
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.status === 409 ? "Another rep claimed this — you can't send." : res.status === 400 ? "Take over first, then send." : (res.error || "Couldn't send — retry."));
+      return false;
+    }
+    return true; // the sent turn renders when it echoes back over the stream, not from this response
+  }, [auth]);
+
+  return { messages, phase, claimedByName, busy, error, live, toggle, send };
+}
+
 function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, onDetails }: { auth: InboxAuth; customer: InboxCustomer; focusConvId?: string | null; onHandoverChanged?: (phase: string | null) => void; onBack?: () => void; onDetails?: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   // A conversation clicked from the None-mode list that's OLDER than the loaded window (heavy customers can
@@ -1315,6 +1482,9 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   const [hoErr, setHoErr] = useState("");
   const [draft, setDraft] = useState("");
   const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "failed">("idle"); // rep-SMS delivery feedback
+  // Chatbot/receptionist (chat-service) reply composer — separate from the SMS draft above.
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatSendState, setChatSendState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
   // §7A purple summary box — persona.conversationMemory.summaryShort, shown at the top of the chat.
   const [summary, setSummary] = useState<string>("");
   // §03 feedback — keyed `${conversationId}#${messageIndex}` → thumb direction.
@@ -1432,6 +1602,30 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
   const aiAgentName = conv?.conversations.map((c) => c.callData?.agentName).find((n) => n && n.trim()) || AI_AGENT.name || "Vini";
   const custFirst = (customer.customer_name || "Customer").trim().split(/\s+/)[0];
 
+  // ── Chatbot / receptionist human-takeover (chat-service) ─────────────────────────────────────────────
+  // A CHATBOT chat (type "chat" carrying a chat-service sessionId) is driven by chat-service, not the Twilio
+  // SMS path: its handover state, live messages and reply all go through /chat/sessions/:sessionId/*. Pick
+  // the latest such conversation in the current direction view; the hook streams it live and exposes
+  // claim/hand-back/reply. When none carries a sessionId (the backend hasn't shipped it yet), chatSession is
+  // null and every branch below falls back to the existing SMS behaviour untouched.
+  const chatSession = useMemo(() => {
+    if (!handoverEnabled()) return null;
+    const pick = (conv?.conversations ?? [])
+      .filter((c) => !!sessionIdOf(c) && (dir === "all" || convDirection(c) === dir))
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+    const sid = pick ? sessionIdOf(pick) : null;
+    return pick && sid ? { conversationId: pick.conversationId, sessionId: sid } : null;
+  }, [conv, dir]);
+  const chatHo = useChatHandover(auth, chatSession?.sessionId ?? null);
+  const submitChat = useCallback(async () => {
+    const body = chatDraft.trim();
+    if (!body) return;
+    setChatSendState("sending");
+    const ok = await chatHo.send(body);
+    if (ok) { setChatDraft(""); setChatSendState("sent"); }
+    else setChatSendState("failed");
+  }, [chatDraft, chatHo]);
+
   // §13 — one chronological, day-grouped stream: every SMS/chat bubble + call + journey milestone interleaved.
   const nodes = useMemo<ThreadNode[]>(() => {
     if (!conv) return [];
@@ -1448,11 +1642,15 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
       const recDir = convDirection(rec);
       if (dir !== "all" && recDir !== "unknown" && recDir !== dir) continue;
       const base = +new Date(rec.createdAt) || 0;
-      if ((rec.type === "sms" || rec.type === "chat") && Array.isArray(rec.smsMessages)) {
+      // A chatbot chat that chat-service is streaming: render its AUTHORITATIVE live turns (mapped to the
+      // SmsMessage shape) instead of the lagging mirrored copy, so rep replies + AI replies + the claim/
+      // hand-back chip appear in real time. Falls back to the mirrored smsMessages for every other row.
+      const useChatSvc = !!chatSession && rec.conversationId === chatSession.conversationId && chatHo.messages.length > 0;
+      if ((rec.type === "sms" || rec.type === "chat") && (Array.isArray(rec.smsMessages) || useChatSvc)) {
         // Website-chat conversations reuse the SMS message array (same roles + JSON envelope); only the
         // channel tag on the bubble differs. Email records also arrive now but carry no bodies yet — skipped.
         const isChat = rec.type === "chat";
-        const msgs = rec.smsMessages;
+        const msgs = useChatSvc ? chatHo.messages.map(chatTurnToSms) : (rec.smsMessages ?? []);
         // Pair each tool CALL (assistant msg w/ toolCalls) with its RESULT (role:"tool", toolCallId).
         const resultByCallId: Record<string, { text: string; extra?: string }> = {};
         for (const m of msgs) {
@@ -1578,7 +1776,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
       }
     }
     return out.sort((a, b) => a.t - b.t);
-  }, [conv, dir, aiAgentName, custFirst, focusedConv]);
+  }, [conv, dir, aiAgentName, custFirst, focusedConv, chatSession, chatHo.messages]);
 
   // Scroll behaviour: when opened from a None-mode row, JUMP to that conversation (once); otherwise keep
   // the thread pinned to the newest message as it grows. The focus guard stops the 8s poll from re-yanking.
@@ -1833,6 +2031,63 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
                 {/* toggle/hand-back errors surface here; the SMS delivery status is shown under the sent message. */}
                 {hoErr && <p className="text-[11px]" style={{ color: C.red }}>⚠ {hoErr}</p>}
               </>
+            )}
+          </div>
+        </div>
+      ) : handoverOn && chatSession ? (
+        // Chatbot / receptionist (chat-service). Unlike SMS this reply reaches the web-chat / receptionist
+        // session (not Twilio), so web-chat take-over actually works. Phase comes from chat-service, live.
+        <div className="shrink-0 border-t bg-white px-4 py-3" style={{ borderColor: C.border }}>
+          <div className="mx-auto flex w-full max-w-[760px] flex-col gap-2">
+            {chatHo.phase === "ACTIVE" ? (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[12px] font-medium" style={{ color: C.green }}>
+                    🙋 You&apos;re handling this chat — Vini is paused{chatHo.claimedByName ? ` · ${chatHo.claimedByName}` : ""}
+                  </p>
+                  <button onClick={() => void chatHo.toggle()} disabled={chatHo.busy} className="shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-semibold disabled:opacity-60" style={{ borderColor: C.border, color: C.sub }}>
+                    {chatHo.busy ? "…" : "Hand back to Vini"}
+                  </button>
+                </div>
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={chatDraft}
+                    onChange={(e) => { setChatDraft(e.target.value); if (chatSendState !== "idle") setChatSendState("idle"); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void submitChat(); } }}
+                    rows={1}
+                    placeholder="Type a reply to the customer…  (Enter to send · Shift+Enter for a new line)"
+                    className="max-h-[120px] min-h-[40px] flex-1 resize-y rounded-lg border px-3 py-2 text-[13px] outline-none"
+                    style={{ borderColor: C.border, color: C.dark }}
+                  />
+                  <button onClick={() => void submitChat()} disabled={chatHo.busy || !chatDraft.trim()} className="shrink-0 rounded-lg px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50" style={{ background: C.primary }}>
+                    {chatSendState === "sending" ? "Sending…" : "Send"}
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!chatHo.live && <span className="text-[11px]" style={{ color: C.sub }}>Live updates reconnecting…</span>}
+                  {chatSendState === "sent" && <span className="text-[11px] font-medium" style={{ color: C.green }}>✓ Sent</span>}
+                  {chatHo.error ? <span className="text-[11px]" style={{ color: C.red }}>⚠ {chatHo.error}</span>
+                    : chatSendState === "failed" && <span className="text-[11px]" style={{ color: C.red }}>⚠ Couldn&apos;t send — tap Send to retry</span>}
+                </div>
+              </>
+            ) : chatHo.phase === "PENDING" ? (
+              <div className="flex flex-col gap-2 rounded-xl border px-4 py-3" style={{ borderColor: C.orange, background: C.orangeAccent }}>
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-[13px] font-semibold" style={{ color: C.orange }}>⚑ Vini needs a human on this chat</p>
+                  <button onClick={() => void chatHo.toggle()} disabled={chatHo.busy} className="shrink-0 rounded-lg px-3.5 py-2 text-[13px] font-semibold text-white disabled:opacity-60" style={{ background: C.orange }}>
+                    {chatHo.busy ? "…" : "Take over"}
+                  </button>
+                </div>
+                {chatHo.error && <p className="text-[11px]" style={{ color: C.red }}>{chatHo.error}</p>}
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+                <p className="text-[12px]" style={{ color: C.sub }}>💬 Vini is handling this web chat</p>
+                <button onClick={() => void chatHo.toggle()} disabled={chatHo.busy} className="shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-semibold disabled:opacity-60" style={{ borderColor: C.primary, color: C.primary }}>
+                  {chatHo.busy ? "…" : "Take over"}
+                </button>
+                {chatHo.error && <span className="text-[11px]" style={{ color: C.red }}>{chatHo.error}</span>}
+              </div>
             )}
           </div>
         </div>

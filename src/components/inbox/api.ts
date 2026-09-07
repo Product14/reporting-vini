@@ -263,6 +263,12 @@ export interface ConvRecord {
   // AUTHORITATIVE direction from the backend ("inbound" | "outbound"), on conversations/v2 (RETCONVAI, UAT+).
   // Preferred over the earliest-message heuristic in convDirection() — fixes Inbound-count-0 + parallel in/out.
   conversationType?: string | null;
+  // chat-service session id for a CHATBOT/RECEPTIONIST conversation (the new human-takeover surface keyed by
+  // sessionId — see chatHandover.ts). Present only on `type:"chat"` rows once the backend adds it to the
+  // list/v2 payload; a chat row WITH a sessionId is driven by chat-service (claim/reply/stream), a chat row
+  // WITHOUT one falls back to the legacy behaviour. `chatSessionId` is an accepted alias.
+  sessionId?: string | null;
+  chatSessionId?: string | null;
 }
 export interface LeadJourneyEvent {
   eventType: string;
