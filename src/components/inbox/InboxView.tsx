@@ -42,6 +42,7 @@ import {
   type CallAnalysis,
   type InboxAuth,
   type InboxCustomer,
+  type CustomerLead,
   type LeadsPage,
   type ConversationsV2,
   type ConvRecord,
@@ -399,7 +400,14 @@ function Inbox() {
   const [channel, setChannel] = useState<"all" | "sms" | "chat" | "call" | "email">("all");
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
-  const [leadType, setLeadType] = useState<string[]>([]);
+  // All six lead-level filters in one object (get-customers-list). patchFilters merges a partial so each
+  // control updates just its slice. The old single "leadType" control is now `temperature` (proper param).
+  const [leadFilters, setLeadFilters] = useState<LeadFilters>(EMPTY_LEAD_FILTERS);
+  const patchFilters = useCallback((p: Partial<LeadFilters>) => setLeadFilters((f) => ({ ...f, ...p })), []);
+  // Grow-only option catalogs for the free-text pickers (outcome, lead source), built from values actually
+  // seen — a hardcoded list would drift as new upstream values appear (spec ⚠). Reset on scope change below.
+  const [outcomeCatalog, setOutcomeCatalog] = useState<string[]>([]);
+  const [sourceCatalog, setSourceCatalog] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>("all");
   const [customStart, setCustomStart] = useState(""); // YYYY-MM-DD, used when dateRange === "custom"
   const [customEnd, setCustomEnd] = useState("");
@@ -408,7 +416,7 @@ function Inbox() {
   const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
   const [filtersOpen, setFiltersOpen] = useState(false);   // desktop popover
   const [sheetOpen, setSheetOpen] = useState(false);        // mobile all-in-one sheet
-  const activeFilterCount = leadType.length + (dateRange !== "all" ? 1 : 0);
+  const activeFilterCount = leadFilterCount(leadFilters) + (dateRange !== "all" ? 1 : 0);
   // The mobile button stands in for four controls, so its badge counts every non-default among them.
   const mobileFilterCount = activeFilterCount + (groupBy !== "customer" ? 1 : 0) + (channel !== "all" ? 1 : 0);
 
@@ -554,13 +562,18 @@ function Inbox() {
       // Needs-Attention shows ALL pending-handover convs, so it overrides the Unread scope while active.
       unreadOnly: !needsAttention && tab === "unread",
       searchTerm: debounced || undefined,
-      leadType: leadType.length ? leadType : undefined,
+      temperature: leadFilters.temperature.length ? leadFilters.temperature : undefined,
+      externalType: leadFilters.externalType.length ? leadFilters.externalType : undefined,
+      engagementJourneys: leadFilters.journeys.length ? leadFilters.journeys : undefined,
+      outcome: leadFilters.outcome.length ? leadFilters.outcome : undefined,
+      leadSource: leadFilters.leadSource.length ? leadFilters.leadSource : undefined,
+      appointmentBooked: leadFilters.appointmentBooked === "yes" ? true : leadFilters.appointmentBooked === "no" ? false : undefined,
       sortBy: dateBasis,
       startDate: range.startDate,
       endDate: range.endDate,
       humanTransferPhase: needsAttention ? "PENDING" : undefined,
     } as const;
-  }, [tab, debounced, leadType, dateBasis, dateRange, customStart, customEnd, needsAttention]);
+  }, [tab, debounced, leadFilters, dateBasis, dateRange, customStart, customEnd, needsAttention]);
 
   // Load page 1 (reset) whenever scope / tab / search / filters change.
   useEffect(() => {
@@ -599,6 +612,26 @@ function Inbox() {
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, enterpriseId, spyneToken, spyneEnv, serviceType, listQuery]);
+
+  // Option catalogs for the free-text pickers (outcome / lead source). Reset when the rooftop or department
+  // changes (values are team + serviceType scoped), then grow-only as pages load — so once you filter by a
+  // value the OTHER values don't vanish from the picker.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset catalogs on scope change
+    setOutcomeCatalog([]); setSourceCatalog([]);
+  }, [teamId, enterpriseId, serviceType]);
+  useEffect(() => {
+    if (!customers.length) return;
+    const o: string[] = [], s: string[] = [];
+    for (const c of customers) for (const l of c.leads ?? []) {
+      if (l.outcome) o.push(l.outcome);
+      if (l.source) s.push(l.source);
+    }
+    // Only setState when there's genuinely a new value (else an unchanged union re-triggers this every render).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- union new values into the grow-only catalog
+    setOutcomeCatalog((prev) => (o.some((x) => !prev.includes(x)) ? Array.from(new Set([...prev, ...o])).sort() : prev));
+    setSourceCatalog((prev) => (s.some((x) => !prev.includes(x)) ? Array.from(new Set([...prev, ...s])).sort() : prev));
+  }, [customers]);
 
   // Live PENDING-handover count for the "Needs Attention" badge. Polled (no websocket) so the
   // badge tracks conversations entering/leaving PENDING in ~real time. Cheap: a limit:1 query, total only.
@@ -856,7 +889,7 @@ function Inbox() {
           )}
           {filtersOpen && groupBy !== "none" && (
             <FiltersPopover
-              leadType={leadType} onLeadType={setLeadType}
+              filters={leadFilters} onPatch={patchFilters} outcomeOptions={outcomeCatalog} sourceOptions={sourceCatalog}
               dateRange={dateRange} onDateRange={setDateRange}
               customStart={customStart} onCustomStart={setCustomStart}
               customEnd={customEnd} onCustomEnd={setCustomEnd}
@@ -1058,7 +1091,7 @@ function Inbox() {
             channel={channel} onChannel={setChannel}
             onExport={() => exportCsv(customers)}
             onClose={() => setSheetOpen(false)}
-            leadType={leadType} onLeadType={setLeadType}
+            filters={leadFilters} onPatch={patchFilters} outcomeOptions={outcomeCatalog} sourceOptions={sourceCatalog}
             dateRange={dateRange} onDateRange={setDateRange}
             customStart={customStart} onCustomStart={setCustomStart}
             customEnd={customEnd} onCustomEnd={setCustomEnd}
@@ -1203,6 +1236,9 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: Inb
         </p>
         {unread > 0 && <span className="size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
       </div>
+      {/* Which automated journeys reached this customer (0..4) — only rendered when present, so an
+          untouched-by-automation row keeps its two-line height. */}
+      {(c.engagementJourneys?.length ?? 0) > 0 && <JourneyChips journeys={c.engagementJourneys} />}
     </button>
   );
 }
@@ -2598,6 +2634,12 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
             <p className="truncate text-[13px] font-semibold" style={{ color: C.dark }}>{V.title}</p>
             <div className="flex items-center gap-1.5">
               {rec.callTitle && <p className="min-w-0 truncate text-[12px]" style={{ color: C.sub }}>{rec.callTitle}</p>}
+              {/* Which automated journey produced THIS call (engagementJourney; null = not attributable). */}
+              {rec.engagementJourney && JOURNEY_META[rec.engagementJourney] && (
+                <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold" style={{ background: JOURNEY_META[rec.engagementJourney].bg, color: JOURNEY_META[rec.engagementJourney].fg }}>
+                  {JOURNEY_META[rec.engagementJourney].label}
+                </span>
+              )}
               <span className="shrink-0 text-[11px] lg:hidden" style={{ color: C.sub }}>{fmtTime(rec.createdAt)}</span>
             </div>
           </div>
@@ -3206,6 +3248,23 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
               <span key={st} className="rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: "#f1f5f9", color: "#64748b" }}>{st}</span>
             ))}
           </div>
+
+          {/* Which automated journeys ever reached this customer (get-customers-list engagementJourneys). */}
+          {(customer.engagementJourneys?.length ?? 0) > 0 && (
+            <div>
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Reached by</p>
+              <JourneyChips journeys={customer.engagementJourneys} size="md" />
+            </div>
+          )}
+
+          {/* Per-lead detail (type / source / outcome / vehicle) from get-customers-list. A customer can
+              have more than one lead; keyed on lead_id (order not guaranteed). */}
+          {(customer.leads?.length ?? 0) > 0 && (
+            <RightSection title={customer.leads!.length > 1 ? `Leads (${customer.leads!.length})` : "Lead detail"}>
+              {customer.leads!.map((l) => <LeadDetailCard key={l.lead_id} lead={l} />)}
+            </RightSection>
+          )}
+
           <div>
             <button
               onClick={handleStop}
@@ -3476,9 +3535,85 @@ function dueLabel(due?: string): { text: string; style: React.CSSProperties } {
 }
 
 /* ── filters popover (§11) — every option maps to a real leads/v2 query param ─── */
-const LEAD_TYPES = ["HOT", "WARM", "COLD", "DEAD"];
-// NOTE: the Lead-source filter was removed — leads/v2 rejects `leadSource` for every value (verified on
-// prod, returns 0 regardless of casing), so it only ever emptied the list. Re-add once the API supports it.
+// Lead temperature — the response is lowercase (hot|warm|cold|dead); the API is case-insensitive on the way
+// in. Sent as the proper `temperature` param now (was the legacy `leadType` alias). Ordered hot→dead.
+const TEMPERATURES = ["hot", "warm", "cold", "dead"];
+// The REAL lead type (external_type), distinct from temperature. Exact-match, but a known small set.
+const EXTERNAL_TYPES = ["Service", "Internet", "Walk-in", "Phone", "PartsOrder"];
+// The four automated journeys — value + a dealer-language label. Fixed order (matches the response order).
+const JOURNEYS: { v: string; label: string }[] = [
+  { v: "INBOUND_CALL", label: "Inbound call" },
+  { v: "SPEED_TO_LEAD", label: "Speed to lead" },
+  { v: "FOLLOWUP", label: "Follow-up" },
+  { v: "CAMPAIGN", label: "Campaign" },
+];
+// Per-journey chip styling — reuses the existing inbox accent tokens (this screen predates the design-OS
+// kit and runs on the local `C` palette; matching it keeps the chips consistent with the rest of the inbox).
+const JOURNEY_META: Record<string, { label: string; bg: string; fg: string }> = {
+  INBOUND_CALL: { label: "Inbound call", bg: "#e6f7ef", fg: C.green },
+  SPEED_TO_LEAD: { label: "Speed to lead", bg: C.primaryAccent, fg: C.primary },
+  FOLLOWUP: { label: "Follow-up", bg: C.orangeAccent, fg: C.orange },
+  CAMPAIGN: { label: "Campaign", bg: C.blueAccent, fg: "#2f7bff" },
+};
+
+// All six lead-level filters as one object (get-customers-list). appointmentBooked is TRISTATE: "all" sends
+// nothing (both), "yes"→true, "no"→false — a checkbox that always sent its value would break the third state.
+export type LeadFilters = {
+  temperature: string[];
+  externalType: string[];
+  journeys: string[];
+  outcome: string[];
+  leadSource: string[];
+  appointmentBooked: "all" | "yes" | "no";
+};
+const EMPTY_LEAD_FILTERS: LeadFilters = { temperature: [], externalType: [], journeys: [], outcome: [], leadSource: [], appointmentBooked: "all" };
+const leadFilterCount = (f: LeadFilters) =>
+  f.temperature.length + f.externalType.length + f.journeys.length + f.outcome.length + f.leadSource.length + (f.appointmentBooked !== "all" ? 1 : 0);
+
+// Engagement-journey chips — 0..4, always in the fixed JOURNEYS order regardless of the array's order.
+function JourneyChips({ journeys, size = "sm" }: { journeys?: string[] | null; size?: "sm" | "md" }) {
+  const set = new Set(journeys ?? []);
+  const items = JOURNEYS.filter((j) => set.has(j.v)).map((j) => JOURNEY_META[j.v]).filter(Boolean);
+  if (!items.length) return null;
+  const cls = size === "md" ? "px-2 py-0.5 text-[11px]" : "px-1.5 py-0.5 text-[10px]";
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {items.map((m, i) => (
+        <span key={i} className={`shrink-0 rounded-full font-semibold ${cls}`} style={{ background: m.bg, color: m.fg }}>{m.label}</span>
+      ))}
+    </div>
+  );
+}
+
+// One lead's detail (get-customers-list customers[].leads[]) — type / source / outcome + the newest active
+// vehicle interest. Rendered in the right panel; skips fields that are null.
+function LeadDetailCard({ lead }: { lead: CustomerLead }) {
+  const v = lead.leadVehicleInterest;
+  const vehicle = [v?.year, v?.make, v?.model, v?.trim].filter(Boolean).join(" ");
+  const rows: [string, string][] = [];
+  if (lead.external_type) rows.push(["Type", lead.external_type]);
+  if (lead.source) rows.push(["Source", lead.source]);
+  if (lead.outcome) rows.push(["Outcome", lead.outcome]);
+  return (
+    <div className="rounded-xl border p-3" style={{ borderColor: C.border }}>
+      {vehicle
+        ? <p className="text-[12px] font-semibold" style={{ color: C.dark }}>{vehicle}</p>
+        : <p className="text-[12px] font-medium" style={{ color: C.sub }}>No vehicle interest yet</p>}
+      {v?.vin && <p className="mt-0.5 text-[11px]" style={{ color: C.sub }}>VIN {v.vin}</p>}
+      {rows.length > 0 && (
+        <div className="mt-2 flex flex-col gap-1">
+          {rows.map(([k, val]) => (
+            <div key={k} className="flex items-baseline justify-between gap-3">
+              <span className="shrink-0 text-[11px]" style={{ color: C.sub }}>{k}</span>
+              <span className="text-right text-[11px] font-medium" style={{ color: C.dark }}>{val}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type DateRange = "all" | "today" | "7d" | "custom";
 const DATE_RANGES: { v: DateRange; label: string }[] = [
   { v: "all", label: "All time" }, { v: "today", label: "Today" }, { v: "7d", label: "Last 7 days" }, { v: "custom", label: "Custom" },
@@ -3505,9 +3640,10 @@ function dateRangeToIso(r: DateRange, customStart?: string, customEnd?: string):
 }
 
 function FiltersPopover({
-  leadType, onLeadType, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis, onClose,
+  filters, onPatch, outcomeOptions, sourceOptions, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis, onClose,
 }: {
-  leadType: string[]; onLeadType: (v: string[]) => void;
+  filters: LeadFilters; onPatch: (p: Partial<LeadFilters>) => void;
+  outcomeOptions: string[]; sourceOptions: string[];
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   customStart: string; onCustomStart: (v: string) => void;
   customEnd: string; onCustomEnd: (v: string) => void;
@@ -3532,7 +3668,7 @@ function FiltersPopover({
     <>
       <div ref={popRef} className="animate-dropdown-in absolute right-0 top-11 z-50 hidden max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg lg:block" style={{ borderColor: C.border }}>
         <FilterSections
-          leadType={leadType} onLeadType={onLeadType}
+          filters={filters} onPatch={onPatch} outcomeOptions={outcomeOptions} sourceOptions={sourceOptions}
           dateRange={dateRange} onDateRange={onDateRange}
           customStart={customStart} onCustomStart={onCustomStart}
           customEnd={customEnd} onCustomEnd={onCustomEnd}
@@ -3560,12 +3696,13 @@ function SheetGroup({ label, children }: { label: string; children: React.ReactN
  * the mobile header is one row. Desktop keeps the four discrete controls (it has the width for them). */
 function MobileControlsSheet({
   groupBy, onGroupBy, channel, onChannel, onExport, onClose,
-  leadType, onLeadType, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
+  filters, onPatch, outcomeOptions, sourceOptions, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
 }: {
   groupBy: "customer" | "none"; onGroupBy: (v: "customer" | "none") => void;
   channel: "all" | "sms" | "chat" | "call" | "email"; onChannel: (v: "all" | "sms" | "chat" | "call" | "email") => void;
   onExport: () => void; onClose: () => void;
-  leadType: string[]; onLeadType: (v: string[]) => void;
+  filters: LeadFilters; onPatch: (p: Partial<LeadFilters>) => void;
+  outcomeOptions: string[]; sourceOptions: string[];
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   customStart: string; onCustomStart: (v: string) => void;
   customEnd: string; onCustomEnd: (v: string) => void;
@@ -3621,7 +3758,7 @@ function MobileControlsSheet({
         {groupBy !== "none" && (
           <div className="border-t px-4 py-3.5" style={{ borderColor: C.border }}>
             <FilterSections
-              leadType={leadType} onLeadType={onLeadType}
+              filters={filters} onPatch={onPatch} outcomeOptions={outcomeOptions} sourceOptions={sourceOptions}
               dateRange={dateRange} onDateRange={onDateRange}
               customStart={customStart} onCustomStart={onCustomStart}
               customEnd={customEnd} onCustomEnd={onCustomEnd}
@@ -3652,18 +3789,50 @@ function MobileControlsSheet({
 
 /* The date / basis / temperature controls themselves. Shared verbatim by the desktop popover above and
  * the mobile sheet, so the two can never drift apart. */
-function FilterSections({
-  leadType, onLeadType, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
+/* A labelled multi-select checkbox group — one lead-level filter. Module scope so it isn't a fresh type
+ * each render. `capitalize` for the temperature values (lowercase in, Title-ish out). Empty options (a
+ * data-driven picker with nothing loaded yet) shows a caption instead of an empty block. */
+function FilterCheckGroup({
+  title, options, selected, onToggle, capitalize = false, emptyNote,
 }: {
-  leadType: string[]; onLeadType: (v: string[]) => void;
+  title: string; options: { v: string; label: string }[]; selected: string[];
+  onToggle: (v: string) => void; capitalize?: boolean; emptyNote?: string;
+}) {
+  return (
+    <div className="mb-3">
+      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>{title}</p>
+      {options.length === 0 ? (
+        <p className="px-2 text-[11px]" style={{ color: C.sub }}>{emptyNote || "None yet"}</p>
+      ) : (
+        <div className="flex max-h-44 flex-col gap-1 overflow-y-auto">
+          {options.map((o) => (
+            <label key={o.v} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2.5 text-[12px] hover:bg-[#fafafa] lg:py-1.5" style={{ color: C.dark }}>
+              <input type="checkbox" checked={selected.includes(o.v)} onChange={() => onToggle(o.v)} className="accent-[#4600f2]" />
+              <span className={capitalize ? "capitalize" : undefined}>{o.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterSections({
+  filters, onPatch, outcomeOptions, sourceOptions,
+  dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
+}: {
+  filters: LeadFilters; onPatch: (p: Partial<LeadFilters>) => void;
+  outcomeOptions: string[]; sourceOptions: string[];
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   customStart: string; onCustomStart: (v: string) => void;
   customEnd: string; onCustomEnd: (v: string) => void;
   dateBasis: "lead" | "conversation"; onDateBasis: (v: "lead" | "conversation") => void;
 }) {
-  const toggle = (arr: string[], set: (v: string[]) => void, t: string) =>
-    set(arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t]);
-  const anyActive = leadType.length || dateRange !== "all";
+  const toggle = (key: keyof LeadFilters, t: string) => {
+    const arr = filters[key] as string[];
+    onPatch({ [key]: arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t] } as Partial<LeadFilters>);
+  };
+  const anyActive = leadFilterCount(filters) > 0 || dateRange !== "all";
   return (
     <>
       <div>
@@ -3699,17 +3868,45 @@ function FilterSections({
             </button>
           ))}
         </div>
-        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Lead temperature</p>
-        <div className="mb-3 flex flex-col gap-1">
-          {LEAD_TYPES.map((t) => (
-            <label key={t} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2.5 text-[12px] hover:bg-[#fafafa] lg:py-1.5" style={{ color: C.dark }}>
-              <input type="checkbox" checked={leadType.includes(t)} onChange={() => toggle(leadType, onLeadType, t)} className="accent-[#4600f2]" />
-              <span className="capitalize">{t.toLowerCase()}</span>
-            </label>
-          ))}
+
+        {/* Lead-level filters — each returns customers with ≥1 matching lead (AND across filters). */}
+        <FilterCheckGroup title="Lead temperature" capitalize
+          options={TEMPERATURES.map((t) => ({ v: t, label: t }))}
+          selected={filters.temperature} onToggle={(v) => toggle("temperature", v)} />
+        <FilterCheckGroup title="Lead type"
+          options={EXTERNAL_TYPES.map((t) => ({ v: t, label: t }))}
+          selected={filters.externalType} onToggle={(v) => toggle("externalType", v)} />
+        <FilterCheckGroup title="Reached by"
+          options={JOURNEYS.map((j) => ({ v: j.v, label: j.label }))}
+          selected={filters.journeys} onToggle={(v) => toggle("journeys", v)} />
+
+        {/* Appointment — THREE states: All (both, sends nothing) / Booked (true) / None (false). */}
+        <div className="mb-3">
+          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Appointment</p>
+          <div className="flex gap-1.5">
+            {([["all", "All"], ["yes", "Booked"], ["no", "None"]] as const).map(([v, label]) => (
+              <button key={v} onClick={() => onPatch({ appointmentBooked: v })}
+                className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
+                style={filters.appointmentBooked === v ? { borderColor: C.primary, color: C.primary, background: C.primaryAccent } : { borderColor: C.border, color: C.sub }}>
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {/* Outcome + Lead source are free text — options come from the values actually seen (grow-only), so
+            they never drift out of sync with a hardcoded list (spec ⚠). */}
+        <FilterCheckGroup title="Outcome"
+          options={outcomeOptions.map((o) => ({ v: o, label: o }))}
+          selected={filters.outcome} onToggle={(v) => toggle("outcome", v)}
+          emptyNote="Populated as leads load" />
+        <FilterCheckGroup title="Lead source"
+          options={sourceOptions.map((s) => ({ v: s, label: s }))}
+          selected={filters.leadSource} onToggle={(v) => toggle("leadSource", v)}
+          emptyNote="Populated as leads load" />
+
         {anyActive ? (
-          <button onClick={() => { onLeadType([]); onDateRange("all"); onCustomStart(""); onCustomEnd(""); }}
+          <button onClick={() => { onPatch(EMPTY_LEAD_FILTERS); onDateRange("all"); onCustomStart(""); onCustomEnd(""); }}
             className="mt-1 w-full rounded-lg border py-2 text-[11px] font-medium lg:py-1.5" style={{ borderColor: C.border, color: C.sub }}>
             Clear all
           </button>

@@ -43,6 +43,25 @@ export interface UnreadCounts {
   emailUnread: number;
   smsUnread: number;
 }
+// The newest active vehicle interest on a lead. ALWAYS present as an object (all five keys, each
+// string|null) on a get-customers-list lead — so never null-check the object, only the fields. `year`
+// is a STRING ("1997"), not a number. All five null = no active interest.
+export interface LeadVehicleInterest {
+  make: string | null;
+  model: string | null;
+  year: string | null;
+  trim: string | null;
+  vin: string | null;
+}
+// One of the customer's leads inside the requested serviceType (get-customers-list customers[].leads[]).
+export interface CustomerLead {
+  lead_id: string;
+  external_type?: string | null; // source-system lead class: Service | Internet | Walk-in | PartsOrder | Phone
+  source?: string | null;        // CRM free text: "CDK", "Carfax, Inc", "Conversational_AI" — casing varies
+  temperature?: string | null;   // dead | cold | warm | hot (lowercase); null = never scored / no verdict
+  outcome?: string | null;       // FREE TEXT (~20 values, grows) — last recorded outcome; don't switch exhaustively
+  leadVehicleInterest?: LeadVehicleInterest;
+}
 export interface InboxCustomer {
   customer_id: string;
   customer_name: string;
@@ -54,6 +73,13 @@ export interface InboxCustomer {
   // Optional fields some responses include; rendered only when present (the documented shape omits them).
   lastMessage?: string | null;
   temperature?: string | null;
+  // Which automated journeys have EVER reached this customer — 0..4 of INBOUND_CALL, SPEED_TO_LEAD,
+  // FOLLOWUP, CAMPAIGN, always in that fixed order (not chronological). [] = a human reached them, nothing
+  // automated (no "unknown" placeholder). Additive on get-customers-list.
+  engagementJourneys?: string[];
+  // This customer's leads within the requested serviceType. [] if none in scope. Use lead_id as the key
+  // (order not guaranteed). Additive on get-customers-list.
+  leads?: CustomerLead[];
 }
 export interface LeadsPage {
   customers: InboxCustomer[];
@@ -81,6 +107,15 @@ export interface LeadsQuery {
   sortBy?: "lead" | "conversation";
   // Handover filter (RETCONVAI-2997, UAT): "PENDING" (needs a rep) / "ACTIVE" / "PENDING,ACTIVE" / "NONE".
   humanTransferPhase?: string;
+  // Lead-level filters (get-customers-list). Each returns customers with ≥1 lead matching; multiple values
+  // in one filter OR together, different filters AND together. temperature/outcome/externalType/leadSource
+  // are exact-match value lists; engagementJourneys is an ENUM (bad value → upstream 400); appointmentBooked
+  // is TRISTATE — true (has one), false (has none), or undefined = both (omit; NOT the same as false).
+  temperature?: string[];        // dead | cold | warm | hot (case-insensitive upstream)
+  externalType?: string[];       // Service | Internet | Walk-in | Phone | PartsOrder (exact)
+  outcome?: string[];            // free text, matched exactly — send back strings the API returned
+  engagementJourneys?: string[]; // CAMPAIGN | FOLLOWUP | SPEED_TO_LEAD | INBOUND_CALL
+  appointmentBooked?: boolean;   // counts every live meeting incl. cancelled/no-show ("ever booked")
 }
 
 const EMPTY_PAGE: LeadsPage = {
@@ -113,6 +148,13 @@ export async function fetchInboxCustomers(a: InboxAuth, q: LeadsQuery = {}): Pro
   for (const t of q.leadType ?? []) p.append("leadType", t);
   if (q.sortBy) p.set("sortBy", q.sortBy);
   if (q.humanTransferPhase) p.set("humanTransferPhase", q.humanTransferPhase);
+  // Lead-level filters (repeated params — the proxy forwards them, and drops any the backend 400s on).
+  for (const t of q.temperature ?? []) p.append("temperature", t);
+  for (const t of q.externalType ?? []) p.append("externalType", t);
+  for (const t of q.outcome ?? []) p.append("outcome", t);
+  for (const t of q.engagementJourneys ?? []) p.append("engagementJourneys", t);
+  for (const s of q.leadSource ?? []) p.append("leadSource", s);
+  if (q.appointmentBooked !== undefined) p.set("appointmentBooked", String(q.appointmentBooked));
   if (a.serviceType) p.set("serviceType", a.serviceType); // department scope (sales|service)
   withEnv(p, a);
   try {
@@ -263,6 +305,10 @@ export interface ConvRecord {
   // AUTHORITATIVE direction from the backend ("inbound" | "outbound"), on conversations/v2 (RETCONVAI, UAT+).
   // Preferred over the earliest-message heuristic in convDirection() — fixes Inbound-count-0 + parallel in/out.
   conversationType?: string | null;
+  // Which automated journey produced THIS conversation (singular) — INBOUND_CALL | SPEED_TO_LEAD | FOLLOWUP
+  // | CAMPAIGN, or null. null is normal: customer-initiated SMS/email, web calls/chat, and some outbound
+  // calls aren't attributable. The customer's engagementJourneys[] = the set of non-null values across these.
+  engagementJourney?: string | null;
   // chat-service session id for a CHATBOT/RECEPTIONIST conversation (the new human-takeover surface keyed by
   // sessionId — see chatHandover.ts). Present only on `type:"chat"` rows once the backend adds it to the
   // list/v2 payload; a chat row WITH a sessionId is driven by chat-service (claim/reply/stream), a chat row

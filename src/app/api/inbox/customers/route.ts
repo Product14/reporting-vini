@@ -48,6 +48,15 @@ export async function GET(request: Request): Promise<Response> {
   // Repeated params: leadType / leadSource (the upstream reads them case-insensitively).
   for (const t of searchParams.getAll("leadType")) if (t.trim()) up.append("leadType", t.trim());
   for (const s of searchParams.getAll("leadSource")) if (s.trim()) up.append("leadSource", s.trim());
+  // Lead-level filters (get-customers-list): temperature / externalType / outcome (exact-match value lists),
+  // engagementJourneys (enum — bad value 400s upstream), appointmentBooked (true|false; omit = both). All
+  // forwarded verbatim; any the backend rejects are dropped on the 400-retry below so the list never empties.
+  for (const t of searchParams.getAll("temperature")) if (t.trim()) up.append("temperature", t.trim());
+  for (const t of searchParams.getAll("externalType")) if (t.trim()) up.append("externalType", t.trim());
+  for (const o of searchParams.getAll("outcome")) if (o.trim()) up.append("outcome", o.trim());
+  for (const j of searchParams.getAll("engagementJourneys")) if (j.trim()) up.append("engagementJourneys", j.trim());
+  const appt = (searchParams.get("appointmentBooked") || "").toLowerCase();
+  if (appt === "true" || appt === "false") up.set("appointmentBooked", appt);
   // sortBy switches which date field startDate/endDate filter on: lead createdAt vs last_contacted_at.
   const sortBy = (searchParams.get("sortBy") || "").toLowerCase();
   if (sortBy === "lead" || sortBy === "conversation") up.set("sortBy", sortBy);
@@ -63,10 +72,13 @@ export async function GET(request: Request): Promise<Response> {
 
   const token = spyneTokenFrom(request);
   const env = spyneEnvFrom(request);
+  const NEW_PARAMS = ["serviceType", "humanTransferPhase", "temperature", "externalType", "outcome", "engagementJourneys", "appointmentBooked"];
   let res = await spyneServiceGet<unknown>(`/conversation/leads/v2/get-customers-list?${up.toString()}`, token, env);
-  if (!res.ok && res.status === 400 && (up.has("serviceType") || up.has("humanTransferPhase"))) {
-    up.delete("serviceType");
-    up.delete("humanTransferPhase");
+  if (!res.ok && res.status === 400 && NEW_PARAMS.some((k) => up.has(k))) {
+    // An older backend 400s on a param it doesn't know (or a genuinely bad enum). Drop the newer params and
+    // retry so the list degrades to the still-valid filters instead of emptying — same guard the
+    // serviceType/humanTransferPhase rollout used, widened to the lead-level filters.
+    for (const k of NEW_PARAMS) up.delete(k);
     res = await spyneServiceGet<unknown>(`/conversation/leads/v2/get-customers-list?${up.toString()}`, token, env);
   }
   if (!res.ok) return Response.json({ error: res.error, degraded: true }, { status: res.status });
