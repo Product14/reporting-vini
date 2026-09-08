@@ -448,9 +448,12 @@ booked_leads AS (
     SELECT DISTINCT m.lead_id AS lead_id
     FROM dealer_leads.meetings AS m FINAL
     WHERE m.__deleted = 0 AND m.is_active = 1
-      -- meta.source='warm_transfer' rows are the customer's EXISTING/past appointments pulled in around a
-      -- transfer — records we did not create. They must not count as a booking, here or anywhere.
-      AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
+      -- meta.source 'warm_transfer'/'callback' rows are the customer's EXISTING/past appointments pulled
+      -- in around a transfer or callback — records we did not create. They must not count as a booking,
+      -- here or anywhere. ('callback' added 2026-09-09: fleet 30d it runs 1.40 meetings/lead with 53.6%
+      -- of start times in the past, vs 1.10 and 2.8% for ordinary rows. See detailQueries.ts
+      -- notPulledInHistory() for the full measurement.)
+      AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
       AND toDate(m.created_at) >= addDays(today(), -45)                                            /*W*/
       -- AND m.team_id = '49a06313cf'                                                              /*T*/
 ),

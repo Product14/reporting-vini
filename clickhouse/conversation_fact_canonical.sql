@@ -320,7 +320,7 @@ chat_booking_link AS (
             SELECT meeting_id, team_id, lead_id, created_at
             FROM dealer_leads.meetings FINAL
             WHERE is_active = 1 AND __deleted = 0 AND source = 'spyne'
-              AND lower(JSONExtractString(ifNull(meta, ''), 'source')) != 'warm_transfer'
+              AND lower(JSONExtractString(ifNull(meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
               AND (conversation_id IS NULL OR conversation_id = '')
               AND (call_id IS NULL OR call_id = '')
               AND lead_id IS NOT NULL AND lead_id != ''
@@ -875,7 +875,7 @@ appt_attribution AS (
                m.conversation_id AS conv_id, 2 AS pri, 0 AS is_assisted
         FROM dealer_leads.meetings AS m FINAL
         WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
-          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
+          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
           AND m.conversation_id IS NOT NULL AND m.conversation_id != ''
         UNION ALL
         -- PRIMARY: AI-booked — same source='spyne' meetings matched via call_id (when conv id absent).
@@ -885,8 +885,26 @@ appt_attribution AS (
         JOIN dealer_leads.conversations AS c FINAL
             ON c.callId = m.call_id AND c.__deleted = 0
         WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
-          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
+          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
           AND m.call_id IS NOT NULL AND m.call_id != ''
+          -- ★ REJECT A CORRUPT call_id ANCHOR (added 2026-09-09). meetings.call_id is NOT reliable: on a
+          -- subset of service bookings it names a call belonging to a DIFFERENT customer, so this join
+          -- silently credited the appointment to a stranger's lead. Proven on Honda of Downtown Los
+          -- Angeles (9923577d07), trailing 30d, all 16 affected meetings unanimous:
+          --   • meetings.lead_id ↔ meetings.customer_id agree, so the meeting row itself is sound;
+          --   • endcallreports.leadId for that call_id agrees with conversations.leadId, NOT the meeting,
+          --     so the conversation side is right about who was on the call;
+          --   • the meeting was created BEFORE that call's endcallreports row (16/16) — a call cannot have
+          --     produced a meeting that predates it;
+          --   • the two leads resolve to different customer_ids AND different phone numbers.
+          -- Scale: 16 of 99 spyne service meetings here (16.2%); fleet 30d 82 of 1,808 (4.5%) / 21 teams.
+          -- Without this guard the appointment lands on the wrong lead, which is also what made the
+          -- headline (88) disagree with the appointments CSV (93 booked leads) after the callback fix.
+          -- The meeting's own lead has no conversation of its own in-window (16/16), so there is nothing
+          -- correct to re-attach it to; it is left unattributed rather than credited to the wrong lead.
+          -- detailQueries.ts conv_dir applies the SAME guard so both sides agree. Remove this only when
+          -- upstream stops mis-stamping call_id.
+          AND c.leadId = m.lead_id
         UNION ALL
         -- PRIMARY: AI-booked — booked INSIDE A WEB CHAT. These meeting rows carry neither a
         -- conversation_id nor a call_id, so both anchors above miss them and without this branch the
@@ -908,7 +926,7 @@ appt_attribution AS (
             ON lac.lead_id = m.lead_id AND lac.team_id = m.team_id
         WHERE m.is_active = 1 AND m.__deleted = 0
           AND ifNull(m.source, '') != 'spyne'
-          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) != 'warm_transfer'
+          AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
           AND m.lead_id IN (SELECT lead_id FROM outbound_campaign_leads)
           -- canonical: bound the BOOKING to the report window (like AI-booked meetings attach to in-window
           -- conversations), so a windowed view credits only assists booked in that window.

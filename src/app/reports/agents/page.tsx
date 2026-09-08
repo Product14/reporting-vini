@@ -409,14 +409,34 @@ function AgentReportsView() {
 
     // The full appointment list behind "Total AI-booked" (report.namedAppointments → report_appointments).
     // NOTE: this is a DIFFERENT source from the headline count above (m.appointments → report_lead_counts /
-    // agent_lead_days); both must apply the SAME rules (source='spyne', lead-grain dedup, callback→outbound
-    // re-attribution) to tie out. appointmentsSql now mirrors the spine's callback flip; a small residual is
-    // expected because the headline windows on the booking CONVERSATION's day while this list windows on the
-    // meeting's booked_at. Not the modal's live Spyne re-fetch (that's for the drill-down's freshness).
+    // agent_lead_days); both apply the SAME rules (source='spyne', warm_transfer/callback excluded,
+    // callback→outbound re-attribution) but at DIFFERENT GRAIN: the headline counts LEADS (canonical — the
+    // spine dedupes uniqExactIf(lead_id)), this sheet lists one row per MEETING. A lead with two bookings is
+    // 1 in the headline and 2 rows here, and the headline windows on the booking CONVERSATION's day while
+    // this list windows on the meeting's booked_at.
+    // That is why the reconciliation rows below are emitted: Honda of Downtown Los Angeles read 111 in the
+    // UI against 126 rows in this CSV and it looked like a bug. Most of that gap was the meta.source=
+    // 'callback' pulled-in-history rows (2.06 meetings/lead at that rooftop), now excluded upstream.
+    // A RESIDUAL REMAINS AND IS NOT FIXABLE HERE — it is an upstream lead-identity split, not a grain
+    // artefact: for the SAME call_id, meetings.lead_id and conversations.leadId frequently disagree (that
+    // rooftop, 30d: 16 of 99 spyne service meetings, 16.2%; fleet 30d: 82 of 1,808, 4.5%, 21 teams). This
+    // sheet attributes by the MEETING's lead, the spine headline by the CONVERSATION's lead, so the two
+    // credit the same booking to different leads and neither side is double-counting. After the callback
+    // fix the rooftop reads 88 (headline) against 93 booked leads / 94 rows here, and the set difference is
+    // 20 one way and 15 the other — the signature of re-attribution, not of miscounting.
+    // Not the modal's live Spyne re-fetch (that's drill-down freshness).
     if (r.namedAppointments?.length) {
+      const aiBooked = r.namedAppointments.filter((ap) => !ap.assisted);
+      const aiAssisted = r.namedAppointments.length - aiBooked.length;
       sheets.push({
         name: "Appointments",
         rows: [
+          ["How to read this sheet"],
+          ["Appointment records listed (AI-booked)", aiBooked.length],
+          ["Headline on the report card (leads with an AI-booked appointment)", scale(m.appointments)],
+          ...(aiAssisted > 0 ? [["Appointment records listed (AI-assisted CRM, secondary)", aiAssisted]] : []),
+          ["Why they can differ", "The card counts leads, this sheet lists appointment records, and one lead can hold more than one. Some bookings are also filed against a different lead record than the call they came from, so the two sides credit the same appointment to a different lead. No appointment is counted twice in either number."],
+          [],
           ["Customer", "Phone", "Channel", "Vehicle", "When", "Booked at", "Status", "How", "AI-assisted (CRM)", "Service type"],
           ...r.namedAppointments.map((ap) => [
             ap.customer, ap.phone, ap.channel ?? "", ap.vehicle, ap.when ?? "", ap.bookedAt ?? "", ap.status, ap.how, ap.assisted ? "Yes" : "No", ap.serviceType,
@@ -603,7 +623,11 @@ function AgentReportsView() {
         blocks: [
           { kind: "rows", columns: ["Customer", "Vehicle", "When", "How booked", "Status"], rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when) : "—", ap.how, ap.status || "—"]) },
           ...(r.namedAppointments.length > preview.length
-            ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${r.namedAppointments.length} appointments — download the CSV or XLSX for the complete list.` }]
+            ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${r.namedAppointments.length} appointment records — download the CSV or XLSX for the complete list.` }]
+            : []),
+          // Same grain caveat the CSV sheet spells out: this list is per MEETING, the card counts LEADS.
+          ...(r.namedAppointments.filter((ap) => !ap.assisted).length !== scale(m.appointments)
+            ? [{ kind: "note" as const, text: `The card shows ${fmtInt(scale(m.appointments))} because it counts leads with an appointment; this list has one row per appointment record, and one lead can hold more than one.` }]
             : []),
         ],
       });

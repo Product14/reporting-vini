@@ -112,11 +112,14 @@ def build_sections(ent: str, team: str, days: int) -> dict:
     # to exist. meta.source='warm_transfer' rows are the customer's EXISTING appointments pulled in around
     # a transfer — records nobody just booked (start times are often the customer's own PAST visits), so
     # source='spyne' alone is NOT proof the AI booked it. Excluded from every appointment count/list here,
-    # same as agentBaseFact.sql appt_attribution and detailQueries.ts notWarmTransfer(). Caught on Honda of
-    # Downtown Los Angeles 2026-08-14 (7 "New appointment" emails for ONE customer in 6 seconds, all 7
-    # warm_transfer). 'callback' meta.source rows are deliberately left alone.
-    not_warm_transfer = "lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer'"
-    mtg_scope = f"source='spyne' AND is_active=1 AND __deleted=0 AND {not_warm_transfer} AND enterprise_id={E} AND team_id={T}"
+    # same as agentBaseFact.sql appt_attribution and detailQueries.ts notPulledInHistory(). Caught on Honda
+    # of Downtown Los Angeles 2026-08-14 (7 "New appointment" emails for ONE customer in 6 seconds, all 7
+    # warm_transfer).
+    # ★ 'callback' joined the exclusion 2026-09-09 — it is the same defect, not a real booking. Fleet 30d:
+    # 'callback' runs 1.40 meetings/lead with 53.6% of start times in the PAST, against 1.10 and 2.8% for
+    # ordinary rows. See detailQueries.ts notPulledInHistory() for the full measurement.
+    not_pulled_in_history = "lower(JSONExtractString(ifNull(meta,''),'source')) NOT IN ('warm_transfer','callback')"
+    mtg_scope = f"source='spyne' AND is_active=1 AND __deleted=0 AND {not_pulled_in_history} AND enterprise_id={E} AND team_id={T}"
 
     appt_status = ch_rows(f"""
         SELECT
@@ -190,7 +193,7 @@ def build_sections(ent: str, team: str, days: int) -> dict:
         FROM dealer_leads.campaigns c
         LEFT JOIN dealer_leads.outboundTasks t ON t.campaignId=c.campaignId
         LEFT JOIN dealer_leads.meetings m ON m.lead_id=t.leadId AND m.source='spyne' AND m.is_active=1 AND m.__deleted=0
-                                        AND lower(JSONExtractString(ifNull(m.meta,''),'source'))!='warm_transfer'
+                                        AND lower(JSONExtractString(ifNull(m.meta,''),'source')) NOT IN ('warm_transfer','callback')
         WHERE c.enterpriseId={E} AND c.teamId={T} AND c.status='active'
         GROUP BY campaign_id
     """)

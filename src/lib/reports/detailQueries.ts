@@ -37,11 +37,25 @@ const teamPred = (col: string, teamId?: string): string =>
  * Caught on Honda of Downtown Los Angeles 2026-08-14 (a manager got 7 "New appointment" emails for ONE
  * customer in 6 seconds — all 7 warm_transfer, start times Jul-2024 → Jan-2026). The event-email send
  * path already gates on this (vini-daily-calls server/roi-cron/eventRunner.cjs); this is the same rule
- * for every metric/list. 'callback' meta.source rows are deliberately left alone.
+ * for every metric/list.
  * Prod (all-time, 2026-08-18): only three meta.source values exist — '' (97,583), 'warm_transfer'
- * (4,975 across 48 teams) and 'callback' (1,050) — so one equality test covers it. */
-const notWarmTransfer = (alias = "m"): string =>
-  `lower(JSONExtractString(ifNull(${alias}.meta, ''), 'source')) != 'warm_transfer'`;
+ * (4,975 across 48 teams) and 'callback' (1,050).
+ *
+ * ★ 'callback' JOINED the exclusion 2026-09-09. It was previously "deliberately left alone" on the
+ * assumption it behaved like a real booking. It does not — it is the SECOND ARM of the same defect,
+ * and the measurement is unambiguous. Fleet, trailing 30d, source='spyne':
+ *      meta.source     meetings  meetings/lead  start_time in the PAST
+ *      ''                16,712       1.10                       2.8%
+ *      'warm_transfer'    1,061       1.21                      27.2%
+ *      'callback'           168       1.40                      53.6%
+ * A real booking is ~1 per lead and in the future. Honda of Downtown Los Angeles (9923577d07) is 70 of
+ * those 168 rows: 2.06 meetings/lead, 97.1% past-dated, start times back to 2023-08-25, created 4-6 at
+ * a time inside the same second — the identical signature to the warm_transfer burst that prompted the
+ * original gate. Leaving them in was ALSO what made the Service Inbound headline (lead-grain, 111)
+ * disagree with the appointments CSV (meeting-grain, 126): the duplication is concentrated in exactly
+ * these rows, so the two grains differed by ~32 with them in and by 1 with them out. */
+const notPulledInHistory = (alias = "m"): string =>
+  `lower(JSONExtractString(ifNull(${alias}.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')`;
 
 // A "warm lead" = a campaignLeadMappings.outcome that signals real buying intent. SINGLE SOURCE OF
 // TRUTH for the warm-leads count (campaigns card + outbound headline). Deliberately EXCLUDES
@@ -147,8 +161,9 @@ campaign_appts AS (
     JOIN dealer_leads.meetings AS m FINAL
         ON m.call_id = ac.callId AND m.__deleted = 0 AND m.is_active = 1
     WHERE (m.source = 'spyne' OR ac.is_task = 1)
-      -- warm_transfer rows are pre-existing appointments, not ones this campaign booked (see notWarmTransfer)
-      AND ${notWarmTransfer("m")}
+      -- warm_transfer/callback rows are pre-existing appointments, not ones this campaign booked
+      -- (see notPulledInHistory)
+      AND ${notPulledInHistory("m")}
     GROUP BY ac.campaignId
 ),
 campaign_outcomes AS (
@@ -337,9 +352,9 @@ booked_leads AS (
     SELECT DISTINCT m.lead_id AS lead_id
     FROM dealer_leads.meetings AS m FINAL
     WHERE m.__deleted = 0 AND m.is_active = 1
-      -- a warm_transfer row is a pre-existing/past appointment, not a booking — it must NOT suppress a
-      -- warm lead from "Work these now" (see notWarmTransfer).
-      AND ${notWarmTransfer("m")}
+      -- a warm_transfer/callback row is a pre-existing/past appointment, not a booking — it must NOT suppress a
+      -- warm lead from "Work these now" (see notPulledInHistory).
+      AND ${notPulledInHistory("m")}
       AND toDate(m.created_at) >= ${startFloor}
       ${teamPred("m.team_id", teamId)}
 ),
@@ -436,7 +451,8 @@ export interface AppointmentsOpts {
 //     bridging the dealerVinId (UUID) form. Both inventory tables are semi-joined (vin IN (…)) to only
 //     the VINs a team's meetings reference, so a run never scans all of vinMaster (1.8M) / dealerVinMapping
 //     (21.8M). GROUP BY meeting_id collapses any CDC/join fan-out to one row.
-// meta.source='warm_transfer' rows are excluded — appointments we did not create (see notWarmTransfer).
+// meta.source 'warm_transfer'/'callback' rows are excluded — appointments we did not create
+// (see notPulledInHistory).
 // Test/demo/reseller enterprises excluded (same predicate as the other detail queries). booked_at floored
 // by ${startFloor} so a full run stays bounded (covers the daily window + the 30d top-vehicles window).
 export function appointmentsSql({ teamId, startFloor = "addDays(today(), -120)" }: AppointmentsOpts = {}): string {
@@ -459,15 +475,35 @@ meet AS (
         m.status AS status,
         if(ifNull(m.source,'') = 'spyne', 0, 1) AS assisted,
         JSONExtractString(ifNull(m.proposed_vins, ''), 1) AS tok
-    FROM dealer_leads.meetings AS m
+    -- ★ FINAL added 2026-09-09. This was the ONE meetings read in this file without it (campaignsSql's
+    -- has always had it), so meet saw every CDC version of a row. That is not a harmless duplicate:
+    -- meetings.call_id is OVERWRITTEN in place, so one meeting can appear here twice with two different
+    -- call_ids. meeting_5649a773… carried call 01a040e7 (its lead's own call) at _version 1787851873…
+    -- and call 01a07da5 (a DIFFERENT lead's call, 11 days later) at 1788816232…. The old row satisfied
+    -- the conv_dir lead guard while argMax/any() reported the new lead, so the row was listed with a
+    -- channel the spine — which reads FINAL — correctly refused to give it. That single missing keyword
+    -- is why the CSV and the report card could not be reconciled. Both now read the same latest row.
+    FROM dealer_leads.meetings AS m FINAL
     JOIN eventila.enterprise_details ed FINAL ON ed.enterprise_id = m.enterprise_id
     WHERE m.__deleted = 0 AND m.is_active = 1
       AND (m.source = 'spyne' OR m.lead_id IN (SELECT lead_id FROM ob_enrolled))
-      -- never list a warm_transfer row: we didn't create it (see notWarmTransfer)
-      AND ${notWarmTransfer("m")}
+      -- never list a warm_transfer/callback row: we didn't create it (see notPulledInHistory)
+      AND ${notPulledInHistory("m")}
       AND m.service_type IN ('sales','service')
       AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
       AND toDate(m.created_at) >= ${startFloor}
+      -- ★ THE LEAD MUST ACTUALLY EXIST (added 2026-09-09). The spine's lead_canonical JOINs
+      -- dealer_leads.leads, so a meeting booked against a lead_id with NO leads row can never reach the
+      -- report card; this query joined no leads table, so it listed them. That was the last remaining
+      -- reason the CSV and the card could not be tied: Honda of Downtown Los Angeles, trailing 30d, had
+      -- exactly 2 such leads (lead_acbd1cd2…, lead_ebd0a71b… — conversations exist, leads rows do not).
+      -- Same service_type screen as lead_canonical so the two sides gate identically.
+      AND m.lead_id IN (
+          SELECT l.lead_id FROM dealer_leads.leads AS l FINAL
+          WHERE l.is_deleted = 0 AND l.__deleted = 0
+            AND l.service_type IN ('sales','service')
+            ${teamPred("l.team_id", teamId)}
+      )
       AND ed.is_test_account = 0 AND ${resellerScope("ed")}
       AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
@@ -503,6 +539,7 @@ callback_from_outbound AS (
 -- list's direction consistent with the AI-booked headline (which flips it via the spine).
 conv_dir AS (
     SELECT c.conversationId AS conv_id, c.callId AS call_id,
+           any(ifNull(c.leadId, '')) AS conv_lead,
            any(lower(c.type)) AS conv_type,
            if(max(cbo.call_id != '') = 1, 'outbound', any(lower(at.agentCallType))) AS direction
     FROM dealer_leads.conversations AS c FINAL
@@ -587,7 +624,11 @@ LEFT JOIN vm ON vm.vin = meet.tok
 LEFT JOIN dvm ON dvm.dealerVinId = meet.tok
 LEFT JOIN vm AS vm2 ON vm2.vin = dvm.vin
 LEFT JOIN conv_dir AS cd1 ON cd1.conv_id = meet.conversation_id
-LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id
+-- ★ SAME GUARD AS THE SPINE (2026-09-09): meetings.call_id can name a DIFFERENT customer's call, so a
+-- direction resolved through it would label this row with an agent that never spoke to this lead.
+-- Requiring the leads to match leaves those rows with a NULL channel (still listed, but unattributed)
+-- instead of mis-crediting an agent. Evidence in agentBaseFact.sql appt_attribution.
+LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id AND cd2.conv_lead = meet.lead_id
 LEFT JOIN chat_link AS cl ON cl.meeting_id = meet.meeting_id
 WHERE meet.assisted = 0 OR meet.lead_id IN (SELECT lead_id FROM worked)
 GROUP BY meet.team_id, meet.meeting_id, meet.assisted

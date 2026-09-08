@@ -56,10 +56,13 @@ interface RawMeeting {
 const AI_SOURCE = "spyne";
 
 /* …and `source='spyne'` alone is NOT proof the AI booked it. `meta.source` says HOW the row came to
- * exist, and 'warm_transfer' rows are the customer's EXISTING appointments pulled in around a transfer
- * — records we did not create, whose start times are often the customer's own PAST visits. Listing one
- * invents an appointment (Honda of Downtown Los Angeles 2026-08-14: a manager was shown 7 "appointments"
- * for ONE customer, all 7 warm_transfer, start times Jul-2024 → Jan-2026).
+ * exist. 'warm_transfer' AND 'callback' rows are the customer's EXISTING appointments pulled in around
+ * a transfer or callback — records we did not create, whose start times are often the customer's own PAST
+ * visits. Listing one invents an appointment (Honda of Downtown Los Angeles 2026-08-14: a manager was
+ * shown 7 "appointments" for ONE customer, all 7 warm_transfer, start times Jul-2024 → Jan-2026).
+ *
+ * ★ 'callback' joined the exclusion 2026-09-09: fleet 30d it runs 1.40 meetings/lead with 53.6% of start
+ * times in the PAST (ordinary rows: 1.10 and 2.8%). See detailQueries.ts notPulledInHistory().
  *
  * The Spyne meetings API doesn't return `meta` at all, so it's resolved from ClickHouse, keyed on the
  * ids the API hands back — the same lookup vini-daily-calls' send path does
@@ -70,7 +73,9 @@ const AI_SOURCE = "spyne";
  * BEST-EFFORT BY DESIGN: no creds or a failed/empty lookup drops nothing, so a ClickHouse outage can
  * never silently blank a rooftop's real appointment list. TEAM-SCOPED: a meeting id that isn't this
  * rooftop's returns no row, so the lookup can't leak or act on another dealer's records. */
-async function dropWarmTransferMeetings(teamId: string, meetings: Meeting[]): Promise<Meeting[]> {
+const PULLED_IN_META_SOURCES = new Set(["warm_transfer", "callback"]);
+
+async function dropPulledInHistoryMeetings(teamId: string, meetings: Meeting[]): Promise<Meeting[]> {
   const ids = [...new Set(meetings.map((m) => m.id).filter(Boolean))];
   if (!ids.length || !hasClickhouseCreds()) return meetings;
   const inList = `(${ids.map((i) => `'${chEsc(i)}'`).join(",")})`;
@@ -86,14 +91,14 @@ async function dropWarmTransferMeetings(teamId: string, meetings: Meeting[]): Pr
        AND (m.meeting_id IN ${inList} OR m._id IN ${inList})
      GROUP BY meetingId, rowId`,
   );
-  const warm = new Set<string>();
+  const pulledIn = new Set<string>();
   for (const r of rows) {
-    if ((r.metaSource || "").trim().toLowerCase() !== "warm_transfer") continue;
-    if (r.meetingId) warm.add(r.meetingId);
-    if (r.rowId) warm.add(r.rowId);
+    if (!PULLED_IN_META_SOURCES.has((r.metaSource || "").trim().toLowerCase())) continue;
+    if (r.meetingId) pulledIn.add(r.meetingId);
+    if (r.rowId) pulledIn.add(r.rowId);
   }
-  if (!warm.size) return meetings;
-  return meetings.filter((m) => !warm.has(m.id));
+  if (!pulledIn.size) return meetings;
+  return meetings.filter((m) => !pulledIn.has(m.id));
 }
 // The endpoint returns the meetings array directly under `data` (NOT data.meetings), with pagination alongside.
 interface MeetingsResp { data?: RawMeeting[]; pagination?: { hasNextPage?: boolean; total?: number } }
@@ -229,10 +234,10 @@ export async function fetchMeetings(opts: {
     const lists = await Promise.all(
       types.map((serviceType) => fetchOne({ teamId, enterpriseId, serviceType, startISO, endISO, sortOrder, token, env })),
     );
-    // Drop meta.source='warm_transfer' rows before any scoping/counting below — they are appointments
-    // we did not create (see dropWarmTransferMeetings). Applied here so every branch's `total` and every
+    // Drop meta.source 'warm_transfer'/'callback' rows before any scoping/counting below — appointments
+    // we did not create (see dropPulledInHistoryMeetings). Applied here so every branch's `total` and every
     // listed row honour it.
-    let meetings = await dropWarmTransferMeetings(teamId, lists.flat());
+    let meetings = await dropPulledInHistoryMeetings(teamId, lists.flat());
     // `total` is the count the modal headlines. Defaults to the rows we list; the lead-scoped drill
     // overrides it with the authoritative booked-lead count so the number matches the tile even if a
     // lead's live meeting record didn't come back (deleted/rescheduled/non-spyne after Q12227 captured it).
