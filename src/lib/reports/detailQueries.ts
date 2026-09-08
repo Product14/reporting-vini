@@ -41,19 +41,26 @@ const teamPred = (col: string, teamId?: string): string =>
  * Prod (all-time, 2026-08-18): only three meta.source values exist — '' (97,583), 'warm_transfer'
  * (4,975 across 48 teams) and 'callback' (1,050).
  *
- * ★ 'callback' JOINED the exclusion 2026-09-09. It was previously "deliberately left alone" on the
- * assumption it behaved like a real booking. It does not — it is the SECOND ARM of the same defect,
- * and the measurement is unambiguous. Fleet, trailing 30d, source='spyne':
- *      meta.source     meetings  meetings/lead  start_time in the PAST
- *      ''                16,712       1.10                       2.8%
- *      'warm_transfer'    1,061       1.21                      27.2%
- *      'callback'           168       1.40                      53.6%
- * A real booking is ~1 per lead and in the future. Honda of Downtown Los Angeles (9923577d07) is 70 of
- * those 168 rows: 2.06 meetings/lead, 97.1% past-dated, start times back to 2023-08-25, created 4-6 at
- * a time inside the same second — the identical signature to the warm_transfer burst that prompted the
- * original gate. Leaving them in was ALSO what made the Service Inbound headline (lead-grain, 111)
- * disagree with the appointments CSV (meeting-grain, 126): the duplication is concentrated in exactly
- * these rows, so the two grains differed by ~32 with them in and by 1 with them out. */
+ * ★ 'callback' JOINED the exclusion 2026-09-09, on the same footing as warm_transfer. It was
+ * previously "deliberately left alone". VALIDATED against ground truth rather than a proxy: a
+ * successful conversation_ai.tool_invocation_events service_create_appointment_v2 on the meeting's
+ * call is proof the AI actually created an appointment. Fleet, trailing 30d, service meetings, only
+ * teams that use that tool:
+ *      meta.source        meetings   have a real booking tool call
+ *      ''                    1,555              95.4%
+ *      'warm_transfer'       1,057               9.0%
+ *      'callback'              168              19.6%
+ * So clean rows are real and BOTH labelled buckets are overwhelmingly not. Excluding 'callback'
+ * discards ~33 genuine bookings per 30d to remove ~135 phantom ones — the same trade the established
+ * warm_transfer rule already accepts (95 genuine to remove 962).
+ * ⚠️ Two proxies that LOOK like they discriminate and do NOT — do not reintroduce them:
+ *   • meetings-per-lead: 'callback' future-dated sits at 1.13, right next to clean's 1.10, yet ground
+ *     truth says only 39.7% of those are real. The ratio is not evidence.
+ *   • past-dating: 'warm_transfer' future-dated rows are only 11.4% real, so a future start time does
+ *     not make a row genuine. The LABEL is the signal, not the date.
+ * Known cost, worth revisiting upstream: the warm_transfer rule discards ~88 real service bookings per
+ * 30d (11.4% of 771 future-dated rows) and this one ~31. Both are accepted because the alternative is
+ * inventing appointments. */
 const notPulledInHistory = (alias = "m"): string =>
   `lower(JSONExtractString(ifNull(${alias}.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')`;
 
@@ -476,13 +483,12 @@ meet AS (
         if(ifNull(m.source,'') = 'spyne', 0, 1) AS assisted,
         JSONExtractString(ifNull(m.proposed_vins, ''), 1) AS tok
     -- ★ FINAL added 2026-09-09. This was the ONE meetings read in this file without it (campaignsSql's
-    -- has always had it), so meet saw every CDC version of a row. That is not a harmless duplicate:
-    -- meetings.call_id is OVERWRITTEN in place, so one meeting can appear here twice with two different
-    -- call_ids. meeting_5649a773… carried call 01a040e7 (its lead's own call) at _version 1787851873…
-    -- and call 01a07da5 (a DIFFERENT lead's call, 11 days later) at 1788816232…. The old row satisfied
-    -- the conv_dir lead guard while argMax/any() reported the new lead, so the row was listed with a
-    -- channel the spine — which reads FINAL — correctly refused to give it. That single missing keyword
-    -- is why the CSV and the report card could not be reconciled. Both now read the same latest row.
+    -- has always had it), so meet saw every CDC version of a row and any()/argMax() could mix fields
+    -- across versions. meetings.call_id is genuinely rewritten over a meeting's life — meeting_5649a773…
+    -- carried call 01a040e7 at _version 1787851873… and call 01a07da5 (11 days later) at 1788816232…,
+    -- i.e. the id of the most recent call that touched the booking, which is legitimate. Without FINAL
+    -- this query could resolve a row's channel from one version while reporting another version's lead.
+    -- The spine has always read FINAL, so only this side drifted.
     FROM dealer_leads.meetings AS m FINAL
     JOIN eventila.enterprise_details ed FINAL ON ed.enterprise_id = m.enterprise_id
     WHERE m.__deleted = 0 AND m.is_active = 1
@@ -539,7 +545,6 @@ callback_from_outbound AS (
 -- list's direction consistent with the AI-booked headline (which flips it via the spine).
 conv_dir AS (
     SELECT c.conversationId AS conv_id, c.callId AS call_id,
-           any(ifNull(c.leadId, '')) AS conv_lead,
            any(lower(c.type)) AS conv_type,
            if(max(cbo.call_id != '') = 1, 'outbound', any(lower(at.agentCallType))) AS direction
     FROM dealer_leads.conversations AS c FINAL
@@ -624,11 +629,7 @@ LEFT JOIN vm ON vm.vin = meet.tok
 LEFT JOIN dvm ON dvm.dealerVinId = meet.tok
 LEFT JOIN vm AS vm2 ON vm2.vin = dvm.vin
 LEFT JOIN conv_dir AS cd1 ON cd1.conv_id = meet.conversation_id
--- ★ SAME GUARD AS THE SPINE (2026-09-09): meetings.call_id can name a DIFFERENT customer's call, so a
--- direction resolved through it would label this row with an agent that never spoke to this lead.
--- Requiring the leads to match leaves those rows with a NULL channel (still listed, but unattributed)
--- instead of mis-crediting an agent. Evidence in agentBaseFact.sql appt_attribution.
-LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id AND cd2.conv_lead = meet.lead_id
+LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id
 LEFT JOIN chat_link AS cl ON cl.meeting_id = meet.meeting_id
 WHERE meet.assisted = 0 OR meet.lead_id IN (SELECT lead_id FROM worked)
 GROUP BY meet.team_id, meet.meeting_id, meet.assisted

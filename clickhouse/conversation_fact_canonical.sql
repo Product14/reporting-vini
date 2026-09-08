@@ -887,24 +887,6 @@ appt_attribution AS (
         WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
           AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
           AND m.call_id IS NOT NULL AND m.call_id != ''
-          -- ★ REJECT A CORRUPT call_id ANCHOR (added 2026-09-09). meetings.call_id is NOT reliable: on a
-          -- subset of service bookings it names a call belonging to a DIFFERENT customer, so this join
-          -- silently credited the appointment to a stranger's lead. Proven on Honda of Downtown Los
-          -- Angeles (9923577d07), trailing 30d, all 16 affected meetings unanimous:
-          --   • meetings.lead_id ↔ meetings.customer_id agree, so the meeting row itself is sound;
-          --   • endcallreports.leadId for that call_id agrees with conversations.leadId, NOT the meeting,
-          --     so the conversation side is right about who was on the call;
-          --   • the meeting was created BEFORE that call's endcallreports row (16/16) — a call cannot have
-          --     produced a meeting that predates it;
-          --   • the two leads resolve to different customer_ids AND different phone numbers.
-          -- Scale: 16 of 99 spyne service meetings here (16.2%); fleet 30d 82 of 1,808 (4.5%) / 21 teams.
-          -- Without this guard the appointment lands on the wrong lead, which is also what made the
-          -- headline (88) disagree with the appointments CSV (93 booked leads) after the callback fix.
-          -- The meeting's own lead has no conversation of its own in-window (16/16), so there is nothing
-          -- correct to re-attach it to; it is left unattributed rather than credited to the wrong lead.
-          -- detailQueries.ts conv_dir applies the SAME guard so both sides agree. Remove this only when
-          -- upstream stops mis-stamping call_id.
-          AND c.leadId = m.lead_id
         UNION ALL
         -- PRIMARY: AI-booked — booked INSIDE A WEB CHAT. These meeting rows carry neither a
         -- conversation_id nor a call_id, so both anchors above miss them and without this branch the
