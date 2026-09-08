@@ -189,14 +189,16 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
         leadId: a.lead_id ?? a.meeting_id ?? "",
       }))
       .sort((x, y) => (x.assisted === y.assisted ? (y.bookedAt ?? "").localeCompare(x.bookedAt ?? "") : x.assisted ? 1 : -1));
-    const seen = new Set<string>();
-    const out: (NamedAppt & { direction: string })[] = [];
-    for (const r of rows) {
-      if (r.leadId && seen.has(r.leadId)) continue;
-      if (r.leadId) seen.add(r.leadId);
+    // ★ NO LEAD DEDUPE (removed 2026-09-09). This list used to collapse to one row per lead so it
+    // matched a lead-grain tile, which HID real appointments: at Honda of Downtown Los Angeles, 3 of
+    // 99 service bookings in a 30d window vanished from the export that way (4 would have, had the
+    // key been the caller's lead instead of the meeting's). The tile now counts appointment records,
+    // so the list shows every appointment and the two tie by construction. Each row is one meeting —
+    // meeting_id is the natural key and the snapshot already holds one row per meeting.
+    const out: (NamedAppt & { direction: string })[] = rows.map((r) => {
       const { leadId, ...item } = r; // eslint-disable-line @typescript-eslint/no-unused-vars
-      out.push(item);
-    }
+      return item;
+    });
     return out.sort((x, y) => (y.bookedAt ?? "").localeCompare(x.bookedAt ?? ""));
   })();
   const warmLeadItems: WarmLeadItem[] = (warmLeads ?? [])
@@ -225,11 +227,12 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
       // unique-lead basis when available (matches the displayed conversations/qualified), else daily sum
       conversations: plc ? plc.connected : sum(pr, (r) => r.connected),
       qualified: plc ? plc.qualified : sum(pr, (r) => r.qualified),
-      appointments: plc ? plc.apptLeads : sum(pr, (r) => r.appointments),
+      // record grain, matching the current-window headline above
+      appointments: sum(pr, (r) => r.appointments),
       leads: plc ? plc.contacted : sum(pr, (r) => r.leads_attempted),
       sms: sum(pr, (r) => r.sms_sent),
       // v3 hero deltas: hand-offs (transfers lead-level when available + callbacks), talk, after-hours.
-      appointmentsAssisted: plc ? plc.apptLeadsAssisted : sum(pr, (r) => r.appointments_assisted),
+      appointmentsAssisted: sum(pr, (r) => r.appointments_assisted),
       transfers: plc ? plc.transferLeads : sum(pr, (r) => r.transfers),
       transfersFailed: plc ? plc.transferFailedLeads : sum(pr, (r) => r.transfers_failed),
       callbacks: sum(pr, (r) => r.callbacks),
@@ -265,12 +268,16 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     const calls = sum(rows, (r) => r.calls);
     const connected = sum(rows, (r) => r.connected);
     const qualified = sum(rows, (r) => r.qualified);
-    // distinct booked leads over the window (exact); fall back to the per-day-distinct sum (overcounts)
+    // ★ APPOINTMENT RECORDS (2026-09-09), summed across the window's days — NOT report_lead_counts'
+    // apptLeads. The tile is labelled "Appointments — AI-booked" and the export lists one row per
+    // appointment, so both count appointments. agent_daily.appointments is now a per-day record count
+    // and a meeting lands on exactly one day, so this sum is exact — no window-distinct rpc needed.
+    // apptLeads stays available on `lc` for anything that genuinely wants "how many LEADS booked".
     // canonical: this is AI-booked (meetings.source='spyne') — the PRIMARY/headline appointments number.
-    const appointments = lc ? lc.apptLeads : sum(rows, (r) => r.appointments);
+    const appointments = sum(rows, (r) => r.appointments);
     // canonical: AI-assisted (CRM) appointments — SECONDARY. Reported separately ("+N AI-assisted"),
-    // NEVER folded into `appointments`. Window-distinct when available, else per-day-distinct sum.
-    const appointmentsAssisted = lc ? lc.apptLeadsAssisted : sum(rows, (r) => r.appointments_assisted);
+    // NEVER folded into `appointments`. Same record grain as the headline.
+    const appointmentsAssisted = sum(rows, (r) => r.appointments_assisted);
     const smsSent = sum(rows, (r) => r.sms_sent);
     const smsThreads = sum(rows, (r) => r.sms_threads);
     // web chat — third channel. 0 on rows aggregated before migration 0021, so the tile self-hides.

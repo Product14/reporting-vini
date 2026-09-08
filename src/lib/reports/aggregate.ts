@@ -50,7 +50,9 @@ const offsetBucket = (o: number): string => (o >= 3 ? "3+" : String(o));
 
 interface Acc extends AgentDailyRow {
   _leads: Set<string>;
-  _apptLeads: Set<string>; // distinct leads with an AI-booked appointment (card counts these, not flag-sum)
+  _apptLeads: Set<string>; // distinct leads with an AI-booked appointment (drives agent_lead_days flags)
+  _apptRecords: number;         // AI-booked APPOINTMENT RECORDS — what the headline reports
+  _apptRecordsAssisted: number; // AI-assisted (CRM) appointment records — SECONDARY
   // canonical: distinct leads with an AI-assisted (CRM) appointment — SECONDARY metric, kept separate.
   _apptAssistedLeads: Set<string>;
 }
@@ -66,6 +68,7 @@ function blankAcc(day: string, team: string, type: string, r: RawRow): Acc {
     new_leads: 0, stl_within5: 0, stl_within1: 0, stl_seconds_sum: 0, stl_count: 0,
     stl_afterhours_within5: 0, stl_within5_appts: 0,
     _leads: new Set(), _apptLeads: new Set(), _apptAssistedLeads: new Set(),
+    _apptRecords: 0, _apptRecordsAssisted: 0,
   };
 }
 
@@ -123,6 +126,10 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
     if (num(r.connected) > 0) a.connected += 1;
     a.reached_person += num(r.reached_person);
     a.qualified += num(r.qualified);
+    // ★ Appointment RECORDS booked on this conversation (see the header comment on a.appointments).
+    // Summed at conversation grain, so no lead-identity question and no double count.
+    a._apptRecords += num(r.appointments_count);
+    a._apptRecordsAssisted += num(r.appointments_assisted_count);
     a.sms_sent += num(r.n_sms_outbound);
     a.sms_replied += num(r.sms_replied);
     a.after_hours += num(r.after_hours);
@@ -205,14 +212,19 @@ export function aggregate(rows: RawRow[], opts: AggregateOpts = {}): AggregateRe
   const daily: AgentDailyRow[] = [];
   for (const a of groups.values()) {
     a.leads_attempted = a._leads.size;
-    a.appointments = a._apptLeads.size;
-    a.appointments_assisted = a._apptAssistedLeads.size; // canonical: AI-assisted (CRM) — SECONDARY
+    // ★ APPOINTMENT RECORDS, not distinct leads (2026-09-09). The card is labelled "Appointments —
+    // AI-booked" and the export lists one row per appointment, so both now count the same thing.
+    // A meeting belongs to exactly one conversation and a conversation to one (day, team, agent_type),
+    // so these per-conversation counts sum without double-counting. The lead SETS are still built above
+    // because agent_lead_days stores the per-lead 0/1 flags. See agentBaseFact.sql appt_by_conv_dedup.
+    a.appointments = a._apptRecords;
+    a.appointments_assisted = a._apptRecordsAssisted; // canonical: AI-assisted (CRM) — SECONDARY
     const stlCols = stlCountsForGroup(stl, a.activity_day, a.team_id, a.agent_type);
     Object.assign(a, stlCols);
     a.talk_seconds = Math.round(a.talk_seconds);
     a.quality_score_sum = Math.round(a.quality_score_sum);
     a.stl_seconds_sum = Math.round(a.stl_seconds_sum);
-    const { _leads, _apptLeads, _apptAssistedLeads, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
+    const { _leads, _apptLeads, _apptAssistedLeads, _apptRecords, _apptRecordsAssisted, ...row } = a; // eslint-disable-line @typescript-eslint/no-unused-vars
     daily.push(row);
   }
   // Materialize the lead-distinct source breakdown into the same tall table the other dims use.

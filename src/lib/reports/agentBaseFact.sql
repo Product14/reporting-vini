@@ -832,8 +832,21 @@ appt_by_conv_dedup AS (
         team_id,
         -- canonical: AI-booked (headline) and AI-assisted (CRM, secondary) counted SEPARATELY.
         -- Lead-level dedup (uniqExactIf by lead_id) — a lead with multiple CRM bookings counts ONCE.
+        -- Kept for the appointment_booked/appointment_assisted 0/1 FLAGS, which are lead questions
+        -- ("did this lead book?") and are what agent_lead_days stores.
         uniqExactIf(lead_id, is_assisted = 0) AS n_appts,
-        uniqExactIf(lead_id, is_assisted = 1) AS n_appts_assisted
+        uniqExactIf(lead_id, is_assisted = 1) AS n_appts_assisted,
+        -- ★ APPOINTMENT RECORDS (added 2026-09-09) — the count the headline now reports.
+        -- The card is labelled "Appointments — AI-booked", so it counts APPOINTMENTS. The lead-grain
+        -- counts above could never tie to the appointments export, because a lead can hold more than
+        -- one booking and, on ~16% of this rooftop's service bookings, the appointment is filed against
+        -- the vehicle's registered owner while the conversation belongs to the caller — two different
+        -- people, so the two sides deduped to different lead sets (14 one way, 13 the other at Honda of
+        -- Downtown Los Angeles). Counting meeting_id removes the question: a meeting maps to exactly one
+        -- conversation (appt_attribution takes argMax(conv_id, pri) per meeting) and a conversation to
+        -- exactly one (day, team, agent_type), so summing these across days counts each meeting once.
+        uniqExactIf(meeting_id, is_assisted = 0) AS n_appt_records,
+        uniqExactIf(meeting_id, is_assisted = 1) AS n_appt_records_assisted
     FROM appt_attribution
     GROUP BY conversationId, team_id
 )
@@ -908,11 +921,15 @@ SELECT
        if(ifNull(cb.chat_engaged, 0) = 1 AND hia_lead.lead_id IS NOT NULL, 1, 0)) AS qualified_via_chat,
     greatest(qualified_via_call, qualified_via_sms, qualified_via_chat) AS qualified,
 
+    -- FLAGS stay lead questions ("did this lead book?") — agent_lead_days stores these.
     if(ifNull(ad.n_appts, 0) > 0, 1, 0)     AS appointment_booked,
-    ifNull(ad.n_appts, 0)                    AS appointments_count,
+    -- ★ COUNTS are APPOINTMENT RECORDS (2026-09-09), so the headline matches its own label and ties to
+    -- the appointments export exactly. Was uniqExact(lead_id) — see appt_by_conv_dedup for why that
+    -- could never tie. aggregate.ts sums these per day; build.ts sums the days for the window.
+    ifNull(ad.n_appt_records, 0)             AS appointments_count,
     -- canonical: AI-assisted (CRM) appointments — SECONDARY metric, kept separate from the headline.
     if(ifNull(ad.n_appts_assisted, 0) > 0, 1, 0) AS appointment_assisted,
-    ifNull(ad.n_appts_assisted, 0)           AS appointments_assisted_count,
+    ifNull(ad.n_appt_records_assisted, 0)    AS appointments_assisted_count,
 
     -- canonical "Real conversation": the customer actually engaged. Call side = is_connected (voicemail
     -- excluded); chat side = chat_engaged (the visitor typed; empty widget opens excluded). chat_engaged is

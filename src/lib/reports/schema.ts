@@ -25,9 +25,15 @@ export interface RawRow {
   is_chat: number; // web chat — the third AI channel (conversations.type='chat')
   n_sms_outbound: number;
   qualified: number;
-  appointment_booked: number; // canonical: AI-booked (meetings.source='spyne') — PRIMARY/headline
+  appointment_booked: number; // canonical: AI-booked (meetings.source='spyne') — PRIMARY/headline FLAG
   // canonical: AI-assisted (CRM, source!='spyne', booked on an agent-worked lead) — SECONDARY metric
   appointment_assisted: number;
+  // ★ APPOINTMENT RECORD COUNTS on this conversation (2026-09-09) — what the headline sums. Declared
+  // explicitly rather than leaning on the index signature below: read through `[k: string]: unknown`
+  // a renamed column would silently resolve to undefined → num() → 0, zeroing the metric fleet-wide
+  // with a green typecheck. See agentBaseFact.sql appt_by_conv_dedup.
+  appointments_count: number;
+  appointments_assisted_count: number;
   connected: number;
   reached_person: number;
   sms_replied: number;
@@ -66,8 +72,12 @@ export interface AgentDailyRow {
   connected: number; // Σ connected
   reached_person: number; // Σ reached_person
   qualified: number; // Σ qualified
-  appointments: number; // canonical: distinct AI-booked appt leads (source='spyne') — PRIMARY/headline
-  // canonical: distinct AI-assisted (CRM) appt leads — SECONDARY, shown smaller, never in the headline
+  // canonical (2026-09-09): AI-booked APPOINTMENT RECORDS that day (source='spyne') — PRIMARY/headline.
+  // Was distinct appt LEADS; changed so the tile matches its own label and ties to the appointments
+  // export exactly. A meeting falls on one day, so summing days over a window is exact. The per-lead
+  // "did this lead book?" question still lives on agent_lead_days.appointment.
+  appointments: number;
+  // canonical: AI-assisted (CRM) appointment records — SECONDARY, shown smaller, never in the headline
   appointments_assisted: number;
   sms_sent: number; // Σ n_sms_outbound
   sms_replied: number; // Σ sms_replied
