@@ -5,6 +5,9 @@ import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+// Same helper the ETL buckets agent_daily / agent_lead_days with, so the appointment LIST is windowed
+// in the identical day space as the COUNTS shown above it.
+import { storeLocalDay } from "@/lib/reports/tzMap";
 
 /* Reads the materialized aggregate from Supabase and returns the same FetchResult the reporting UI
  * already consumes — one fast query instead of the ~84 Metabase round-trips fetchAgents() used to do.
@@ -251,11 +254,19 @@ export async function GET(request: Request): Promise<Response> {
   ]);
   const { callbacks, campaigns, outcomes, appointments, warmLeads } = detail ?? EMPTY_DETAIL;
   // Named appointments are shown for the report window — filter the ~120d snapshot by booking date.
-  // UTC date-slice vs the store-local window can drift ±1 day at boundaries; the COUNTS stay canonical
-  // (they come from report_lead_counts_2 / agent_lead_days, not this list). Warm leads are a "now"
-  // snapshot — deliberately NOT windowed.
+  // ★ WINDOWED IN THE STORE'S OWN DAY SPACE (fixed 2026-09-09). `start`/`end` are resolved in the
+  // rooftop's timezone a few lines above, and agent_lead_days (which the COUNTS come from) is bucketed
+  // store-local by the ETL — but this filter used to slice `booked_at` as a raw UTC prefix. For a
+  // Pacific rooftop that is a 7-8h shift, so every booking made after 5pm local landed on the next UTC
+  // day and the list carried a different set of days than the number above it. Honda of Downtown Los
+  // Angeles, trailing 30d: the UTC slice returned 107 rows / 89 Service-Inbound after dedupe against a
+  // card of 84; re-bucketed store-local it returns 103 / 85. That single mismatch was 4 of the 5.
+  // Falls back to the raw prefix when the rooftop's tz is unknown (storeLocalDay's own contract), which
+  // is exactly the previous behavior.
   const windowedAppointments = appointments.filter((a) => {
-    const day = (a.booked_at ?? "").slice(0, 10);
+    const raw = (a.booked_at ?? "").slice(0, 10);
+    if (!raw) return false;
+    const day = storeLocalDay(a.booked_at ?? "", timezone ?? undefined, raw);
     return day >= start && day < end;
   });
   // Invariant: a rooftop that returned real rows in THIS request can't be "never live" — don't let a
