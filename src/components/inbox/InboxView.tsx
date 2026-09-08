@@ -554,6 +554,17 @@ function Inbox() {
     return () => clearTimeout(t);
   }, [search]);
 
+  // Whether the backend is returning the new lead-level keys (leads[] / engagementJourneys). Old backends
+  // omit them entirely (undefined), so this is FALSE on prod until dev releases there. It gates the new
+  // filter controls: prod shows only Date + Temperature (exactly as before), and the rest auto-appear the
+  // moment the keys start arriving — no code change. Temperature stays available everywhere (it filters via
+  // the legacy leadType param on prod). The DISPLAY (journey chips / lead detail) is already self-gating —
+  // it only renders when a key is present — so nothing shows on prod there either.
+  const showLeadFilters = useMemo(
+    () => customers.some((c) => c.leads !== undefined || c.engagementJourneys !== undefined),
+    [customers],
+  );
+
   // The query for the current tab/search/filters (page added per-call). Shared by page-1 load + load-more.
   const listQuery = useMemo(() => {
     const range = dateRangeToIso(dateRange, customStart, customEnd);
@@ -562,7 +573,11 @@ function Inbox() {
       // Needs-Attention shows ALL pending-handover convs, so it overrides the Unread scope while active.
       unreadOnly: !needsAttention && tab === "unread",
       searchTerm: debounced || undefined,
+      // Temperature is sent under BOTH the new `temperature` param and the legacy `leadType` alias (spec:
+      // they union). So it keeps working on prod (which has only leadType today; `temperature` is dropped on
+      // the proxy's 400-retry but leadType survives) AND on UAT (which has `temperature`). No regression.
       temperature: leadFilters.temperature.length ? leadFilters.temperature : undefined,
+      leadType: leadFilters.temperature.length ? leadFilters.temperature : undefined,
       externalType: leadFilters.externalType.length ? leadFilters.externalType : undefined,
       engagementJourneys: leadFilters.journeys.length ? leadFilters.journeys : undefined,
       outcome: leadFilters.outcome.length ? leadFilters.outcome : undefined,
@@ -890,6 +905,7 @@ function Inbox() {
           {filtersOpen && groupBy !== "none" && (
             <FiltersPopover
               filters={leadFilters} onPatch={patchFilters} outcomeOptions={outcomeCatalog} sourceOptions={sourceCatalog}
+              showLeadFilters={showLeadFilters}
               dateRange={dateRange} onDateRange={setDateRange}
               customStart={customStart} onCustomStart={setCustomStart}
               customEnd={customEnd} onCustomEnd={setCustomEnd}
@@ -1092,6 +1108,7 @@ function Inbox() {
             onExport={() => exportCsv(customers)}
             onClose={() => setSheetOpen(false)}
             filters={leadFilters} onPatch={patchFilters} outcomeOptions={outcomeCatalog} sourceOptions={sourceCatalog}
+            showLeadFilters={showLeadFilters}
             dateRange={dateRange} onDateRange={setDateRange}
             customStart={customStart} onCustomStart={setCustomStart}
             customEnd={customEnd} onCustomEnd={setCustomEnd}
@@ -3640,10 +3657,10 @@ function dateRangeToIso(r: DateRange, customStart?: string, customEnd?: string):
 }
 
 function FiltersPopover({
-  filters, onPatch, outcomeOptions, sourceOptions, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis, onClose,
+  filters, onPatch, outcomeOptions, sourceOptions, showLeadFilters, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis, onClose,
 }: {
   filters: LeadFilters; onPatch: (p: Partial<LeadFilters>) => void;
-  outcomeOptions: string[]; sourceOptions: string[];
+  outcomeOptions: string[]; sourceOptions: string[]; showLeadFilters: boolean;
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   customStart: string; onCustomStart: (v: string) => void;
   customEnd: string; onCustomEnd: (v: string) => void;
@@ -3668,7 +3685,7 @@ function FiltersPopover({
     <>
       <div ref={popRef} className="animate-dropdown-in absolute right-0 top-11 z-50 hidden max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg lg:block" style={{ borderColor: C.border }}>
         <FilterSections
-          filters={filters} onPatch={onPatch} outcomeOptions={outcomeOptions} sourceOptions={sourceOptions}
+          filters={filters} onPatch={onPatch} outcomeOptions={outcomeOptions} sourceOptions={sourceOptions} showLeadFilters={showLeadFilters}
           dateRange={dateRange} onDateRange={onDateRange}
           customStart={customStart} onCustomStart={onCustomStart}
           customEnd={customEnd} onCustomEnd={onCustomEnd}
@@ -3696,13 +3713,13 @@ function SheetGroup({ label, children }: { label: string; children: React.ReactN
  * the mobile header is one row. Desktop keeps the four discrete controls (it has the width for them). */
 function MobileControlsSheet({
   groupBy, onGroupBy, channel, onChannel, onExport, onClose,
-  filters, onPatch, outcomeOptions, sourceOptions, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
+  filters, onPatch, outcomeOptions, sourceOptions, showLeadFilters, dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
 }: {
   groupBy: "customer" | "none"; onGroupBy: (v: "customer" | "none") => void;
   channel: "all" | "sms" | "chat" | "call" | "email"; onChannel: (v: "all" | "sms" | "chat" | "call" | "email") => void;
   onExport: () => void; onClose: () => void;
   filters: LeadFilters; onPatch: (p: Partial<LeadFilters>) => void;
-  outcomeOptions: string[]; sourceOptions: string[];
+  outcomeOptions: string[]; sourceOptions: string[]; showLeadFilters: boolean;
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   customStart: string; onCustomStart: (v: string) => void;
   customEnd: string; onCustomEnd: (v: string) => void;
@@ -3758,7 +3775,7 @@ function MobileControlsSheet({
         {groupBy !== "none" && (
           <div className="border-t px-4 py-3.5" style={{ borderColor: C.border }}>
             <FilterSections
-              filters={filters} onPatch={onPatch} outcomeOptions={outcomeOptions} sourceOptions={sourceOptions}
+              filters={filters} onPatch={onPatch} outcomeOptions={outcomeOptions} sourceOptions={sourceOptions} showLeadFilters={showLeadFilters}
               dateRange={dateRange} onDateRange={onDateRange}
               customStart={customStart} onCustomStart={onCustomStart}
               customEnd={customEnd} onCustomEnd={onCustomEnd}
@@ -3818,11 +3835,14 @@ function FilterCheckGroup({
 }
 
 function FilterSections({
-  filters, onPatch, outcomeOptions, sourceOptions,
+  filters, onPatch, outcomeOptions, sourceOptions, showLeadFilters,
   dateRange, onDateRange, customStart, onCustomStart, customEnd, onCustomEnd, dateBasis, onDateBasis,
 }: {
   filters: LeadFilters; onPatch: (p: Partial<LeadFilters>) => void;
   outcomeOptions: string[]; sourceOptions: string[];
+  // Whether the backend serves the new lead-level keys — gates the new controls (see the container). The
+  // Lead-temperature control shows regardless (it filters via the legacy leadType param on older backends).
+  showLeadFilters: boolean;
   dateRange: DateRange; onDateRange: (v: DateRange) => void;
   customStart: string; onCustomStart: (v: string) => void;
   customEnd: string; onCustomEnd: (v: string) => void;
@@ -3869,41 +3889,50 @@ function FilterSections({
           ))}
         </div>
 
-        {/* Lead-level filters — each returns customers with ≥1 matching lead (AND across filters). */}
+        {/* Lead temperature — always available (filters via `temperature` on new backends, the legacy
+            `leadType` alias on older ones), so it works on prod today. */}
         <FilterCheckGroup title="Lead temperature" capitalize
           options={TEMPERATURES.map((t) => ({ v: t, label: t }))}
           selected={filters.temperature} onToggle={(v) => toggle("temperature", v)} />
-        <FilterCheckGroup title="Lead type"
-          options={EXTERNAL_TYPES.map((t) => ({ v: t, label: t }))}
-          selected={filters.externalType} onToggle={(v) => toggle("externalType", v)} />
-        <FilterCheckGroup title="Reached by"
-          options={JOURNEYS.map((j) => ({ v: j.v, label: j.label }))}
-          selected={filters.journeys} onToggle={(v) => toggle("journeys", v)} />
 
-        {/* Appointment — THREE states: All (both, sends nothing) / Booked (true) / None (false). */}
-        <div className="mb-3">
-          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Appointment</p>
-          <div className="flex gap-1.5">
-            {([["all", "All"], ["yes", "Booked"], ["no", "None"]] as const).map(([v, label]) => (
-              <button key={v} onClick={() => onPatch({ appointmentBooked: v })}
-                className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
-                style={filters.appointmentBooked === v ? { borderColor: C.primary, color: C.primary, background: C.primaryAccent } : { borderColor: C.border, color: C.sub }}>
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
+        {/* The rest are the NEW lead-level filters — hidden until the backend serves the new keys (so prod
+            shows only Date + Temperature, exactly as before), then they appear on their own. Each returns
+            customers with ≥1 matching lead (AND across filters). */}
+        {showLeadFilters && (
+          <>
+            <FilterCheckGroup title="Lead type"
+              options={EXTERNAL_TYPES.map((t) => ({ v: t, label: t }))}
+              selected={filters.externalType} onToggle={(v) => toggle("externalType", v)} />
+            <FilterCheckGroup title="Reached by"
+              options={JOURNEYS.map((j) => ({ v: j.v, label: j.label }))}
+              selected={filters.journeys} onToggle={(v) => toggle("journeys", v)} />
 
-        {/* Outcome + Lead source are free text — options come from the values actually seen (grow-only), so
-            they never drift out of sync with a hardcoded list (spec ⚠). */}
-        <FilterCheckGroup title="Outcome"
-          options={outcomeOptions.map((o) => ({ v: o, label: o }))}
-          selected={filters.outcome} onToggle={(v) => toggle("outcome", v)}
-          emptyNote="Populated as leads load" />
-        <FilterCheckGroup title="Lead source"
-          options={sourceOptions.map((s) => ({ v: s, label: s }))}
-          selected={filters.leadSource} onToggle={(v) => toggle("leadSource", v)}
-          emptyNote="Populated as leads load" />
+            {/* Appointment — THREE states: All (both, sends nothing) / Booked (true) / None (false). */}
+            <div className="mb-3">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Appointment</p>
+              <div className="flex gap-1.5">
+                {([["all", "All"], ["yes", "Booked"], ["no", "None"]] as const).map(([v, label]) => (
+                  <button key={v} onClick={() => onPatch({ appointmentBooked: v })}
+                    className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
+                    style={filters.appointmentBooked === v ? { borderColor: C.primary, color: C.primary, background: C.primaryAccent } : { borderColor: C.border, color: C.sub }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Outcome + Lead source are free text — options come from the values actually seen (grow-only),
+                so they never drift out of sync with a hardcoded list (spec ⚠). */}
+            <FilterCheckGroup title="Outcome"
+              options={outcomeOptions.map((o) => ({ v: o, label: o }))}
+              selected={filters.outcome} onToggle={(v) => toggle("outcome", v)}
+              emptyNote="Populated as leads load" />
+            <FilterCheckGroup title="Lead source"
+              options={sourceOptions.map((s) => ({ v: s, label: s }))}
+              selected={filters.leadSource} onToggle={(v) => toggle("leadSource", v)}
+              emptyNote="Populated as leads load" />
+          </>
+        )}
 
         {anyActive ? (
           <button onClick={() => { onPatch(EMPTY_LEAD_FILTERS); onDateRange("all"); onCustomStart(""); onCustomEnd(""); }}
