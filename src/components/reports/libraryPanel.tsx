@@ -18,7 +18,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
-import { Card, SectionLabel, fmtInt } from "@/components/reports/kit";
+import { Card, DateFilter, SectionLabel, fmtInt } from "@/components/reports/kit";
 import { useScenario } from "@/components/reports/scenario";
 import { useDateRange, useDept } from "@/components/reports/dateRange";
 import {
@@ -41,6 +41,7 @@ import { REPORTS, availableReports, reportSheets, type ReportCtx, type ReportDef
 import { downloadXLSX, downloadCSV, exportFilenameStem } from "@/components/reports/exportReport";
 import { track } from "@/lib/analytics";
 import type { InsightsPayload } from "@/app/api/reports/insights/route";
+import type { Bucket } from "@/components/reports/data";
 
 /* ClickHouse-only datasets for the library (CRM outcome, vehicles, transfer routing, texts, coverage).
  * Returns null on any failure — the reports that need it simply aren't offered. */
@@ -97,7 +98,7 @@ function useBookmarks(teamId: string) {
 }
 
 export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: { navQuery: string; onOpenAgent?: (agentId: string) => void; initialReportId?: string | null }) {
-  const { bucket, custom } = useDateRange();
+  const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept();
   const { teamId, enterpriseId, account, spyneToken, spyneEnv } = useScenario();
   const params = useSearchParams();
@@ -215,6 +216,7 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
               backToAgent={backToAgent}
               bookmarks={bookmarks}
               accountName={account?.name ?? ""}
+              range={{ bucket, custom, setPreset, setCustom }}
             />
           ) : (
             <Gallery ctx={ctx} live={liveIds} ready={ready} onOpen={openReport} accountName={account?.name ?? ""} navQuery={navQuery} onOpenAgent={onOpenAgent} bookmarks={bookmarks} />
@@ -418,10 +420,20 @@ function AgentReportCards({ ctx, navQuery, onOpenAgent }: { ctx: ReportCtx; navQ
 
 /** One opened report: header with the question and its source, then the report itself. */
 function ReportPane({
-  report, ctx, onBack, enabled, loading, siblings, onOpen, backToAgent, bookmarks, accountName,
+  report, ctx, onBack, enabled, loading, siblings, onOpen, backToAgent, bookmarks, accountName, range,
 }: {
   report: ReportDef; ctx: ReportCtx; onBack: () => void; enabled: boolean; loading?: boolean;
   bookmarks: { ids: string[]; toggle: (id: string) => void }; accountName: string;
+  /* The period lives with the report, not only in the page chrome above it. A reader deep in a long
+   * report should not have to scroll back to the top bar to ask the same question about a different
+   * window — and on the standalone route there is no top bar at all. Same URL-backed state, so the two
+   * controls can never disagree. */
+  range: {
+    bucket: Bucket;
+    custom: { start: string; end: string } | null;
+    setPreset: (b: Bucket) => void;
+    setCustom: (r: { start: string; end: string }) => void;
+  };
   /* Reports with live data for this window, in catalog order — drives the switcher and prev/next. */
   siblings: ReportDef[];
   onOpen: (r: ReportDef) => void;
@@ -459,10 +471,8 @@ function ReportPane({
             <DownloadButton report={report} ctx={ctx} accountName={accountName} disabled={!enabled} />
             <ReportSwitcher current={report} siblings={siblings} onOpen={onOpen} />
           </div>
-          <div className="text-right">
-            <p className="text-[11px] font-semibold text-[#374151]">{ctx.periodLabel}</p>
-            <p className="text-[10.5px] text-[#9ca3af]">{report.source}</p>
-          </div>
+          <div className="no-print"><DateFilter bucket={range.bucket} custom={range.custom} onPreset={range.setPreset} onCustom={range.setCustom} /></div>
+          <p className="max-w-[420px] text-right text-[10.5px] leading-snug text-[#9ca3af]">{report.source}</p>
         </div>
       </div>
 

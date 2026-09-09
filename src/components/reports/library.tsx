@@ -307,7 +307,7 @@ export const REPORTS: ReportDef[] = [
     question: "How many appointments did the AI book, and who is coming in?",
     category: "Appointments",
     who: "Sales manager · GM",
-    source: "Appointments booked by the AI (report_appointments) + the lead funnel",
+    source: "Appointments the AI booked, and the lead funnel behind them",
     available: (c) => c.fleet.appointments > 0 || c.namedAppts.length > 0,
     render: (c) => {
       const byAgent = salesAgents(c).map((a) => ({ label: `${a.report.summary.person || a.name} · ${a.dir}`, value: a.metrics.appointments }));
