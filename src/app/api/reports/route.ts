@@ -141,19 +141,71 @@ async function teamEverLive(sb: any, teamId: string): Promise<boolean> {
   }
 }
 
-/* Fallback: the original six independent reads. Each degrades to [] independently (a missing table must
- * not fail the report). Only used when report_detail() is unavailable. */
+/* PostgREST caps a single read at db-max-rows — 1000 on this project (measured: a request for 2000 rows
+ * of report_appointments returns exactly 1000). A plain `.select("*").eq("team_id", …)` therefore
+ * TRUNCATES SILENTLY once a rooftop's snapshot passes that many rows: no error, no flag, the list just
+ * ends early and every count derived from it reads low.
+ *
+ * Not hypothetical. report_appointments is a trailing ~120d snapshot and Honda of Downtown Los Angeles
+ * held 1,012 rows on 2026-09-09 — over the cap — before the meta.source='callback' exclusion trimmed it
+ * to 900. Fleet-wide the table is 9,727 rows and the per-team maximum is 900 today, so nothing is
+ * truncated right now, but the largest rooftop has already crossed the line once and grows back toward
+ * it every day.
+ *
+ * The PRIMARY path (report_detail, above) is unaffected — it jsonb_agg's server-side and returns ONE
+ * row, so the row cap never applies. This is the fallback that runs when that rpc is missing or errors,
+ * which is exactly when nobody is watching.
+ *
+ * `.range()` needs a stable `.order()` or pages can repeat and drop rows between requests, so each table
+ * pages on its own key. appointments/warm_leads use their natural unique id; the other three page on a
+ * best-available column and are orders of magnitude under the cap (outcomes is a handful of buckets per
+ * team, campaigns tens, callbacks hundreds), so a tie there cannot cost a row in practice.
+ *
+ * Each table still degrades to [] independently — a missing table must not fail the report. */
+const DETAIL_PAGE = 1000;
+const DETAIL_ORDER: Record<string, string> = {
+  [REPORT_APPOINTMENTS]: "meeting_id", // one row per meeting — unique
+  [REPORT_WARM_LEADS]: "lead_id",      // one row per lead — unique
+  [REPORT_CAMPAIGNS]: "campaign",
+  [REPORT_OUTCOMES]: "outcome_bucket",
+  [REPORT_CALLBACKS]: "callback_due",
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function pageAll<T>(sb: any, table: string, teamId: string): Promise<T[]> {
+  const out: T[] = [];
+  // Safety ceiling: 50 pages (50k rows) is far beyond any rooftop's 120d snapshot and stops a
+  // mis-ordered key from looping forever.
+  for (let page = 0; page < 50; page++) {
+    try {
+      const { data, error } = await sb
+        .from(table)
+        .select("*")
+        .eq("team_id", teamId)
+        .order(DETAIL_ORDER[table] ?? "team_id", { ascending: true })
+        .range(page * DETAIL_PAGE, (page + 1) * DETAIL_PAGE - 1);
+      if (error) return out; // degrade to what we have, same as the previous `safe()`
+      const rows = (data ?? []) as T[];
+      out.push(...rows);
+      if (rows.length < DETAIL_PAGE) return out; // short page ⇒ last page
+    } catch {
+      return out;
+    }
+  }
+  console.warn(`[reports] ${table}: hit the ${50 * DETAIL_PAGE}-row paging ceiling for team ${teamId}`);
+  return out;
+}
+
+/* Fallback: the original five independent reads, now paged. Only used when report_detail() is
+ * unavailable. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function fetchDetailPerTable(sb: any, teamId: string): Promise<Detail> {
-  const safe = async <T,>(p: PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> => {
-    try { const { data, error } = await p; return error ? [] : ((data ?? []) as T[]); } catch { return []; }
-  };
   const [callbacks, campaigns, outcomes, appointments, warmLeads] = await Promise.all([
-    safe<CallbackRow>(sb.from(REPORT_CALLBACKS).select("*").eq("team_id", teamId)),
-    safe<CampaignRow>(sb.from(REPORT_CAMPAIGNS).select("*").eq("team_id", teamId)),
-    safe<OutcomeRow>(sb.from(REPORT_OUTCOMES).select("*").eq("team_id", teamId)),
-    safe<ReportAppointmentRow>(sb.from(REPORT_APPOINTMENTS).select("*").eq("team_id", teamId)),
-    safe<WarmLeadRow>(sb.from(REPORT_WARM_LEADS).select("*").eq("team_id", teamId)),
+    pageAll<CallbackRow>(sb, REPORT_CALLBACKS, teamId),
+    pageAll<CampaignRow>(sb, REPORT_CAMPAIGNS, teamId),
+    pageAll<OutcomeRow>(sb, REPORT_OUTCOMES, teamId),
+    pageAll<ReportAppointmentRow>(sb, REPORT_APPOINTMENTS, teamId),
+    pageAll<WarmLeadRow>(sb, REPORT_WARM_LEADS, teamId),
   ]);
   return { callbacks, campaigns, outcomes, appointments, warmLeads };
 }
