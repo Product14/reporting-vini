@@ -17,6 +17,9 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Card, SectionLabel, fmtInt } from "@/components/reports/kit";
+import { ConversationDrawer, fmtSecs, fmtWhenShort } from "@/components/reports/kitV3";
+import { fetchConversations, type Conversation } from "@/components/reports/liveData";
+import type { DrillConversation } from "@/app/api/reports/conversation-drill/route";
 import type { EvalOutcomes, EvalFunnel, EvalDirection } from "@/lib/spyne/evalPipeline";
 
 // ───────────────────────── outcome rungs ─────────────────────────
@@ -202,6 +205,32 @@ type FlowView = "sankey" | "table";
 
 const plural = (n: number, word: string) => `${fmtInt(n)} ${word}${n === 1 ? "" : "s"}`;
 
+/* ── the drill ──
+ * A share on a chart is an argument until someone can open it. Every segment here names a set of real
+ * conversations, and clicking one lists them and plays them back. `callType`/`primaryIntent`/`outcome`
+ * are the RAW eval values (group.id / primary.id / rung.key), not the display labels — the route filters
+ * dealer_leads_raw.conversationEval on exactly those fields. */
+export interface FlowDrillCtx {
+  teamId: string;
+  /** "sales" | "service" — the eval pipeline holds both and they must never mix. */
+  serviceType?: string;
+  start?: string;
+  end?: string;
+  bucket?: string;
+  spyneToken?: string;
+  spyneEnv?: string;
+}
+
+interface DrillTarget {
+  callType: string;
+  primaryIntent?: string;
+  outcome?: string;
+  /** What the reader clicked, in their words — the panel header. */
+  label: string;
+  color: string;
+  count: number;
+}
+
 /** Card width in px, tracked live. The ResizeObserver fires on observe, so no synchronous seed is needed. */
 function useMeasuredWidth(): [React.RefObject<HTMLDivElement | null>, number] {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -227,11 +256,14 @@ function VolumeBar({
   total,
   max,
   onTip,
+  onPick,
 }: {
   tally: Record<string, number>;
   total: number;
   max: number;
   onTip: (t: Tip) => void;
+  /** Absent = not drillable (no context to query with); the segments then stay plain divs. */
+  onPick?: (rungKey: string, label: string, color: string, count: number) => void;
 }) {
   const rungs = rungsIn(tally);
   // Floor at 1.5% so a single call is still visible; it stays visibly tiny next to a busy row.
@@ -239,15 +271,33 @@ function VolumeBar({
   return (
     <div className="h-5 w-full rounded-md bg-[#f4f5f7]">
       <div className="flex h-full overflow-hidden rounded-md" style={{ width: `${volume}%`, gap: 1 }}>
-        {rungs.map((r) => (
-          <div
-            key={r.key}
-            className="h-full min-w-[2px] first:rounded-l-md last:rounded-r-md"
-            style={{ width: `${(r.count / total) * 100}%`, background: r.color }}
-            onMouseMove={(e) => onTip({ x: e.clientX, y: e.clientY, label: `${r.label} · ${plural(r.count, "call")} · ${pct(r.count, total)}%`, color: r.color })}
-            onMouseLeave={() => onTip(null)}
-          />
-        ))}
+        {rungs.map((r) => {
+          const tip = (e: React.MouseEvent) =>
+            onTip({
+              x: e.clientX,
+              y: e.clientY,
+              label: `${r.label} · ${plural(r.count, "call")} · ${pct(r.count, total)}%${onPick ? " · click to listen" : ""}`,
+              color: r.color,
+            });
+          const style = { width: `${(r.count / total) * 100}%`, background: r.color };
+          const cls = "h-full min-w-[2px] first:rounded-l-md last:rounded-r-md";
+          // A <button> inside the row's toggle <button> would be invalid markup, which is why the row is a
+          // div with its own label button — see SankeyView.
+          return onPick ? (
+            <button
+              key={r.key}
+              type="button"
+              aria-label={`${r.label}, ${plural(r.count, "call")} — open these conversations`}
+              className={`${cls} cursor-pointer transition-opacity hover:opacity-75`}
+              style={style}
+              onMouseMove={tip}
+              onMouseLeave={() => onTip(null)}
+              onClick={() => onPick(r.key, r.label, r.color, r.count)}
+            />
+          ) : (
+            <div key={r.key} className={cls} style={style} onMouseMove={tip} onMouseLeave={() => onTip(null)} />
+          );
+        })}
       </div>
     </div>
   );
@@ -281,10 +331,12 @@ function RibbonFan({
   tally,
   total,
   onTip,
+  onPick,
 }: {
   tally: Record<string, number>;
   total: number;
   onTip: (t: Tip) => void;
+  onPick?: (rungKey: string, label: string, color: string, count: number) => void;
 }) {
   // Self-measuring: it lives in the same grid column as the collapsed bars, so it must take that
   // column's width rather than be handed the whole card's.
@@ -314,9 +366,21 @@ function RibbonFan({
         return (
           <g
             key={r.key}
-            onMouseMove={(e) => onTip({ x: e.clientX, y: e.clientY, label: `${r.label} · ${plural(r.count, "call")} · ${pct(r.count, total)}%`, color: r.color })}
+            role={onPick ? "button" : undefined}
+            tabIndex={onPick ? 0 : undefined}
+            aria-label={onPick ? `${r.label}, ${plural(r.count, "call")} — open these conversations` : undefined}
+            /* focus-visible only: the hit rect spans the card, so a mouse click was painting a full-width
+               box around the ribbon. Keyboard focus still shows one. */
+            className={onPick ? "outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#813fed]" : undefined}
+            style={onPick ? { cursor: "pointer" } : undefined}
+            onClick={onPick ? () => onPick(r.key, r.label, r.color, r.count) : undefined}
+            onKeyDown={onPick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(r.key, r.label, r.color, r.count); } } : undefined}
+            onMouseMove={(e) => onTip({ x: e.clientX, y: e.clientY, label: `${r.label} · ${plural(r.count, "call")} · ${pct(r.count, total)}%${onPick ? " · click to listen" : ""}`, color: r.color })}
             onMouseLeave={() => onTip(null)}
           >
+            {/* Hit area: the ribbon is a thin curve and the label sits outside it, so without this the
+                clickable region is much smaller than the thing the eye reads as one segment. */}
+            <rect x={0} y={ty - GAP / 2} width={Math.max(width, 200)} height={hh + GAP} fill="transparent" />
             <path d={d} fill={r.color} fillOpacity={0.28} />
             <rect x={dstX} y={ty} width={NODE} height={hh} rx={3} fill={r.color} />
             <text x={dstX + NODE + 10} y={ty + hh / 2 - 1} fontSize={11.5} fontWeight={700} fill="#374151">{r.label}</text>
@@ -333,7 +397,15 @@ function RibbonFan({
 /** Shared row grid: label · bar · winning outcome. One definition so every row lines up exactly. */
 const ROW_GRID = "grid grid-cols-[minmax(150px,240px)_1fr] items-center gap-3 sm:grid-cols-[minmax(170px,260px)_1fr_minmax(120px,168px)]";
 
-function SankeyView({ o, onTip }: { o: EvalOutcomes; onTip: (t: Tip) => void }) {
+function SankeyView({
+  o,
+  onTip,
+  onDrill,
+}: {
+  o: EvalOutcomes;
+  onTip: (t: Tip) => void;
+  onDrill?: (t: DrillTarget) => void;
+}) {
   const [exp, setExp] = useState<Record<string, boolean>>({});
   const toggle = (k: string) => setExp((s) => ({ ...s, [k]: !s[k] }));
   // Every bar on the chart is scaled against the busiest call type, so widths compare across groups.
@@ -343,43 +415,55 @@ function SankeyView({ o, onTip }: { o: EvalOutcomes; onTip: (t: Tip) => void }) 
     <div className="flex flex-col">
       {o.groups.map((g) => {
         const open = !!exp[g.id];
+        /* Rows are DIVs holding their own label button, not one big button: the coloured segments inside
+           them are buttons too, and a button inside a button is invalid markup that browsers silently
+           un-nest — the drill clicks would have been swallowed by the expand toggle. */
         return (
           <div key={g.id} className="border-b border-[#f4f4f6] py-1 last:border-b-0">
-            <button type="button" onClick={() => toggle(g.id)} className={`${ROW_GRID} w-full rounded-lg px-1 py-2 text-left hover:bg-[#fafafa]`}>
-              <span className="flex min-w-0 items-center gap-2">
+            <div className={`${ROW_GRID} w-full rounded-lg px-1 py-2 hover:bg-[#fafafa]`}>
+              <button type="button" onClick={() => toggle(g.id)} aria-expanded={open} className="flex min-w-0 items-center gap-2 text-left">
                 <Caret open={open} />
                 <span className="min-w-0">
                   <span className="block truncate text-[12.5px] font-bold text-[#111]">{g.label}</span>
                   <span className="text-[10.5px] tabular-nums text-[#9ca3af]">{plural(g.total, "call")} · {pct(g.total, o.scored)}%</span>
                 </span>
-              </span>
-              <VolumeBar tally={g.outcomes} total={g.total} max={max} onTip={onTip} />
+              </button>
+              <VolumeBar
+                tally={g.outcomes}
+                total={g.total}
+                max={max}
+                onTip={onTip}
+                onPick={onDrill && ((key, label, color, count) =>
+                  onDrill({ callType: g.id, outcome: key, label: `${g.label} · ${label}`, color, count }))}
+              />
               <span className="hidden sm:flex"><TopOutcome tally={g.outcomes} total={g.total} /></span>
-            </button>
+            </div>
 
             {open && (
               <div className="ml-3 border-l-2 border-[#ece9f6] pl-3">
                 {g.primaries.map((p) => {
                   const pk = `${g.id}/${p.id}`;
                   const pOpen = !!exp[pk];
+                  const pick = onDrill && ((key: string, label: string, color: string, count: number) =>
+                    onDrill({ callType: g.id, primaryIntent: p.id, outcome: key, label: `${p.label} · ${label}`, color, count }));
                   return (
                     <div key={pk}>
-                      <button type="button" onClick={() => toggle(pk)} className={`${ROW_GRID} w-full rounded-lg px-1 py-1.5 text-left hover:bg-[#fafafa]`}>
-                        <span className="flex min-w-0 items-center gap-2">
+                      <div className={`${ROW_GRID} w-full rounded-lg px-1 py-1.5 hover:bg-[#fafafa]`}>
+                        <button type="button" onClick={() => toggle(pk)} aria-expanded={pOpen} className="flex min-w-0 items-center gap-2 text-left">
                           <Caret open={pOpen} />
                           <span className="min-w-0">
                             <span className="block truncate text-[11.5px] font-semibold text-[#374151]">{p.label}</span>
                             <span className="text-[10px] tabular-nums text-[#9ca3af]">{plural(p.total, "call")}</span>
                           </span>
-                        </span>
-                        {pOpen ? <span /> : <VolumeBar tally={p.outcomes} total={p.total} max={max} onTip={onTip} />}
+                        </button>
+                        {pOpen ? <span /> : <VolumeBar tally={p.outcomes} total={p.total} max={max} onTip={onTip} onPick={pick} />}
                         {!pOpen && <span className="hidden sm:flex"><TopOutcome tally={p.outcomes} total={p.total} /></span>}
-                      </button>
+                      </div>
                       {pOpen && (
                         <div className={`${ROW_GRID} px-1 pb-3`}>
                           <span />
                           <div className="min-w-0 sm:col-span-2">
-                            <RibbonFan tally={p.outcomes} total={p.total} onTip={onTip} />
+                            <RibbonFan tally={p.outcomes} total={p.total} onTip={onTip} onPick={pick} />
                           </div>
                         </div>
                       )}
@@ -397,8 +481,25 @@ function SankeyView({ o, onTip }: { o: EvalOutcomes; onTip: (t: Tip) => void }) 
 
 /* The same numbers as a table — every row visible at once, exact counts, no interaction needed. This is
  * also the accessible read of the chart: the segment colours are backed by a column of figures. */
-function TableView({ o }: { o: EvalOutcomes }) {
+function TableView({ o, onDrill }: { o: EvalOutcomes; onDrill?: (t: DrillTarget) => void }) {
   const rungs = OUTCOME_RUNGS.filter((r) => (o.outcomes[r.key] ?? 0) > 0);
+  /* A figure in this table and a segment on the chart are the same set of conversations, so they open the
+     same way. Only non-zero cells are clickable — an em-dash has nothing behind it. */
+  const cell = (n: number, r: { key: string; label: string; color: string }, t: Omit<DrillTarget, "outcome" | "label" | "color" | "count">, rowLabel: string, cls: string) => {
+    if (!n) return <span style={{ color: "#d4d7dd" }}>–</span>;
+    if (!onDrill) return <span style={{ color: r.color }}>{fmtInt(n)}</span>;
+    return (
+      <button
+        type="button"
+        className={`${cls} underline decoration-dotted underline-offset-2 hover:opacity-70`}
+        style={{ color: r.color }}
+        aria-label={`${rowLabel}, ${r.label}, ${plural(n, "call")} — open these conversations`}
+        onClick={() => onDrill({ ...t, outcome: r.key, label: `${rowLabel} · ${r.label}`, color: r.color, count: n })}
+      >
+        {fmtInt(n)}
+      </button>
+    );
+  };
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[640px] border-collapse">
@@ -425,8 +526,8 @@ function TableView({ o }: { o: EvalOutcomes }) {
                 <td className="px-2 py-2 text-right text-[12px] font-bold tabular-nums text-[#111]">{fmtInt(g.total)}</td>
                 <td className="px-2 py-2 text-right text-[11.5px] tabular-nums text-[#6b7280]">{pct(g.total, o.scored)}%</td>
                 {rungs.map((r) => (
-                  <td key={r.key} className="px-2 py-2 text-right text-[12px] font-semibold tabular-nums" style={{ color: g.outcomes[r.key] ? r.color : "#d4d7dd" }}>
-                    {g.outcomes[r.key] ? fmtInt(g.outcomes[r.key]) : "–"}
+                  <td key={r.key} className="px-2 py-2 text-right text-[12px] font-semibold tabular-nums">
+                    {cell(g.outcomes[r.key] ?? 0, r, { callType: g.id }, g.label, "font-semibold")}
                   </td>
                 ))}
               </tr>
@@ -436,8 +537,8 @@ function TableView({ o }: { o: EvalOutcomes }) {
                   <td className="px-2 py-1.5 text-right text-[11.5px] tabular-nums text-[#374151]">{fmtInt(p.total)}</td>
                   <td className="px-2 py-1.5 text-right text-[11px] tabular-nums text-[#9ca3af]">{pct(p.total, o.scored)}%</td>
                   {rungs.map((r) => (
-                    <td key={r.key} className="px-2 py-1.5 text-right text-[11.5px] tabular-nums" style={{ color: p.outcomes[r.key] ? r.color : "#dfe2e7" }}>
-                      {p.outcomes[r.key] ? fmtInt(p.outcomes[r.key]) : "–"}
+                    <td key={r.key} className="px-2 py-1.5 text-right text-[11.5px] tabular-nums">
+                      {cell(p.outcomes[r.key] ?? 0, r, { callType: g.id, primaryIntent: p.id }, p.label, "")}
                     </td>
                   ))}
                 </tr>
@@ -468,6 +569,156 @@ function TableView({ o }: { o: EvalOutcomes }) {
   );
 }
 
+/* THE CONVERSATIONS BEHIND ONE SEGMENT.
+ *
+ * Opens under the chart rather than in a modal: the reader keeps the bar they clicked in view, which is
+ * the whole point — they are checking whether the number is what they think it is.
+ *
+ * The list comes from the warehouse copy of the eval (so it survives an expired API token), then one
+ * click resolves that conversation through the existing /api/conversations lead path and hands it to the
+ * same drawer the rest of the console uses for playback and transcript. Nothing about recordings is
+ * re-implemented here. */
+function ConversationDrillPanel({
+  target,
+  ctx,
+  dir,
+  onClose,
+}: {
+  target: DrillTarget;
+  ctx: FlowDrillCtx;
+  dir: EvalDirection;
+  onClose: () => void;
+}) {
+  /* `failed` is tracked separately from an empty list on purpose. When the query errors the route returns
+     an empty list with degraded:true, and reporting that as "these haven't landed yet" tells the dealer
+     something false about their data. A failure is a failure and says so. */
+  const [state, setState] = useState<{ key: string; rows: DrillConversation[] | null; failed: boolean }>({ key: "", rows: null, failed: false });
+  const [conv, setConv] = useState<Conversation | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [missing, setMissing] = useState<string | null>(null);
+
+  // Keyed by the request so a slow response for a segment the reader has already moved off can never paint.
+  const key = `${target.callType}|${target.primaryIntent ?? ""}|${target.outcome ?? ""}|${dir}`;
+  const rows = state.key === key ? state.rows : null;
+
+  useEffect(() => {
+    let on = true;
+    const qs = new URLSearchParams({
+      team_id: ctx.teamId,
+      direction: dir,
+      callType: target.callType,
+      ...(target.primaryIntent ? { primaryIntent: target.primaryIntent } : {}),
+      ...(target.outcome ? { outcome: target.outcome } : {}),
+      ...(ctx.serviceType ? { serviceType: ctx.serviceType } : {}),
+      ...(ctx.start && ctx.end ? { start: ctx.start, end: ctx.end } : { bucket: ctx.bucket ?? "last30" }),
+      ...(ctx.spyneEnv ? { env: ctx.spyneEnv } : {}),
+    });
+    fetch(`/api/reports/conversation-drill?${qs}`, {
+      cache: "no-store",
+      headers: ctx.spyneToken ? { Authorization: `Bearer ${ctx.spyneToken}` } : undefined,
+    })
+      .then((r) => (r.ok ? r.json() : { conversations: [], degraded: true }))
+      .then((j: { conversations?: DrillConversation[]; degraded?: boolean }) => {
+        if (on) setState({ key, rows: Array.isArray(j.conversations) ? j.conversations : [], failed: !!j.degraded });
+      })
+      .catch(() => { if (on) setState({ key, rows: [], failed: true }); });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  /* Resolve one row into the full conversation record the drawer needs. Matched on callId; the newest
+     call on the lead is the fallback, because a lead whose eval row we have always has calls. */
+  const open = async (row: DrillConversation) => {
+    setBusy(row.callId);
+    setMissing(null);
+    try {
+      const list = await fetchConversations(ctx.teamId, {
+        leadId: row.leadId,
+        channel: "call",
+        limit: 50,
+        spyneToken: ctx.spyneToken,
+        spyneEnv: ctx.spyneEnv,
+      });
+      const hit = list.find((c) => c.callId === row.callId || c.id === row.callId) ?? list[0];
+      if (hit) setConv(hit);
+      else setMissing(row.callId);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="mt-3 rounded-xl border border-[#ece9f6] bg-[#fbfbfc] px-4 py-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="flex items-center gap-2 text-[12.5px] font-bold text-[#111]">
+            <span className="h-2.5 w-2.5 flex-none rounded-[3px]" style={{ background: target.color }} />
+            {target.label}
+            <span className="font-semibold text-[#9ca3af]">{plural(target.count, "call")}</span>
+          </p>
+          <button type="button" onClick={onClose} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">Close</button>
+        </div>
+
+        {rows === null ? (
+          <p className="mt-3 text-[12px] text-[#9ca3af]">Finding these conversations…</p>
+        ) : state.failed ? (
+          <p className="mt-3 text-[12px] leading-relaxed text-[#6b7280]">
+            We couldn&apos;t load these conversations just now. The figure above is unaffected — close this
+            and open it again in a moment.
+          </p>
+        ) : !rows.length ? (
+          <p className="mt-3 text-[12px] leading-relaxed text-[#6b7280]">
+            We can&apos;t open these ones. The review that produced this figure is held separately from the
+            call log, and these conversations haven&apos;t landed there yet — usually a day behind on the
+            most recent calls.
+          </p>
+        ) : (
+          <>
+            <p className="mt-1 text-[11px] text-[#9ca3af]">
+              {rows.length < target.count
+                ? `${fmtInt(rows.length)} of ${fmtInt(target.count)} available to open · newest first`
+                : `${plural(rows.length, "conversation")} · click one to listen`}
+            </p>
+            <div className="mt-2.5 grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>
+              {rows.map((c) => (
+                <button
+                  key={c.callId}
+                  type="button"
+                  onClick={() => open(c)}
+                  disabled={busy === c.callId}
+                  className="flex flex-col items-start gap-1 rounded-xl border border-[#e5e7eb] bg-white px-3.5 py-2.5 text-left hover:border-[#d6c9f5] hover:shadow-sm disabled:opacity-60"
+                >
+                  <span className="flex w-full items-baseline justify-between gap-2">
+                    <span className="truncate text-[12.5px] font-semibold text-[#111]">{c.customer || "Unknown caller"}</span>
+                    <span className="flex-none text-[10.5px] tabular-nums text-[#9ca3af]">
+                      {c.durationSec ? fmtSecs(c.durationSec) : ""}
+                    </span>
+                  </span>
+                  <span className="text-[10.5px] text-[#9ca3af]">
+                    {fmtWhenShort(c.at)}
+                    {c.hasRecording ? " · recorded" : " · no recording"}
+                  </span>
+                  {c.summary && <span className="line-clamp-2 text-[11px] leading-snug text-[#6b7280]">{c.summary}</span>}
+                  <span className="text-[10.5px] font-semibold" style={{ color: busy === c.callId ? "#813fed" : "#9ca3af" }}>
+                    {busy === c.callId ? "Opening…" : "Open conversation"}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {missing && (
+              <p className="mt-2 text-[11px] text-[#9ca3af]">
+                That call&apos;s recording isn&apos;t in the log yet. The rest of the list is unaffected.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      <ConversationDrawer conv={conv} onClose={() => setConv(null)} />
+    </>
+  );
+}
+
 /* The ghost row beneath the flow: scored conversations where nothing was ever established. Called out
  * rather than drawn as a lane — on an outbound rooftop it is ~90% of the volume and would flatten every
  * real lane to a sliver. */
@@ -493,15 +744,20 @@ export function CallFlowCard({
   calls,
   title,
   sub,
+  drill,
 }: {
   o: EvalOutcomes;
   calls?: number | null;
   title?: string;
   sub?: string;
+  /** Supplied = the segments open the conversations behind them. Omit and the chart stays read-only. */
+  drill?: FlowDrillCtx;
 }) {
   const dirLabel = o.dir === "inbound" ? "Inbound" : "Outbound";
   const [view, setView] = useState<FlowView>("sankey");
   const [tip, setTip] = useState<Tip>(null);
+  const [target, setTarget] = useState<DrillTarget | null>(null);
+  const onDrill = drill?.teamId ? (t: DrillTarget) => { setTarget(t); setTip(null); } : undefined;
 
   if (!o.scored) {
     return (
@@ -550,11 +806,18 @@ export function CallFlowCard({
           </p>
         ) : view === "sankey" ? (
           <>
-            <SankeyView o={o} onTip={setTip} />
-            <p className="text-[10.5px] text-[#9ca3af]">Bar width is call volume · click any row to open it</p>
+            <SankeyView o={o} onTip={setTip} onDrill={onDrill} />
+            <p className="text-[10.5px] text-[#9ca3af]">
+              Bar width is call volume · click any row to open it
+              {onDrill ? " · click a coloured segment to hear those calls" : ""}
+            </p>
           </>
         ) : (
-          <TableView o={o} />
+          <TableView o={o} onDrill={onDrill} />
+        )}
+
+        {target && drill && (
+          <ConversationDrillPanel target={target} ctx={drill} dir={o.dir} onClose={() => setTarget(null)} />
         )}
 
         <GhostNote o={o} />

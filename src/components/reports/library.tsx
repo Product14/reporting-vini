@@ -595,7 +595,22 @@ export const REPORTS: ReportDef[] = [
           const o = c.outcomes[d];
           if (!o || !o.scored) return null;
           const agent = scopedAgents(c).find((a) => a.dir.toLowerCase() === d);
-          return <CallFlowCard key={d} o={o} calls={agent?.metrics.calls} title={`${d === "inbound" ? "Inbound" : "Outbound"} calls`} />;
+          return (
+            <CallFlowCard
+              key={d}
+              o={o}
+              calls={agent?.metrics.calls}
+              title={`${d === "inbound" ? "Inbound" : "Outbound"} calls`}
+              drill={{
+                teamId: c.teamId,
+                serviceType: c.dept && c.dept !== "all" ? c.dept : undefined,
+                start: c.window?.start,
+                end: c.window?.end,
+                bucket: c.window?.bucket,
+                spyneToken: c.spyneToken,
+              }}
+            />
+          );
         })}
       </div>
     ),
