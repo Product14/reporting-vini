@@ -566,10 +566,11 @@ function Inbox() {
   // moment the keys start arriving — no code change. Temperature stays available everywhere (it filters via
   // the legacy leadType param on prod). The DISPLAY (journey chips / lead detail) is already self-gating —
   // it only renders when a key is present — so nothing shows on prod there either.
-  const showLeadFilters = useMemo(
-    () => customers.some((c) => c.leads !== undefined || c.engagementJourneys !== undefined),
-    [customers],
-  );
+  // STICKY once the backend's lead keys have been seen (per scope): a filter that returns ZERO customers
+  // must NOT hide the filter controls — otherwise you can't change the filter that emptied the list. Latched
+  // in the catalog effect below, reset on scope change.
+  const [leadFiltersReady, setLeadFiltersReady] = useState(false);
+  const showLeadFilters = leadFiltersReady;
 
   // The query for the current tab/search/filters (page added per-call). Shared by page-1 load + load-more.
   const listQuery = useMemo(() => {
@@ -638,8 +639,8 @@ function Inbox() {
   // changes (values are team + serviceType scoped), then grow-only as pages load — so once you filter by a
   // value the OTHER values don't vanish from the picker.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset catalogs on scope change
-    setOutcomeCatalog([]); setSourceCatalog([]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset catalogs + gate on scope change
+    setOutcomeCatalog([]); setSourceCatalog([]); setLeadFiltersReady(false);
   }, [teamId, enterpriseId, serviceType]);
   useEffect(() => {
     if (!customers.length) return;
@@ -652,6 +653,8 @@ function Inbox() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- union new values into the grow-only catalog
     setOutcomeCatalog((prev) => (o.some((x) => !prev.includes(x)) ? Array.from(new Set([...prev, ...o])).sort() : prev));
     setSourceCatalog((prev) => (s.some((x) => !prev.includes(x)) ? Array.from(new Set([...prev, ...s])).sort() : prev));
+    // Latch the filter gate once we've seen the new keys — stays on even when a later filter returns 0 rows.
+    setLeadFiltersReady((r) => r || customers.some((c) => c.leads !== undefined || c.engagementJourneys !== undefined));
   }, [customers]);
 
   // Live PENDING-handover count for the "Needs Attention" badge. Polled (no websocket) so the
@@ -849,7 +852,8 @@ function Inbox() {
               />
             </span>
           )}
-          {account?.name && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
+          {/* Show the rooftop name only when it's a real, resolved name — never the "your rooftop" placeholder. */}
+          {account?.name && account.name !== "your rooftop" && <span className="ml-1 hidden text-[12px] lg:inline" style={{ color: C.sub }}>· {account.name}</span>}
           {tz && <span className="ml-1 hidden text-[11px] lg:inline" style={{ color: C.sub }} title={`Times shown in this rooftop's timezone (${tz})`}>· times in {tzShort(tz)}</span>}
         </div>
         {/* MOBILE: Group by + Channel + CSV + Filters are ONE button (they all act on the list, and four
@@ -3327,6 +3331,10 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
 
   const lead = conv?.leads?.[0];
   const appts = conv?.nextAppointments ?? [];
+  // Service types OTHER than the current department scope — the scope badge in the header already shows the
+  // current one, so we don't repeat it here (a cross-department lead still surfaces).
+  const otherServiceTypes = Array.from(new Set((conv?.leads ?? []).map((l) => l.service_type).filter(Boolean)))
+    .filter((st) => (st as string).toLowerCase() !== (auth.serviceType || "").toLowerCase()) as string[];
   // Resolved-in-session ids drop out here so the "Action items (n)" count and the list both update.
   const actions = (conv?.nextActionItems ?? []).filter((a) => a.is_active && !a.is_completed && !resolvedIds.has(actionItemId(a)));
   const nextSched = normalizeNextScheduled(conv?.nextScheduledTasks?.[0]);
@@ -3355,16 +3363,17 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
         <div className="space-y-3 p-4">{[0, 1, 2].map((i) => <div key={i} className="h-20 animate-pulse rounded-xl bg-[#eef0f3]" />)}</div>
       ) : (
         <div className="flex flex-col gap-4 p-4">
-          {/* lead status pills + engagement */}
+          {/* lead status pills. Temperature is intentionally NOT repeated here — it's shown next to the name
+              in the thread header; and the current department type isn't repeated either (the header scope
+              badge covers it). Stage + any cross-department type remain. */}
+          {(lead?.stage || otherServiceTypes.length > 0) && (
           <div className="flex flex-wrap items-center gap-2">
-            {lead?.temperature && <TempBadge temp={lead.temperature} />}
             {lead?.stage && <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold" style={{ background: C.primaryAccent, color: C.primary }}>{stageLabel(lead.stage)}</span>}
-            {/* A customer can have BOTH a sales and a service lead — show every distinct type, not just
-                leads[0]'s (INVAI-4949/-4954, where a sales lead was mislabelled "service"). */}
-            {Array.from(new Set((conv?.leads ?? []).map((l) => l.service_type).filter(Boolean))).map((st) => (
+            {otherServiceTypes.map((st) => (
               <span key={st} className="rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: "#f1f5f9", color: "#64748b" }}>{st}</span>
             ))}
           </div>
+          )}
 
           {/* Which automated journeys ever reached this customer (get-customers-list engagementJourneys). */}
           {(customer.engagementJourneys?.length ?? 0) > 0 && (
