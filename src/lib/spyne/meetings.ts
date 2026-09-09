@@ -45,6 +45,11 @@ interface RawMeeting {
   source?: string; // who booked it: "spyne" = the AI agent, "bdc" = the dealer's own staff, etc.
   proposedVinsData?: RawVin[];
   customerData?: { name?: string; extractedName?: string; mobileNumber?: string } | null;
+  /* WHICH AGENT booked it. This is the only place the live API states the agent split, and it is what
+   * lets an appointment number be served live instead of from the aggregate: agentType is Sales/Service
+   * and callType is inbound/outbound, which together are exactly the report's agent_type. Present on
+   * 325 of 326 rows measured on Honda Universe, and it agreed with serviceType on every one. */
+  agentData?: { agentName?: string | null; agentType?: string | null; callType?: string | null } | null;
 }
 
 /* This report attributes value to the AI agent, so every appointment number in it (the tiles, from
@@ -129,6 +134,8 @@ function normalize(m: RawMeeting): Meeting {
     assignedTo: m.assignedTo?.userName || null,
     intent: m.intent || null,
     bookedAt: m.createdAt || null,
+    agentType: (m.agentData?.agentType || "").trim().toLowerCase() || null,
+    direction: (m.agentData?.callType || "").trim().toLowerCase() || null,
   };
 }
 
@@ -167,6 +174,15 @@ async function fetchOne(o: FetchOneOpts): Promise<Meeting[]> {
       pageSize: String(PAGE_SIZE),
       startDate: o.startISO,
       endDate: o.endISO,
+      /* ★ SERVER-SIDE source FILTER (added 2026-09-09). The API honours this now — measured on Honda
+       * Universe, the same request returns 4,529 rows without it and 326 with it, and the 326 are
+       * exactly the AI-booked set we keep. The note below about the API ignoring `source` was true once
+       * and is not any more.
+       *
+       * This is not only a speed fix. MAX_PAGES caps this read at 5,000 rows and that rooftop's full
+       * book is already 4,529, so a busy rooftop was one good month away from silently truncating its
+       * own appointment list. The client-side AI_SOURCE filter below stays as a belt-and-braces check. */
+      source: AI_SOURCE,
     }).toString()}`;
 
   const first = await spyneGet<MeetingsResp>(pageUrl(1), o.token, o.env);

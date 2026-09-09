@@ -11,7 +11,8 @@ import { AGENTS as MOCK_AGENTS, type AgentData, type NamedAppt, type WarmLeadIte
 import type { FetchResult, Basis } from "@/components/reports/liveData";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "./schema";
 
-const AGENT_TYPE_BY_ID: Record<AgentData["id"], string> = {
+/** Report agent id → agent_type label. Exported so the route can map live per-agent numbers back. */
+export const AGENT_TYPE_BY_ID: Record<AgentData["id"], string> = {
   sales_ib: "Sales Inbound",
   sales_ob: "Sales Outbound",
   service_ib: "Service Inbound",

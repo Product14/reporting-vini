@@ -1,7 +1,8 @@
 import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS, SYNC_STATE } from "@/lib/reports/supabase";
-import { buildResult } from "@/lib/reports/build";
+import { buildResult, AGENT_TYPE_BY_ID } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 import { assistedApptLeads, assistedInWindow } from "@/lib/reports/assistedAppts";
+import { fetchLiveAppointments, countByAgent } from "@/lib/reports/liveAppointments";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
@@ -312,13 +313,18 @@ export async function GET(request: Request): Promise<Response> {
 
   // Detail tables (one rpc, fallback to six reads) + both lead-count windows (one rpc) + the
   // lifetime "ever live" probe in parallel.
-  const [detail, lc, sourceCounts, everLive, assistedLeads, syncedAt] = await Promise.all([
+  const [detail, lc, sourceCounts, everLive, assistedLeads, syncedAt, live] = await Promise.all([
     fetchDetailCombined(sb, teamId).then((d) => d ?? fetchDetailPerTable(sb, teamId)),
     leadCountsBoth(sb, teamId, start, end, prior.start, prior.end),
     sourceCountsFor(sb, teamId, start, end),
     teamEverLive(sb, teamId),
     assistedApptLeads(sb, teamId, start, end),
     lastSyncAt(sb),
+    /* AI-booked appointments come from the meetings API, not the aggregate — the one number dealers
+     * check against the appointments console, which reads that same API. Fetched across BOTH windows in
+     * one call so the period delta compares live against live. Null = no credential or the call failed,
+     * and every appointment number below then stays exactly as the aggregate had it. */
+    fetchLiveAppointments({ teamId, start: prior.start, end, token: spyneToken, env: spyneEnv }),
   ]);
   const { callbacks, campaigns, outcomes, appointments, warmLeads } = detail ?? EMPTY_DETAIL;
   // Named appointments are shown for the report window — filter the ~120d snapshot by booking date.
@@ -331,7 +337,7 @@ export async function GET(request: Request): Promise<Response> {
   // card of 84; re-bucketed store-local it returns 103 / 85. That single mismatch was 4 of the 5.
   // Falls back to the raw prefix when the rooftop's tz is unknown (storeLocalDay's own contract), which
   // is exactly the previous behavior.
-  const windowedAppointments = appointments.filter((a) => {
+  let windowedAppointments = appointments.filter((a) => {
     const raw = (a.booked_at ?? "").slice(0, 10);
     if (!raw) return false;
     const day = storeLocalDay(a.booked_at ?? "", timezone ?? undefined, raw);
@@ -339,6 +345,59 @@ export async function GET(request: Request): Promise<Response> {
     // ★ AI-assisted rows must ALSO have an in-window AI touch — see assistedAppts.ts for why.
     return assistedInWindow(a, assistedLeads);
   });
+
+  /* ── AI-BOOKED APPOINTMENTS, SWAPPED TO LIVE ──
+   * The list and the tile must move together. Making the tile live while the list stayed on the
+   * aggregate would just relocate the mismatch we set out to remove, so the AI-booked half of the list
+   * is rebuilt from the same live meetings the tile counts. Assisted rows are untouched: they are not
+   * in this API's set and depend on the aggregate to know the AI worked the lead.
+   *
+   * Detail the live API doesn't carry (booked_via — call / SMS / web chat) is enriched back from the
+   * snapshot row with the same meeting_id, so a booking the aggregate already knows about keeps its
+   * "AI-booked, via SMS" label and only a booking too new for the aggregate reads as plain "AI-booked". */
+  let liveAppts = live?.meetings ?? null;
+  const appointmentsLive = !!liveAppts;
+  if (liveAppts) {
+    const snapshotByMeeting = new Map(windowedAppointments.filter((a) => a.meeting_id).map((a) => [a.meeting_id as string, a]));
+    /* The API states the booking agent on ~99% of rows (agentData). For the rest, take the department
+     * and direction the aggregate already resolved for that meeting. Without this the row still lists —
+     * it is a real appointment — but belongs to no agent, so the tiles sum to one less than the list
+     * beneath them. Anything still unresolved stays listed and uncounted rather than being guessed at. */
+    liveAppts = liveAppts.map((m) => {
+      if (m.agentType && m.direction) return m;
+      const prev = m.id ? snapshotByMeeting.get(m.id) : undefined;
+      if (!prev) return m;
+      return {
+        ...m,
+        agentType: m.agentType ?? (prev.service_type ? prev.service_type.toLowerCase() : null),
+        direction: m.direction ?? (prev.direction ? prev.direction.toLowerCase() : null),
+      };
+    });
+    const booked: ReportAppointmentRow[] = liveAppts
+      .filter((m) => { const d = (m.bookedAt ?? "").slice(0, 10); return d >= start && d < end; })
+      .map((m) => {
+        const prev = m.id ? snapshotByMeeting.get(m.id) : undefined;
+        return {
+          team_id: teamId,
+          enterprise_id: prev?.enterprise_id ?? null,
+          service_type: (m.agentType || m.serviceType || "").toLowerCase() || null,
+          lead_id: m.leadId,
+          meeting_id: m.id,
+          customer_name: m.customer,
+          phone: m.phone,
+          vehicle: m.vehicle || prev?.vehicle || null,
+          intent: m.intent,
+          meeting_start: m.when || null,
+          booked_at: m.bookedAt,
+          status: m.status || null,
+          assisted: false,
+          direction: m.direction ?? prev?.direction ?? null,
+          booked_via: prev?.booked_via ?? null,
+        } satisfies ReportAppointmentRow;
+      });
+    const assisted = windowedAppointments.filter((a) => a.assisted);
+    windowedAppointments = [...booked, ...assisted];
+  }
   // Invariant: a rooftop that returned real rows in THIS request can't be "never live" — don't let a
   // separate probe (even a clean-but-stale empty read) demote it. The probe still gates brand-new
   // rooftops whose selected window AND lifetime are both empty.
@@ -367,7 +426,25 @@ export async function GET(request: Request): Promise<Response> {
    * read "Synced just now" beside 1 appointment while the appointments console, reading the live API,
    * showed 3 — the two missing ones were booked AFTER the last sync finished. Telling a dealer a number
    * is current when it is hours behind is how a sync lag gets mistaken for a bug. */
-  return Response.json({ ...result, ...meta, syncedAt, everLive: everLiveResolved }, {
+  /* Per-agent AI-booked counts from the same live set, for the CURRENT and the PRIOR window, so the
+   * period delta compares two live numbers. Only `appointments` moves — assisted, qualified and every
+   * other metric still come from the aggregate, so a rate built on both (close rate = AI-booked ÷
+   * qualified) now divides a live numerator by an aggregate denominator. That is the honest trade: the
+   * numerator dealers check against another Spyne screen is right, and the denominator is no more stale
+   * than it was before. `appointmentsLive` says which is which; the UI labels the tile accordingly. */
+  if (liveAppts) {
+    const cur = countByAgent(liveAppts, start, end).byAgent;
+    const pri = countByAgent(liveAppts, prior.start, prior.end).byAgent;
+    for (const agent of result.agents) {
+      const type = AGENT_TYPE_BY_ID[agent.id];
+      if (!type) continue;
+      agent.metrics.appointments = cur[type] ?? 0;
+      const basis = result.prior?.[agent.id];
+      if (basis && typeof basis.appointments === "number") basis.appointments = pri[type] ?? 0;
+    }
+  }
+
+  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, everLive: everLiveResolved }, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

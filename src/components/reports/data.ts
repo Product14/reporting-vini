@@ -212,6 +212,10 @@ export interface Meeting {
   assignedTo: string | null;
   intent: string | null;
   bookedAt: string | null; // createdAt — when the appointment was booked (ISO 8601, UTC)
+  /* The agent that booked it, straight from the live API (agentData). "sales"/"service" +
+   * "inbound"/"outbound" = the report's agent_type. null when the API omitted it. */
+  agentType?: string | null;
+  direction?: string | null;
 }
 export interface MeetingsResult {
   meetings: Meeting[];
