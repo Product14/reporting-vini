@@ -403,6 +403,22 @@ function LeadSourceTable({
 }
 
 
+/* REPORT COPY IN THE READER'S OWN DEPARTMENT — the audience line and the "source" line.
+ *
+ * Most of these reports were written for the sales floor first, so they name a sales manager as the
+ * audience and describe their data as "every sales call". The same report in a Service context is read
+ * by different people — a service manager or a fixed-ops director — over service calls, and a card
+ * headed SALES MANAGER on the Service tab is both wrong and the first thing a dealer notices. Reports
+ * that are service-only already name their own audience and pass through untouched, because "service"
+ * does not match "sales".
+ *
+ * Deliberately only rewrites the sales/service word: BDC, receptionist, trainer, marketing, GM and
+ * owner are real roles in a service drive too and are left exactly as written. */
+export function audienceFor(text: string, dept?: "sales" | "service" | "all"): string {
+  if (dept !== "service") return text;
+  return text.replace(/\bSales\b/g, "Service").replace(/\bsales\b/g, "service");
+}
+
 const anyOutcome = (c: ReportCtx) => c.outcomes.inbound ?? c.outcomes.outbound ?? null;
 const pct = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
 

@@ -37,7 +37,7 @@ import {
   type ActionItemStats,
 } from "@/components/reports/liveData";
 import { useOutcomes } from "@/components/reports/outcomes";
-import { REPORTS, availableReports, reportSheets, type ReportCtx, type ReportDef } from "@/components/reports/library";
+import { REPORTS, availableReports, reportSheets, audienceFor, type ReportCtx, type ReportDef } from "@/components/reports/library";
 import { downloadXLSX, downloadCSV, exportFilenameStem } from "@/components/reports/exportReport";
 import { track } from "@/lib/analytics";
 import type { InsightsPayload } from "@/app/api/reports/insights/route";
@@ -253,7 +253,8 @@ function Gallery({ ctx, live, ready, onOpen, accountName, navQuery, onOpenAgent,
   const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const matches = (r: ReportDef) => {
     if (!terms.length) return true;
-    const hay = `${r.title} ${r.question} ${r.category} ${r.who} ${r.source} ${(r.keywords ?? []).join(" ")}`.toLowerCase();
+    // Search the audience the reader actually sees, so "service manager" finds it on the Service tab.
+    const hay = `${r.title} ${r.question} ${r.category} ${audienceFor(r.who, ctx.dept)} ${audienceFor(r.source, ctx.dept)} ${(r.keywords ?? []).join(" ")}`.toLowerCase();
     return terms.every((t) => hay.includes(t));
   };
   const needle = terms.join(" ");
@@ -331,7 +332,7 @@ function Gallery({ ctx, live, ready, onOpen, accountName, navQuery, onOpenAgent,
               <span className={`text-[13.5px] font-bold leading-tight ${on ? "text-[#111]" : "text-[#9ca3af]"}`}>{r.title}</span>
               <span className={`text-[11.5px] leading-snug ${on ? "text-[#6b7280]" : "text-[#b9bec7]"}`}>{r.question}</span>
               <span className="mt-auto flex w-full items-center justify-between gap-2 pt-2">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-[#9ca3af]">{r.who}</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-[#9ca3af]">{audienceFor(r.who, ctx.dept)}</span>
                 {on ? (
                   <span className="text-[11.5px] font-bold text-[#813fed]">Open →</span>
                 ) : (
@@ -474,7 +475,7 @@ function ReportPane({
           <div className="min-w-0 flex-1">
             <h1 className="text-[20px] font-extrabold leading-tight text-[#111]">{report.title}</h1>
             <p className="mt-1 text-[13px] leading-snug text-[#6b7280]">{report.question}</p>
-            <p className="mt-1.5 text-[11px] leading-snug text-[#9ca3af]">{report.source}</p>
+            <p className="mt-1.5 text-[11px] leading-snug text-[#9ca3af]">{audienceFor(report.source, ctx.dept)}</p>
           </div>
 
           {/* One row, one height, one radius — a toolbar rather than three stacked clusters. */}
@@ -505,7 +506,7 @@ function ReportPane({
       ) : (
         <Card title="Nothing to show for this period">
           <p className="text-[12.5px] leading-snug text-[#6b7280]">
-            This report reads {report.source.toLowerCase()}, and there is no activity for {ctx.periodLabel.toLowerCase()}.
+            This report reads {audienceFor(report.source, ctx.dept).toLowerCase()}, and there is no activity for {ctx.periodLabel.toLowerCase()}.
             Widen the date range, or come back once more has come in.
           </p>
         </Card>
@@ -514,7 +515,7 @@ function ReportPane({
       <PrevNext current={report} siblings={siblings} onOpen={onOpen} />
 
       <p className="text-[10.5px] text-[#9ca3af]">
-        {fmtInt(ctx.fleet.conversations)} conversations in this period · source: {report.source}
+        {fmtInt(ctx.fleet.conversations)} conversations in this period · source: {audienceFor(report.source, ctx.dept)}
       </p>
     </div>
   );
