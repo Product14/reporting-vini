@@ -68,6 +68,15 @@ export async function GET(request: Request): Promise<Response> {
     end = r.end;
   }
 
+  /* Optional DIRECTION scope. The library shows a department; a By-agent card shows ONE agent, and an
+   * "Inbound operations" card carrying outbound leads would be wrong. Absent = both directions. */
+  const dirRaw2 = (searchParams.get("direction") || "").toLowerCase();
+  const dirCall = dirRaw2 === "inbound"
+    ? " AND callDetails_callType='inboundPhoneCall'"
+    : dirRaw2 === "outbound"
+      ? " AND callDetails_callType='outboundPhoneCall'"
+      : "";
+
   const T = chEsc(teamId);
   const TZ = chEsc(tz);
   const win = `toTimeZone(createdAt,'${TZ}') >= toDateTime('${start} 00:00:00','${TZ}') AND toTimeZone(createdAt,'${TZ}') < toDateTime('${end} 00:00:00','${TZ}')`;
@@ -85,7 +94,7 @@ export async function GET(request: Request): Promise<Response> {
              count() AS calls,
              max(createdAt) AS lastCallAt
       FROM dealer_leads.endcallreports FINAL
-      WHERE teamId='${T}' AND isTestCall=0 AND ifNull(leadId,'') != ''${deptCall} AND ${win}
+      WHERE teamId='${T}' AND isTestCall=0 AND ifNull(leadId,'') != ''${deptCall}${dirCall} AND ${win}
       GROUP BY leadId
     ),
     ld AS (

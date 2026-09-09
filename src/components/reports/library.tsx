@@ -2082,3 +2082,60 @@ function LeadDrillPanel({
     </>
   );
 }
+
+/* THE SAME LEADS VIEW, standalone, for the By-agent report.
+ *
+ * The agent page carries no ReportCtx, and the old card there rendered leadsBySource — a flat
+ * source/interacted/total/booked table with no stage split and no way to open a number. This fetches the
+ * same dataset the library report uses and draws it identically, so the two can never diverge into two
+ * different answers to one question.
+ *
+ * DIRECTION-scoped, unlike the library's: an agent report is one agent, and an "Inbound operations" card
+ * showing outbound leads would be wrong. */
+export function LeadsByTypeCard({
+  teamId, dept, direction, window: win, periodLabel,
+}: {
+  teamId: string;
+  dept: "sales" | "service";
+  direction: "inbound" | "outbound";
+  window: { bucket?: string; start?: string; end?: string };
+  periodLabel: string;
+}) {
+  const [rows, setRows] = useState<InsightsPayload["leadSources"] | null>(null);
+  const key = `${teamId}|${dept}|${direction}|${win.bucket ?? ""}|${win.start ?? ""}|${win.end ?? ""}`;
+  const [state, setState] = useState<{ key: string; done: boolean }>({ key: "", done: false });
+
+  useEffect(() => {
+    if (!teamId) return;
+    let on = true;
+    const qs = new URLSearchParams({ team_id: teamId, serviceType: dept, direction });
+    if (win.start && win.end) { qs.set("start", win.start); qs.set("end", win.end); }
+    else if (win.bucket) qs.set("bucket", win.bucket);
+    fetch(`/api/reports/insights?${qs}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: InsightsPayload | null) => { if (on) { setRows(j?.leadSources ?? []); setState({ key, done: true }); } })
+      .catch(() => { if (on) { setRows([]); setState({ key, done: true }); } });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  const fresh = state.key === key && state.done;
+  const ctx = { teamId, dept, window: win, insights: { leadSources: rows } } as unknown as ReportCtx;
+  const types = fresh && rows?.length ? leadTypeRollup(ctx) : [];
+  const total = types.reduce((s, t) => s + t.contact, 0);
+
+  if (fresh && !types.length) return null; // nothing worked in this window for this agent
+  return (
+    <Card
+      title="Leads by type and source"
+      sub={`${periodLabel} · where this agent's leads actually got to · click a segment to open the customers`}
+      pad={false}
+    >
+      {!fresh ? (
+        <div className="px-5 py-6"><div className="h-24 animate-pulse rounded-xl bg-[#f4f5f7]" /></div>
+      ) : (
+        <LeadStageExplorer types={types} total={total} ctx={ctx} />
+      )}
+    </Card>
+  );
+}

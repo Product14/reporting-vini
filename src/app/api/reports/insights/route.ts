@@ -113,6 +113,15 @@ export async function GET(request: Request): Promise<Response> {
   // endcallreports carries report_useCase; an unscoped request stays rooftop-wide rather than guessing.
   const deptCall = useCase ? ` AND ifNull(report_useCase,'')='${chEsc(useCase)}'` : "";
 
+  /* Optional DIRECTION scope. The library shows a department; a By-agent card shows ONE agent, and an
+   * "Inbound operations" card carrying outbound leads would be wrong. Absent = both directions. */
+  const dirRaw2 = (searchParams.get("direction") || "").toLowerCase();
+  const dirCall = dirRaw2 === "inbound"
+    ? " AND callDetails_callType='inboundPhoneCall'"
+    : dirRaw2 === "outbound"
+      ? " AND callDetails_callType='outboundPhoneCall'"
+      : "";
+
   const T = chEsc(teamId);
   const TZ = chEsc(tz);
   // Window predicate shared by every query, expressed in the rooftop's local days.
@@ -272,7 +281,7 @@ export async function GET(request: Request): Promise<Response> {
              -- bucket test downstream (NULL = 0 is NULL, not false).
              toUInt8(ifNull(maxIf(1, callDetails_endedReason NOT IN ('voicemail','voicemail_full','no_answer','customer_declined','number_not_found','busy','machine_ivr')), 0)) AS reached
       FROM dealer_leads.endcallreports FINAL
-      WHERE teamId='${T}' AND isTestCall=0 AND ifNull(leadId,'') != ''${deptCall} AND ${win("createdAt")}
+      WHERE teamId='${T}' AND isTestCall=0 AND ifNull(leadId,'') != ''${deptCall}${dirCall} AND ${win("createdAt")}
       GROUP BY leadId
     ),
     ld AS (

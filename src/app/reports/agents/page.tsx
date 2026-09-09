@@ -38,7 +38,7 @@ import { goCrossPage } from "@/components/reports/parentNav";
 import { StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
 import { useOutcomes, OutcomeKpis, CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
-import { MoreReports } from "@/components/reports/library";
+import { MoreReports, LeadsByTypeCard } from "@/components/reports/library";
 import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
@@ -1004,28 +1004,16 @@ function AgentReportsView() {
           {r.leadsBySource && (
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
               <div className={a.id === "sales_ib" ? "lg:col-span-2" : "lg:col-span-3"}>
-                <Card title="Leads by source" sub={`${periodLabel} · interacted → total → booked`} pad={false}>
-                  <table className="w-full">
-                    <thead className="bg-[#fafafa]">
-                      <tr>
-                        <Th align="left">Source</Th>
-                        <Th align="right">Interacted</Th>
-                        <Th align="right">Total leads</Th>
-                        <Th align="right">Appts booked</Th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {r.leadsBySource.map((s) => (
-                        <tr key={s.source} className="border-t border-[#f0f0f0] hover:bg-[#faf8ff] transition-colors">
-                          <Td align="left"><span className="text-[12.5px] font-semibold text-[#111]">{s.source}</span></Td>
-                          <Td align="right"><span className="text-[12.5px] tabular-nums text-[#374151]">{fmtInt(scale(s.engaged))}</span></Td>
-                          <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#111]">{fmtInt(scale(s.total))}</span></Td>
-                          <Td align="right"><span className="text-[12.5px] tabular-nums font-semibold text-[#10b981]">{fmtInt(scale(s.appts))}</span></Td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </Card>
+                {/* Was a flat source/interacted/total/booked table with no stage split and no way to open
+                    a number. Now the same view the report library shows, scoped to THIS agent's
+                    direction so an "Inbound operations" card cannot carry outbound leads. */}
+                <LeadsByTypeCard
+                  teamId={teamId}
+                  dept={agentSvc === "service" ? "service" : "sales"}
+                  direction={inbound ? "inbound" : "outbound"}
+                  window={custom ? { start: custom.start, end: addDay(custom.end) } : { bucket }}
+                  periodLabel={periodLabel}
+                />
               </div>
               {a.id === "sales_ib" && (
                 <Card title="Speed to lead" sub="How fast new CRM leads get a first touch">
