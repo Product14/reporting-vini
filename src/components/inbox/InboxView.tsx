@@ -247,6 +247,7 @@ const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><p
 const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
 const IconMessage = (p: IconProps) => <Svg {...p}><path d="M21 11.5a8.5 8.5 0 0 1-12.3 7.6L3 21l1.9-5.7A8.5 8.5 0 1 1 21 11.5Z" /></Svg>;
 const IconCar = (p: IconProps) => <Svg {...p}><path d="M5 11l1.6-4.2A2 2 0 0 1 8.5 5.5h7A2 2 0 0 1 17.4 6.8L19 11" /><path d="M3 11h18v5h-3M6 16H3v-5" /><path d="M9 16h6" /><circle cx="7.5" cy="16.5" r="1.5" /><circle cx="16.5" cy="16.5" r="1.5" /></Svg>;
+const IconCopy = (p: IconProps) => <Svg {...p}><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Root
@@ -1209,7 +1210,8 @@ function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: bool
 function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, onHoverEnd }: { c: InboxCustomer; meta?: { appt: number; actions: number; preview?: string }; active: boolean; read?: boolean; onClick: () => void; onVisible?: (customerId: string) => void; onHover?: (c: InboxCustomer, rect: DOMRect) => void; onHoverEnd?: () => void }) {
   const unread = read ? 0 : c.unreadCounts?.totalUnread ?? 0;
   const callUnread = c.unreadCounts?.callUnread ?? 0;
-  const name = c.customer_name || c.mobile_number || "Unknown";
+  const name = c.customer_name || c.mobile_number || "Unknown"; // raw — avatar seed + initials
+  const displayName = c.customer_name || formatPhone(c.mobile_number) || "Unknown"; // phone shown formatted
   // Lead facts surfaced inline in the row (at all times when available): temperature, vehicle of interest,
   // lead type + source. The full picture is on hover (CustomerHoverCard).
   const lead = primaryLead(c);
@@ -1264,7 +1266,7 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
             </span>
             <div className="flex min-w-0 flex-col gap-0.5">
               <div className="flex min-w-0 items-center gap-1.5">
-                <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{name}</span>
+                <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{displayName}</span>
                 {/* temperature at a glance — a colour dot (full word in the hover card / right panel). */}
                 {temp && TEMP_COLORS[temp] && <span title={temp} className="size-2 shrink-0 rounded-full" style={{ background: TEMP_COLORS[temp].fg }} />}
               </div>
@@ -1291,7 +1293,7 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
       </div>
       <div className="flex items-center gap-2.5">
         <p className="min-w-0 flex-1 truncate text-[12px]" style={{ color: (meta?.preview || c.lastMessage) ? C.dark : C.sub }}>
-          {meta?.preview || c.lastMessage || c.email_id || c.mobile_number || "No preview available"}
+          {meta?.preview || c.lastMessage || c.email_id || formatPhone(c.mobile_number) || "No preview available"}
         </p>
         {unread > 0 && <span className="size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
       </div>
@@ -2012,7 +2014,12 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
                 {/* (i) → the customer id, click to copy. */}
                 <CopyId label="Customer ID" value={customer.customer_id} iconOnly />
               </div>
-              {phone && <a href={`tel:${phone}`} className="inline-block py-1 text-[14px] font-medium leading-none hover:underline" style={{ color: C.sub }}>{phone}</a>}
+              {phone && (
+                <span className="flex items-center gap-1.5">
+                  <a href={`tel:${phone}`} className="inline-block py-1 text-[14px] font-medium leading-none hover:underline" style={{ color: C.sub }}>{formatPhone(phone)}</a>
+                  <CopyId label="Phone" value={formatPhone(phone)} iconOnly icon="copy" />
+                </span>
+              )}
             </div>
             {lead?.temperature && <TempBadge temp={lead.temperature} />}
             {engagementStopped && (
@@ -3014,7 +3021,7 @@ function TempBadge({ temp }: { temp: string }) {
 /* A copy-to-clipboard id affordance (support / debugging). `iconOnly` renders just an (i) icon — used next
  * to the customer name; otherwise a small labelled chip (LABEL a1b2…c3d4) — used on call cards and at the
  * start of each SMS/chat conversation. Full id + "click to copy" is in the tooltip; click copies and flashes. */
-function CopyId({ label, value, iconOnly }: { label: string; value?: string | null; iconOnly?: boolean }) {
+function CopyId({ label, value, iconOnly, icon = "info" }: { label: string; value?: string | null; iconOnly?: boolean; icon?: "info" | "copy" }) {
   const [copied, setCopied] = useState(false);
   if (!value) return null;
   const copy = (e: React.MouseEvent) => {
@@ -3026,7 +3033,7 @@ function CopyId({ label, value, iconOnly }: { label: string; value?: string | nu
       <button type="button" onClick={copy} title={`${label}: ${value}\nClick to copy`}
         className="flex size-5 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[#f2f2f4]"
         style={{ color: copied ? C.green : C.sub }}>
-        {copied ? <IconCheck size={12} /> : <IconInfo size={13} />}
+        {copied ? <IconCheck size={12} /> : icon === "copy" ? <IconCopy size={12} /> : <IconInfo size={13} />}
       </button>
     );
   }
@@ -3684,6 +3691,15 @@ const TYPE_COLORS: Record<string, string> = {
 function typeColor(t?: string | null): string {
   return TYPE_COLORS[(t || "").toLowerCase().replace(/[^a-z]/g, "")] || "#94a3b8";
 }
+// US phone → "+1 (952) 261-4576". Accepts +19522614576 / 19522614576 / 9522614576 / already-formatted.
+// A non-US / unexpected-length number is returned untouched (don't mangle international numbers).
+function formatPhone(raw?: string | null): string {
+  const s = (raw || "").trim();
+  const d = s.replace(/\D/g, "");
+  if (d.length === 11 && d[0] === "1") return `+1 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `+1 (${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  return s;
+}
 // The customer's single most-useful lead for at-a-glance sidebar display: prefer one with a vehicle of
 // interest, else one with any detail, else the first.
 function primaryLead(c: InboxCustomer): CustomerLead | undefined {
@@ -3760,7 +3776,7 @@ function CustomerHoverCard({ c, rect, meta }: { c: InboxCustomer; rect: DOMRect;
   const phone = c.mobile_number || "";
   const email = c.email_id || "";
   const journeys = c.engagementJourneys ?? [];
-  const name = c.customer_name || phone || "Unknown";
+  const name = c.customer_name || formatPhone(phone) || "Unknown";
   const unread = c.unreadCounts?.totalUnread ?? 0;
   const appt = meta?.appt ?? 0;
   const actions = meta?.actions ?? 0;
@@ -3789,7 +3805,7 @@ function CustomerHoverCard({ c, rect, meta }: { c: InboxCustomer; rect: DOMRect;
           {/* contact */}
           {(phone || email) && (
             <div className="flex flex-col gap-1">
-              {phone && <div className="flex items-center gap-1.5 text-[12px]" style={{ color: C.dark }}><IconPhone size={12} className="shrink-0" style={{ color: C.sub }} /><span className="truncate">{phone}</span></div>}
+              {phone && <div className="flex items-center gap-1.5 text-[12px]" style={{ color: C.dark }}><IconPhone size={12} className="shrink-0" style={{ color: C.sub }} /><span className="truncate">{formatPhone(phone)}</span></div>}
               {email && <div className="flex items-center gap-1.5 text-[12px]" style={{ color: C.dark }}><IconMail size={12} className="shrink-0" style={{ color: C.sub }} /><span className="truncate">{email}</span></div>}
             </div>
           )}
