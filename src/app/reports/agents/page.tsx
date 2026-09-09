@@ -39,6 +39,7 @@ import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
 import { useOutcomes, OutcomeKpis, CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
 import { MoreReports } from "@/components/reports/library";
+import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
@@ -69,6 +70,12 @@ function AgentReportsView() {
   // open on the agent passed in; the picker on the page then drives selection locally.
   // An invalid/absent id is corrected by the validity effect below once agents load.
   const [activeId, setActiveId] = useState<string>(paramAgent || "sales_ib");
+  /* The console's Reports tab iframes THIS route (see parentNav.ts: reports → /reports/agents), so the
+   * report library has to live here rather than at a route of its own — a separate page would need a
+   * parent-console change in another repo before a dealer could ever reach it. Same URL, two views. */
+  const [view2, setView2] = useState<"agent" | "library">(searchParams.get("view") === "reports" ? "library" : "agent");
+  // Which library report to open when the switch flips — set by the "More reports" cards, null for the gallery.
+  const [libraryReport, setLibraryReport] = useState<string | null>(null);
   // True once the user has clicked a pill — stops the activity-based default below from overriding an
   // explicit choice (e.g. deliberately opening a quiet agent).
   const userPickedRef = useRef(false);
@@ -785,6 +792,27 @@ function AgentReportsView() {
 
           {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !comingSoon && !feedEmpty)) && (
           <>
+          {/* Agent report ⇄ report library, at the same URL. */}
+          <div className="no-print flex items-center gap-1 self-start rounded-xl bg-[#f1f2f5] p-1">
+            {([["agent", "Agent report"], ["library", "All reports"]] as const).map(([v, label]) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => { setView2(v); setLibraryReport(null); }}
+                aria-pressed={view2 === v}
+                className={`rounded-lg px-4 py-1.5 text-[12.5px] font-semibold transition-colors ${
+                  view2 === v ? "bg-white text-[#813fed] shadow-sm" : "text-[#6b7280] hover:text-[#374151]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {view2 === "library" ? (
+            <ReportLibraryPanel navQuery={navQuery} initialReportId={libraryReport} onOpenAgent={(id: string) => { setActiveId(id); setView2("agent"); userPickedRef.current = true; }} />
+          ) : (
+          <>
           {/* agent switcher — full-width row of equal pills; the selected one drives the report below */}
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
             {visibleAgents.map((ag) => {
@@ -1222,8 +1250,10 @@ function AgentReportsView() {
           )}
 
           {/* Sales only: the rest of the library, one click away, scoped to this agent. */}
-          {isSales && <MoreReports agentId={a.id} navQuery={navQuery} />}
+          {isSales && <MoreReports agentId={a.id} onOpenLibrary={(reportId?: string) => { setLibraryReport(reportId ?? null); setView2("library"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />}
 
+          </>
+          )}
           </>
           )}
           </>

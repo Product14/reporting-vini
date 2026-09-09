@@ -39,6 +39,8 @@ export interface ReportCtx {
   namedAppts: NamedAppt[];
   /** ClickHouse-only datasets (/api/reports/insights): CRM outcome, vehicles, routing, texts, coverage. */
   insights: InsightsPayload | null;
+  /** Department the reader is scoped to — reports meaningful only to the other one are not offered. */
+  dept?: "sales" | "service" | "all";
 }
 
 export interface ReportDef {
@@ -54,6 +56,10 @@ export interface ReportDef {
   /* Which sales agent this report belongs under, driving the "more reports" strip on the By-agent page.
    * Omitted = relevant to both, which is the common case (most reports are rooftop-wide). */
   agents?: ("sales_ib" | "sales_ob")[];
+  /* Departments this report is MEANINGFUL for. Omitted = both. A vehicle-shopping report has no meaning
+   * in the service drive, and offering it there is worse than not offering it: the reader assumes it is
+   * about their department. */
+  depts?: ("sales" | "service")[];
   /* One plain sentence telling the reader what this period's numbers actually mean — computed from the
    * data, not canned copy, so it changes with the figures. Rendered at the top of the report. */
   takeaway?: (c: ReportCtx) => string | null;
@@ -690,6 +696,7 @@ export const REPORTS: ReportDef[] = [
   // 13 ────────────────────────────────────────────────────────────────────────
   {
     id: "sold",
+    depts: ["sales"],
     title: "Did it turn into cars?",
     question: "Of the leads the AI worked, how many have actually sold?",
     category: "Lead quality",
@@ -729,6 +736,7 @@ export const REPORTS: ReportDef[] = [
   // 14 ────────────────────────────────────────────────────────────────────────
   {
     id: "vehicles",
+    depts: ["sales"],
     title: "Vehicles customers are asking for",
     question: "Which makes and models are the leads we spoke to actually shopping?",
     category: "Lead quality",
@@ -1149,6 +1157,7 @@ export const REPORTS: ReportDef[] = [
   // 23 ────────────────────────────────────────────────────────────────────────
   {
     id: "demand-vs-stock",
+    depts: ["sales"],
     title: "Demand vs what's on the lot",
     question: "Are we stocked for what customers are actually asking us about?",
     category: "Lead quality",
@@ -1271,6 +1280,7 @@ const HOURS = ["8a", "9a", "10a", "11a", "12p", "1p", "2p", "3p", "4p", "5p", "6
 /** Reports that have live data for this rooftop + window, in catalog order. */
 export function availableReports(c: ReportCtx): ReportDef[] {
   return REPORTS.filter((r) => {
+    if (r.depts && c.dept && c.dept !== "all" && !r.depts.includes(c.dept)) return false;
     try {
       return r.available(c);
     } catch {
@@ -1311,7 +1321,7 @@ export function libraryHref(reportId: string, navQuery: string, fromAgent?: stri
 
 /* The strip itself. Six is deliberate: enough to feel like a library, few enough to scan without
  * turning the bottom of the agent report into a second navigation problem. */
-export function MoreReports({ agentId, navQuery, max = 6 }: { agentId: string; navQuery: string; max?: number }) {
+export function MoreReports({ agentId, onOpenLibrary, max = 6 }: { agentId: string; onOpenLibrary?: (reportId?: string) => void; max?: number }) {
   const picks = reportsForAgent(agentId).slice(0, max);
   if (!picks.length) return null;
   return (
@@ -1319,22 +1329,27 @@ export function MoreReports({ agentId, navQuery, max = 6 }: { agentId: string; n
       title="More reports on this data"
       sub="Same period, same rooftop — open any of these for the detail behind the numbers above"
       right={
-        <a href={libraryHref("", navQuery).replace(/[?&]report=$/, "")} className="no-print flex-none rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">
+        <button
+          type="button"
+          onClick={() => onOpenLibrary?.()}
+          className="no-print flex-none rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]"
+        >
           All reports →
-        </a>
+        </button>
       }
     >
       <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
         {picks.map((r) => (
-          <a
+          <button
             key={r.id}
-            href={libraryHref(r.id, navQuery, agentId)}
-            className="flex h-full flex-col gap-1 rounded-xl border border-[#e5e7eb] bg-white px-4 py-3 transition-shadow hover:border-[#d6c9f5] hover:shadow-md"
+            type="button"
+            onClick={() => onOpenLibrary?.(r.id)}
+            className="flex h-full flex-col gap-1 rounded-xl border border-[#e5e7eb] bg-white px-4 py-3 text-left transition-shadow hover:border-[#d6c9f5] hover:shadow-md"
           >
             <span className="text-[10px] font-bold uppercase tracking-wide text-[#c3b5e8]">{r.category}</span>
             <span className="text-[12.5px] font-bold leading-tight text-[#111]">{r.title}</span>
             <span className="text-[11px] leading-snug text-[#6b7280]">{r.question}</span>
-          </a>
+          </button>
         ))}
       </div>
     </Card>

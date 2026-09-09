@@ -94,6 +94,16 @@ export async function GET(request: Request): Promise<Response> {
    * variant of anything. */
   const modelKey = (col: string) => `upper(trim(replaceRegexpOne(${col}, '(?i)[[:space:]]+(plug-?in[[:space:]]+)?hybrid$|(?i)[[:space:]]+phev$', '')))`;
 
+  /* DEPARTMENT SCOPE. Sales and Service are separate P&Ls and are never blended in a report — and the
+   * console hands us the scope on the URL. Without this these queries were pinned to 'Sales', so opening
+   * the library in the Service space showed Sales calls under a Service header. Datasets that carry no
+   * department (inventory stock, SMS threads) stay rooftop-wide and say so on the card. */
+  const deptRaw = (searchParams.get("serviceType") || searchParams.get("service_type") || "").toLowerCase();
+  const dept: "sales" | "service" | null = deptRaw === "service" ? "service" : deptRaw === "sales" ? "sales" : null;
+  const useCase = dept === "service" ? "Service" : dept === "sales" ? "Sales" : null;
+  // endcallreports carries report_useCase; an unscoped request stays rooftop-wide rather than guessing.
+  const deptCall = useCase ? ` AND ifNull(report_useCase,'')='${chEsc(useCase)}'` : "";
+
   const T = chEsc(teamId);
   const TZ = chEsc(tz);
   // Window predicate shared by every query, expressed in the rooftop's local days.
@@ -105,7 +115,7 @@ export async function GET(request: Request): Promise<Response> {
   const soldSql = `
     WITH touched AS (
       SELECT DISTINCT leadId FROM dealer_leads.endcallreports FINAL
-      WHERE teamId='${T}' AND isTestCall=0 AND leadId != '' AND ${win("createdAt")}
+      WHERE teamId='${T}' AND isTestCall=0 AND leadId != ''${deptCall} AND ${win("createdAt")}
     )
     SELECT ifNull(l.external_lead_status,'') AS status, count() AS leads
     FROM (SELECT lead_id, external_lead_status FROM dealer_leads.leads FINAL WHERE team_id='${T}') AS l
@@ -117,7 +127,7 @@ export async function GET(request: Request): Promise<Response> {
            ifNull(destinationType,'(not set)') AS destinationType,
            count() AS transfers
     FROM dealer_leads.callTransferEvents
-    WHERE teamId='${T}' AND ${win("createdAt")}
+    WHERE teamId='${T}'${dept ? ` AND lower(ifNull(department,''))='${dept}'` : ""} AND ${win("createdAt")}
     GROUP BY department, destinationType ORDER BY transfers DESC LIMIT 25`;
 
   /* smsMessages carries no team column, so the thread set is scoped through conversations (same path
@@ -142,7 +152,7 @@ export async function GET(request: Request): Promise<Response> {
   const vehiclesSql = `
     WITH touched AS (
       SELECT DISTINCT leadId FROM dealer_leads.endcallreports FINAL
-      WHERE teamId='${T}' AND isTestCall=0 AND leadId != '' AND ${win("createdAt")}
+      WHERE teamId='${T}' AND isTestCall=0 AND leadId != ''${deptCall} AND ${win("createdAt")}
     )
     SELECT trim(toString(v.doc.make)) AS make,
            trim(toString(v.doc.model)) AS model,
@@ -162,7 +172,8 @@ export async function GET(request: Request): Promise<Response> {
     WHERE make != '' AND model != ''
     GROUP BY make, model, modelKeyOut ORDER BY leads DESC LIMIT 25`;
 
-  /* HANDLING — every SALES call by how it ended, with talk minutes. `report_useCase` scopes to sales, and
+  /* HANDLING — every call in scope by how it ended, with talk minutes. `report_useCase` scopes it to the
+   * requested department, and
    * duration comes from the call's own start/end stamps. The caller decides which reasons count as
    * "connected" and which mean nobody was ever on the line; this returns the raw buckets so that rule
    * lives in one place in the UI rather than being baked into SQL. */
@@ -173,7 +184,7 @@ export async function GET(request: Request): Promise<Response> {
              parseDateTimeBestEffortOrNull(callDetails_startedAt),
              parseDateTimeBestEffortOrNull(callDetails_endedAt))) / 60) AS minutes
     FROM dealer_leads.endcallreports FINAL
-    WHERE teamId='${T}' AND isTestCall=0 AND ifNull(report_useCase,'')='Sales' AND ${win("createdAt")}
+    WHERE teamId='${T}' AND isTestCall=0${deptCall} AND ${win("createdAt")}
     GROUP BY reason ORDER BY calls DESC LIMIT 20`;
 
   /* RESOLUTION — the intent-resolution analysis records, per call, each intent the customer raised and
@@ -186,7 +197,7 @@ export async function GET(request: Request): Promise<Response> {
     FROM (
       SELECT arrayJoin(JSONExtractArrayRaw(ifNull(resolution_block,''),'intents')) AS i
       FROM dealer_leads.intentResolutionAnalysis
-      WHERE teamId='${T}' AND isActive=1 AND ifNull(agentType,'')='Sales' AND ${win("createdAt")}
+      WHERE teamId='${T}' AND isActive=1${useCase ? ` AND ifNull(agentType,'')='${chEsc(useCase)}'` : ""} AND ${win("createdAt")}
     )
     WHERE intent != '' GROUP BY intent ORDER BY raised DESC LIMIT 25`;
 
@@ -219,7 +230,7 @@ export async function GET(request: Request): Promise<Response> {
       SELECT leadId, uniqExact(callId) AS attempts
       FROM dealer_leads.endcallreports FINAL
       WHERE teamId='${T}' AND isTestCall=0 AND leadId != ''
-        AND callDetails_callType='outboundPhoneCall' AND ${win("createdAt")}
+        AND callDetails_callType='outboundPhoneCall'${deptCall} AND ${win("createdAt")}
       GROUP BY leadId
     ) GROUP BY attempts ORDER BY attempts LIMIT 40`;
 
@@ -228,7 +239,7 @@ export async function GET(request: Request): Promise<Response> {
            toDayOfWeek(toTimeZone(createdAt,'${TZ}')) AS weekday,
            uniqExact(callId) AS calls
     FROM dealer_leads.endcallreports FINAL
-    WHERE teamId='${T}' AND isTestCall=0 AND callDetails_callType='inboundPhoneCall' AND ${win("createdAt")}
+    WHERE teamId='${T}' AND isTestCall=0 AND callDetails_callType='inboundPhoneCall'${deptCall} AND ${win("createdAt")}
     GROUP BY hour, weekday`;
 
   const safe = async <T,>(sql: string): Promise<T[] | null> => {
