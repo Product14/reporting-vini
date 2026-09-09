@@ -54,6 +54,8 @@ export async function fetchOutcomes(args: {
    * from the session token (then ClickHouse) when it isn't on the URL — see the route. */
   enterpriseId?: string;
   dir: EvalDirection;
+  /** Department to score — the eval pipeline holds service conversations as well as sales. */
+  serviceType?: string;
   bucket?: string;
   start?: string;
   end?: string;
@@ -63,6 +65,7 @@ export async function fetchOutcomes(args: {
   const { teamId, enterpriseId, dir } = args;
   if (!teamId) return { outcomes: null, degraded: true };
   const qs = new URLSearchParams({ team_id: teamId, dir });
+  if (args.serviceType) qs.set("serviceType", args.serviceType);
   if (enterpriseId) qs.set("enterprise_id", enterpriseId);
   if (args.start && args.end) {
     qs.set("start", args.start);
@@ -93,21 +96,22 @@ export function useOutcomes(args: {
   end?: string;
   spyneToken?: string;
   spyneEnv?: string;
+  serviceType?: string;
   enabled?: boolean;
 }): { data: Partial<Record<EvalDirection, EvalOutcomes>>; loading: boolean } {
-  const { teamId, enterpriseId, bucket, start, end, spyneToken, spyneEnv } = args;
+  const { teamId, enterpriseId, bucket, start, end, spyneToken, spyneEnv, serviceType } = args;
   const enabled = args.enabled !== false;
   const dirKey = args.dirs.join(",");
   /* State carries the request signature it belongs to, and the reader below discards a result that
    * doesn't match the CURRENT one. That's what makes switching rooftop or window safe without resetting
    * state from inside the effect — a stale payload can never be painted under a new rooftop's header. */
-  const reqKey = `${enabled ? 1 : 0}|${teamId}|${enterpriseId ?? ""}|${dirKey}|${bucket ?? ""}|${start ?? ""}|${end ?? ""}`;
+  const reqKey = `${enabled ? 1 : 0}|${teamId}|${enterpriseId ?? ""}|${dirKey}|${serviceType ?? ""}|${bucket ?? ""}|${start ?? ""}|${end ?? ""}`;
   const [state, setState] = useState<{ key: string; data: Partial<Record<EvalDirection, EvalOutcomes>> }>({ key: "", data: {} });
   useEffect(() => {
     if (!enabled || !teamId) return;
     let on = true;
     const dirs = dirKey.split(",").filter(Boolean) as EvalDirection[];
-    Promise.all(dirs.map((dir) => fetchOutcomes({ teamId, enterpriseId, dir, bucket, start, end, spyneToken, spyneEnv })))
+    Promise.all(dirs.map((dir) => fetchOutcomes({ teamId, enterpriseId, dir, serviceType, bucket, start, end, spyneToken, spyneEnv })))
       .then((res) => {
         if (!on) return;
         const next: Partial<Record<EvalDirection, EvalOutcomes>> = {};

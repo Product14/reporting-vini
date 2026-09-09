@@ -36,6 +36,11 @@ export async function GET(request: Request): Promise<Response> {
   const teamId = searchParams.get("team_id") || "";
   if (!idOk(teamId)) return Response.json({ error: "valid team_id is required" }, { status: 400 });
 
+  /* Department, not a constant. The eval pipeline scores service conversations too; pinning this to
+   * sales meant the Service space could never have a conversation report at all. */
+  const svcRaw = (searchParams.get("serviceType") || searchParams.get("service_type") || "sales").toLowerCase();
+  const agentType: "sales" | "service" = svcRaw === "service" ? "service" : "sales";
+
   const dirRaw = (searchParams.get("dir") || "inbound").toLowerCase();
   if (dirRaw !== "inbound" && dirRaw !== "outbound") {
     return Response.json({ error: "dir must be inbound or outbound" }, { status: 400 });
@@ -101,7 +106,7 @@ export async function GET(request: Request): Promise<Response> {
 
   try {
     const outcomes = await fetchSalesOutcomes(
-      { enterpriseId, teamId, dir, startISO: `${start}T00:00:00.000Z`, endISO: `${end}T00:00:00.000Z` },
+      { enterpriseId, teamId, dir, agentType, startISO: `${start}T00:00:00.000Z`, endISO: `${end}T00:00:00.000Z` },
       token,
       env,
     );

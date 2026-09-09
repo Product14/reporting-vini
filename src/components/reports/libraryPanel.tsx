@@ -154,7 +154,8 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
     end: custom ? addDay(custom.end) : undefined,
     spyneToken,
     spyneEnv,
-    enabled: !!teamId && dept !== "service",
+    serviceType: dept === "service" ? "service" : "sales",
+    enabled: !!teamId,
   });
 
   const agents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
@@ -449,30 +450,39 @@ function ReportPane({
   }
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="no-print mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-            {/* Two ways back, because there are two ways in: the gallery, and an agent report. */}
-            {backToAgent && (
-              <a href={backToAgent.href} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">
-                ← {backToAgent.label}
-              </a>
-            )}
-            <button type="button" onClick={onBack} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">
-              {backToAgent ? "All reports" : "← All reports"}
-            </button>
-          </div>
-          <h1 className="text-[20px] font-extrabold leading-tight text-[#111]">{report.title}</h1>
-          <p className="mt-0.5 text-[12.5px] text-[#6b7280]">{report.question}</p>
+      {/* Header: the report identifies itself on the LEFT and every control sits in ONE toolbar row on
+          the right. Previously the right-hand side stacked three separately-aligned rows — actions, then
+          the date range, then a long source caption — which gave the header a ragged right edge and no
+          clear order of importance. The source line moved left, under the question it describes, where
+          it reads as prose instead of a third floating column. */}
+      <div className="flex flex-col gap-3">
+        <div className="no-print flex flex-wrap items-center gap-x-3 gap-y-1">
+          {/* Two ways back, because there are two ways in: the gallery, and an agent report. */}
+          {backToAgent && (
+            <a href={backToAgent.href} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">
+              ← {backToAgent.label}
+            </a>
+          )}
+          <button type="button" onClick={onBack} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">
+            {backToAgent ? "All reports" : "← All reports"}
+          </button>
         </div>
-        <div className="flex flex-col items-end gap-2">
-          <div className="no-print flex items-center gap-2">
+
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-[20px] font-extrabold leading-tight text-[#111]">{report.title}</h1>
+            <p className="mt-1 text-[13px] leading-snug text-[#6b7280]">{report.question}</p>
+            <p className="mt-1.5 text-[11px] leading-snug text-[#9ca3af]">{report.source}</p>
+          </div>
+
+          {/* One row, one height, one radius — a toolbar rather than three stacked clusters. */}
+          <div className="no-print flex flex-none flex-wrap items-center justify-end gap-2">
+            <DateFilter bucket={range.bucket} custom={range.custom} onPreset={range.setPreset} onCustom={range.setCustom} />
+            <span aria-hidden className="hidden h-6 w-px bg-[#e5e7eb] sm:block" />
             <BookmarkStar inline on={bookmarks.ids.includes(report.id)} onToggle={() => bookmarks.toggle(report.id)} />
             <DownloadButton report={report} ctx={ctx} accountName={accountName} disabled={!enabled} />
             <ReportSwitcher current={report} siblings={siblings} onOpen={onOpen} />
           </div>
-          <div className="no-print"><DateFilter bucket={range.bucket} custom={range.custom} onPreset={range.setPreset} onCustom={range.setCustom} /></div>
-          <p className="max-w-[420px] text-right text-[10.5px] leading-snug text-[#9ca3af]">{report.source}</p>
         </div>
       </div>
 
@@ -628,15 +638,19 @@ function ReportSwitcher({ current, siblings, onOpen }: { current: ReportDef; sib
     return acc;
   }, {});
   return (
-    <label className="no-print flex items-center gap-2">
-      <span className="text-[10.5px] font-semibold text-[#9ca3af]">Jump to</span>
+    /* The "Jump to" caption is gone: it doubled the control's width for a word the select already
+       implies, and it was the widest thing in the header. The purpose now lives in the accessible name
+       and the tooltip instead of taking layout space. */
+    <label className="no-print flex items-center">
+      <span className="sr-only">Jump to another report</span>
       <select
+        title="Jump to another report"
         value={current.id}
         onChange={(e) => {
           const next = siblings.find((r) => r.id === e.target.value);
           if (next) onOpen(next);
         }}
-        className="max-w-[260px] rounded-lg border border-[#e5e7eb] bg-white px-2.5 py-1.5 text-[12px] font-semibold text-[#374151]"
+        className="h-[34px] max-w-[230px] rounded-lg border border-[#e5e7eb] bg-white px-2.5 text-[12.5px] font-semibold text-[#374151] hover:bg-[#faf8ff]"
       >
         {Object.entries(byCategory).map(([cat, rs]) => (
           <optgroup key={cat} label={cat}>
@@ -694,11 +708,11 @@ function BookmarkStar({ on, onToggle, inline }: { on: boolean; onToggle: () => v
       aria-label={on ? "Remove bookmark" : "Bookmark this report"}
       title={on ? "Remove bookmark" : "Bookmark this report"}
       onClick={(e) => { e.stopPropagation(); onToggle(); }}
-      className={`no-print flex h-7 w-7 flex-none items-center justify-center rounded-lg border transition-colors ${
-        on ? "border-[#e6d9ff] bg-[#faf8ff] text-[#813fed]" : "border-transparent text-[#c3cad4] hover:border-[#e5e7eb] hover:text-[#9ca3af]"
-      } ${inline ? "" : "absolute right-3 top-3"}`}
+      className={`no-print flex flex-none items-center justify-center rounded-lg border transition-colors ${
+        inline ? "h-[34px] w-[34px]" : "absolute right-3 top-3 h-7 w-7"
+      } ${on ? "border-[#e6d9ff] bg-[#faf8ff] text-[#813fed]" : inline ? "border-[#e5e7eb] bg-white text-[#c3cad4] hover:text-[#9ca3af]" : "border-transparent text-[#c3cad4] hover:border-[#e5e7eb] hover:text-[#9ca3af]"}`}
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill={on ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill={on ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
         <path d="M12 3.5l2.6 5.3 5.9.85-4.25 4.15 1 5.85L12 16.9l-5.25 2.75 1-5.85L3.5 9.65l5.9-.85z" />
       </svg>
     </button>
@@ -731,10 +745,12 @@ function DownloadButton({ report, ctx, accountName, disabled }: { report: Report
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={busy}
-        className="flex items-center gap-1.5 rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#374151] hover:bg-[#faf8ff] disabled:opacity-60"
+        className="flex h-[34px] items-center gap-1.5 rounded-lg border border-[#e5e7eb] bg-white px-3 text-[12.5px] font-semibold text-[#374151] hover:bg-[#faf8ff] disabled:opacity-60"
       >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M12 3v12" /><path d="M7 12l5 5 5-5" /><path d="M4 20h16" />
+        </svg>
         {busy ? "Preparing…" : "Download"}
-        <span className="text-[9px] text-[#9ca3af]">▼</span>
       </button>
       {open && (
         <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-lg">

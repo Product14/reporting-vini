@@ -56,7 +56,7 @@ export interface ReportDef {
   source: string;
   /* Which sales agent this report belongs under, driving the "more reports" strip on the By-agent page.
    * Omitted = relevant to both, which is the common case (most reports are rooftop-wide). */
-  agents?: ("sales_ib" | "sales_ob")[];
+  agents?: ("sales_ib" | "sales_ob" | "service_ib" | "service_ob")[];
   /* Words a dealer would search that the report's own copy does not contain — "show rate", "loaner",
    * "recall", "ROI". Without these, search only finds reports you could already name. */
   keywords?: string[];
@@ -74,9 +74,13 @@ export interface ReportDef {
 
 // ───────────────────────── small shared primitives ─────────────────────────
 
-const salesAgents = (c: ReportCtx) => c.agents.filter((a) => a.dept === "Sales");
-const inboundAgent = (c: ReportCtx) => salesAgents(c).find((a) => a.dir === "Inbound");
-const outboundAgent = (c: ReportCtx) => salesAgents(c).find((a) => a.dir === "Outbound");
+/* The agents in scope. ctx.agents is ALREADY filtered to the department on the URL, so filtering again
+ * to Sales — which is what these did — left every agent-shaped report permanently empty in the Service
+ * space. Service runs an inbound and an outbound agent exactly as sales does, and both deserve the same
+ * reports. */
+const scopedAgents = (c: ReportCtx) => c.agents;
+const inboundAgent = (c: ReportCtx) => c.agents.find((a) => a.dir === "Inbound");
+const outboundAgent = (c: ReportCtx) => c.agents.find((a) => a.dir === "Outbound");
 /* report_objections carries two kinds of row. `theme` = what customers actually pushed back on.
  * `outbound_outcome` = why an outbound lead ended (Opt Out, Not Interested, Already Purchased…). Most
  * rooftops today only have the latter, and it answers a real question, so the report falls back to it
@@ -310,7 +314,7 @@ export const REPORTS: ReportDef[] = [
     source: "Appointments the AI booked, and the lead funnel behind them",
     available: (c) => c.fleet.appointments > 0 || c.namedAppts.length > 0,
     render: (c) => {
-      const byAgent = salesAgents(c).map((a) => ({ label: `${a.report.summary.person || a.name} · ${a.dir}`, value: a.metrics.appointments }));
+      const byAgent = scopedAgents(c).map((a) => ({ label: `${a.report.summary.person || a.name} · ${a.dir}`, value: a.metrics.appointments }));
       return (
         <div className="flex flex-col gap-4">
           <Stats
@@ -335,6 +339,7 @@ export const REPORTS: ReportDef[] = [
   // 2 ─────────────────────────────────────────────────────────────────────────
   {
     id: "speed-to-lead",
+    depts: ["sales"],
     keywords: ["response time","first touch","lead response","speed"],
     title: "Speed to lead",
     question: "How fast is a new lead getting its first touch — and does speed win appointments?",
@@ -383,6 +388,7 @@ export const REPORTS: ReportDef[] = [
   // 3 ─────────────────────────────────────────────────────────────────────────
   {
     id: "lead-sources",
+    depts: ["sales"],
     keywords: ["marketing","source","channel","roi by source"],
     title: "Lead source performance",
     question: "Which lead sources actually turn into appointments?",
@@ -439,7 +445,7 @@ export const REPORTS: ReportDef[] = [
         {(["inbound", "outbound"] as EvalDirection[]).map((d) => {
           const o = c.outcomes[d];
           if (!o || !o.scored) return null;
-          const agent = salesAgents(c).find((a) => a.dir.toLowerCase() === d);
+          const agent = scopedAgents(c).find((a) => a.dir.toLowerCase() === d);
           return <CallFlowCard key={d} o={o} calls={agent?.metrics.calls} title={`${d === "inbound" ? "Inbound" : "Outbound"} calls`} />;
         })}
       </div>
@@ -674,13 +680,13 @@ export const REPORTS: ReportDef[] = [
     category: "Team",
     who: "GM · sales manager",
     source: "Per-agent funnel from leads worked through to appointments",
-    available: (c) => salesAgents(c).length > 0,
+    available: (c) => scopedAgents(c).length > 0,
     render: (c) => (
       <div className="flex flex-col gap-4">
         <Card title="Side by side" sub={c.periodLabel} pad={false}>
           <Table
             head={[{ label: "Agent" }, { label: "Leads", align: "right" }, { label: "Conversations", align: "right" }, { label: "Qualified", align: "right" }, { label: "Appointments", align: "right" }, { label: "Close rate", align: "right" }, { label: "Talk time", align: "right" }]}
-            rows={salesAgents(c).map((a) => [
+            rows={scopedAgents(c).map((a) => [
               <span key="n" className="font-semibold text-[#111]">{a.report.summary.person || a.name} <span className="font-normal text-[#9ca3af]">· {a.dir}</span></span>,
               fmtInt(a.leadFunnel?.contacted ?? a.report.leadsAttempted),
               fmtInt(a.metrics.conversations),
@@ -691,7 +697,7 @@ export const REPORTS: ReportDef[] = [
             ])}
           />
         </Card>
-        {salesAgents(c).map((a) => (
+        {scopedAgents(c).map((a) => (
           <Card key={a.id} title={`${a.report.summary.person || a.name} · ${a.dir}`} sub="Lead → conversation → qualified → appointment">
             <StepFunnel
               stages={[
@@ -715,7 +721,7 @@ export const REPORTS: ReportDef[] = [
     category: "Conversations",
     who: "Sales manager",
     source: "Day-by-day leads touched, qualified and booked",
-    available: (c) => (salesAgents(c)[0]?.report.dayOnDay?.length ?? 0) > 0,
+    available: (c) => (scopedAgents(c)[0]?.report.dayOnDay?.length ?? 0) > 0,
     render: (c) => (
       <div className="flex flex-col gap-4">
         <Stats
@@ -726,7 +732,7 @@ export const REPORTS: ReportDef[] = [
             { label: "Response time", value: c.fleet.responseTimeSec != null ? fmtSecs(c.fleet.responseTimeSec) : "—", sub: "average first reply" },
           ]}
         />
-        {salesAgents(c).map((a) => (
+        {scopedAgents(c).map((a) => (
           <Card key={a.id} title={`${a.report.summary.person || a.name} · ${a.dir}`} sub="Touched → qualified → appointments, per day">
             <TrendBars values={a.trend7} labels={["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]} highlightLast height={92} />
           </Card>
@@ -1281,7 +1287,7 @@ export const REPORTS: ReportDef[] = [
     category: "Outbound",
     who: "BDC manager",
     source: "Outbound dials per lead across the period",
-    agents: ["sales_ob"],
+    agents: ["sales_ob", "service_ob"],
     available: (c) => (c.insights?.effort?.length ?? 0) > 0,
     takeaway: (c) => {
       const e = effortTotals(c)!;
@@ -1635,7 +1641,7 @@ export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
         ["Booked by the AI", c.fleet.appointments], ["Also booked after an AI touch", c.fleet.appointmentsAssisted],
         ["Qualified leads", c.fleet.qualified]] });
       sheets.push({ name: "By agent", rows: [["Agent", "Direction", "Appointments"],
-        ...salesAgents(c).map((a) => [a.report.summary.person || a.name, a.dir, a.metrics.appointments])] });
+        ...scopedAgents(c).map((a) => [a.report.summary.person || a.name, a.dir, a.metrics.appointments])] });
       sheets.push({ name: "Appointments", rows: [["Customer", "Vehicle", "When", "Booked at"],
         ...c.namedAppts.map((m) => [m.customer, m.vehicle ?? "", m.when ?? "", m.bookedAt ?? ""])] });
       break;
@@ -1721,14 +1727,14 @@ export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
 
     case "agent-scorecard":
       sheets.push({ name: "Agents", rows: [["Agent", "Direction", "Leads", "Conversations", "Qualified", "Appointments", "Talk minutes"],
-        ...salesAgents(c).map((a) => [a.report.summary.person || a.name, a.dir,
+        ...scopedAgents(c).map((a) => [a.report.summary.person || a.name, a.dir,
           a.leadFunnel?.contacted ?? a.report.leadsAttempted, a.metrics.conversations, a.metrics.qualified,
           a.metrics.appointments, a.metrics.talkMinutes])] });
       break;
 
     case "activity-trend":
       sheets.push({ name: "Day by day", rows: [["Agent", "Day", "Value"],
-        ...salesAgents(c).flatMap((a) => a.trend7.map((v, i) => [a.report.summary.person || a.name, WEEKDAYS[i] ?? String(i), v]))] });
+        ...scopedAgents(c).flatMap((a) => a.trend7.map((v, i) => [a.report.summary.person || a.name, WEEKDAYS[i] ?? String(i), v]))] });
       break;
 
     case "sold": {

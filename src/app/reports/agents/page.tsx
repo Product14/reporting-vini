@@ -1253,7 +1253,8 @@ function AgentReportsView() {
           )}
 
           {/* Sales only: the rest of the library, one click away, scoped to this agent. */}
-          {isSales && <MoreReports agentId={a.id} onOpenLibrary={(reportId?: string) => { setLibraryReport(reportId ?? null); setView2("library"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />}
+          {/* Both departments: a service manager wants the rest of the library as much as sales does. */}
+          <MoreReports agentId={a.id} onOpenLibrary={(reportId?: string) => { setLibraryReport(reportId ?? null); setView2("library"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
 
           </>
           )}

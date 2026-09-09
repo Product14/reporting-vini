@@ -306,7 +306,7 @@ const MAX_PAGES = 25; // 5 000 scored conversations per direction — far above 
 /* Every scored SALES conversation for one direction whose own start time falls in [startMs, endMs).
  * The API window is start-open-ended on purpose (see the header note on eval-run vs conversation time). */
 async function listSalesEvals(
-  args: { enterpriseId: string; teamId: string; dir: EvalDirection; startISO: string },
+  args: { enterpriseId: string; teamId: string; dir: EvalDirection; agentType: "sales" | "service"; startISO: string },
   token?: string | null,
   env?: string | null,
 ): Promise<RawEval[] | null> {
@@ -315,7 +315,7 @@ async function listSalesEvals(
     const qs = new URLSearchParams({
       enterpriseId: args.enterpriseId,
       teamId: args.teamId,
-      agentType: "sales",
+      agentType: args.agentType,
       agentCallType: args.dir,
       // CALLS ONLY. SMS conversations are scored by the same pipeline and are 37% of the sales cohort
       // fleet-wide — but this panel's coverage line divides by the agent's CALL count, and both funnels
@@ -507,15 +507,16 @@ async function fetchTools(
  * Cached for 10 min per (env, team, dir, window) — the Overview and the By-agent tab both ask for the
  * same slice, and the eval scorer only ever appends. */
 export async function fetchSalesOutcomes(
-  args: { enterpriseId: string; teamId: string; dir: EvalDirection; startISO: string; endISO: string },
+  args: { enterpriseId: string; teamId: string; dir: EvalDirection; agentType?: "sales" | "service"; startISO: string; endISO: string },
   token?: string | null,
   env?: string | null,
 ): Promise<EvalOutcomes | null> {
   const { enterpriseId, teamId, dir, startISO, endISO } = args;
+  const agentType = args.agentType ?? "sales";
   if (!enterpriseId || !teamId) return null;
 
-  return cached(`eval:${env ?? "prod"}:${teamId}:${dir}:${startISO}:${endISO}`, async () => {
-    const raw = await listSalesEvals({ enterpriseId, teamId, dir, startISO }, token, env);
+  return cached(`eval:${env ?? "prod"}:${teamId}:${agentType}:${dir}:${startISO}:${endISO}`, async () => {
+    const raw = await listSalesEvals({ enterpriseId, teamId, dir, agentType, startISO }, token, env);
     if (!raw) return null;
 
     // Re-window on the conversation's OWN start time; rows whose id isn't UUIDv7 fall back to createdAt.
@@ -568,7 +569,7 @@ export async function fetchSalesOutcomes(
     const otherQs = new URLSearchParams({
       enterpriseId,
       teamId,
-      agentType: "sales",
+      agentType,
       agentCallType: otherDir,
       startDate: startISO,
       page: "1",
@@ -579,7 +580,7 @@ export async function fetchSalesOutcomes(
 
     // How much SMS this panel is leaving out (head request — we only want `total`).
     const smsQs = new URLSearchParams({
-      enterpriseId, teamId, agentType: "sales", agentCallType: dir, channel: "sms",
+      enterpriseId, teamId, agentType, agentCallType: dir, channel: "sms",
       startDate: startISO, endDate: endISO, page: "1", limit: "1",
     });
     const sms = await spyneGet<{ total?: number }>(`/conversation/eval-pipeline?${smsQs}`, token, env);
