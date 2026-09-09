@@ -57,6 +57,21 @@ const WaveformPlayer = forwardRef<WaveformHandle, {
     }
   }, [url]);
 
+  // WaveSurfer's own <audio> element (MediaElement backend) — null on the WebAudio path.
+  const mediaEl = useCallback((): HTMLMediaElement | null => {
+    try { return (wavesurfer as unknown as { getMediaElement?: () => HTMLMediaElement | null })?.getMediaElement?.() ?? null; } catch { return null; }
+  }, [wavesurfer]);
+
+  // Only one recording plays at a time across the whole inbox: pause this player when any OTHER one (a call
+  // card's native <audio>, or another WaveSurfer) announces it started. Native players get paused directly by
+  // the announcer's querySelectorAll; WaveSurfer isn't a queryable <audio>, so it needs this listener — this
+  // is what stops the drawer from playing on after you pause the card (and vice versa).
+  useEffect(() => {
+    const onOther = (e: Event) => { if ((e as CustomEvent).detail !== mediaEl()) { try { wavesurfer?.pause(); } catch { /* noop */ } } };
+    window.addEventListener("inbox:media-play", onOther);
+    return () => window.removeEventListener("inbox:media-play", onOther);
+  }, [wavesurfer, mediaEl]);
+
   useImperativeHandle(ref, () => ({
     seek: (time) => {
       if (wavesurfer && isReady) {
@@ -101,7 +116,13 @@ const WaveformPlayer = forwardRef<WaveformHandle, {
             waveColor="#e5e5e5" progressColor="#4600F2" cursorColor="transparent"
             height={45} barHeight={2} barWidth={2} barGap={1.5} barRadius={5}
             onReady={onReady}
-            onPlay={() => { setIsPlaying(true); onPlay?.(); }}
+            onPlay={() => {
+              setIsPlaying(true); onPlay?.();
+              // Pause every other player, then announce so any WaveSurfer instance pauses too.
+              const me = mediaEl();
+              document.querySelectorAll("audio,video").forEach((el) => { if (el !== me) { try { (el as HTMLMediaElement).pause(); } catch { /* noop */ } } });
+              window.dispatchEvent(new CustomEvent("inbox:media-play", { detail: me }));
+            }}
             onPause={() => { setIsPlaying(false); onPause?.(); }}
             onTimeupdate={onTime}
             onError={onErr}

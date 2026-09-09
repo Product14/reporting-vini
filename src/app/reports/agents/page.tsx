@@ -1019,6 +1019,7 @@ function AgentReportsView() {
                   direction={inbound ? "inbound" : "outbound"}
                   window={custom ? { start: custom.start, end: addDay(custom.end) } : { bucket }}
                   periodLabel={periodLabel}
+                  spyneToken={spyneToken}
                 />
               </div>
               {a.id === "sales_ib" && (

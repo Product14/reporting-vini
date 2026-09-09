@@ -45,6 +45,10 @@ export interface ReportCtx {
   dept?: "sales" | "service" | "all";
   /** The selected window, so a drill-down can ask the server for the same slice the report is showing. */
   window?: { bucket?: string; start?: string; end?: string };
+  /* The dealer's session token, which arrives on the iframe URL. EVERY request to our own API has to
+   * carry it as `Authorization: Bearer …` — requireTeamAuth has no dev bypass in production, so a fetch
+   * that forgets it works locally and 401s silently for the dealer. */
+  spyneToken?: string;
 }
 
 export interface ReportDef {
@@ -2018,7 +2022,7 @@ function LeadDrillPanel({
       ...(ctx.dept && ctx.dept !== "all" ? { serviceType: ctx.dept } : {}),
       ...(ctx.window?.start && ctx.window?.end ? { start: ctx.window.start, end: ctx.window.end } : { bucket: ctx.window?.bucket ?? "last30" }),
     });
-    fetch(`/api/reports/lead-drill?${qs}`, { cache: "no-store" })
+    fetch(`/api/reports/lead-drill?${qs}`, { cache: "no-store", headers: ctx.spyneToken ? { Authorization: `Bearer ${ctx.spyneToken}` } : undefined })
       .then((r) => (r.ok ? r.json() : { leads: [] }))
       .then((j: { leads?: DrillLead[] }) => { if (on) setState({ key, leads: Array.isArray(j.leads) ? j.leads : [] }); })
       .catch(() => { if (on) setState({ key, leads: [] }); });
@@ -2093,16 +2097,18 @@ function LeadDrillPanel({
  * DIRECTION-scoped, unlike the library's: an agent report is one agent, and an "Inbound operations" card
  * showing outbound leads would be wrong. */
 export function LeadsByTypeCard({
-  teamId, dept, direction, window: win, periodLabel,
+  teamId, dept, direction, window: win, periodLabel, spyneToken,
 }: {
   teamId: string;
   dept: "sales" | "service";
   direction: "inbound" | "outbound";
   window: { bucket?: string; start?: string; end?: string };
   periodLabel: string;
+  /** Forwarded to our API as a Bearer header — without it this card is empty for every real dealer. */
+  spyneToken?: string;
 }) {
   const [rows, setRows] = useState<InsightsPayload["leadSources"] | null>(null);
-  const key = `${teamId}|${dept}|${direction}|${win.bucket ?? ""}|${win.start ?? ""}|${win.end ?? ""}`;
+  const key = `${teamId}|${dept}|${direction}|${win.bucket ?? ""}|${win.start ?? ""}|${win.end ?? ""}|${spyneToken ? 1 : 0}`;
   const [state, setState] = useState<{ key: string; done: boolean }>({ key: "", done: false });
 
   useEffect(() => {
@@ -2111,7 +2117,7 @@ export function LeadsByTypeCard({
     const qs = new URLSearchParams({ team_id: teamId, serviceType: dept, direction });
     if (win.start && win.end) { qs.set("start", win.start); qs.set("end", win.end); }
     else if (win.bucket) qs.set("bucket", win.bucket);
-    fetch(`/api/reports/insights?${qs}`, { cache: "no-store" })
+    fetch(`/api/reports/insights?${qs}`, { cache: "no-store", headers: spyneToken ? { Authorization: `Bearer ${spyneToken}` } : undefined })
       .then((r) => (r.ok ? r.json() : null))
       .then((j: InsightsPayload | null) => { if (on) { setRows(j?.leadSources ?? []); setState({ key, done: true }); } })
       .catch(() => { if (on) { setRows([]); setState({ key, done: true }); } });
@@ -2120,7 +2126,7 @@ export function LeadsByTypeCard({
   }, [key]);
 
   const fresh = state.key === key && state.done;
-  const ctx = { teamId, dept, window: win, insights: { leadSources: rows } } as unknown as ReportCtx;
+  const ctx = { teamId, dept, window: win, spyneToken, insights: { leadSources: rows } } as unknown as ReportCtx;
   const types = fresh && rows?.length ? leadTypeRollup(ctx) : [];
   const total = types.reduce((s, t) => s + t.contact, 0);
 

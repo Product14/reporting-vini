@@ -73,6 +73,12 @@ export function ConversationDrawer({ auth, target, onClose }: { auth: InboxAuth;
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Opening the expanded drawer stops whatever call card was playing behind it, so you don't end up with the
+  // card's <audio> still going while the drawer's own player sits paused (the reported bug).
+  useEffect(() => {
+    document.querySelectorAll("audio,video").forEach((el) => { try { (el as HTMLMediaElement).pause(); } catch { /* noop */ } });
+  }, []);
+
   useEffect(() => {
     let on = true;
     if (target.inlineTranscript && target.inlineTranscript.length) {

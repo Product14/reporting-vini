@@ -1337,6 +1337,7 @@ type ThreadNode = (
   | { t: number; kind: "created"; emoji: string; title: string; detail: string }
   | { t: number; kind: "event"; emoji: string; title: string; detail: string; subtle?: boolean; dateOnly?: boolean } // lead-journey milestone, interleaved in the chat
   | { t: number; kind: "call"; rec: ConvRecord }
+  | { t: number; kind: "convid"; channel: string; conversationId: string } // a per-conversation id marker (SMS/chat/email start)
 ) & { cid?: string }; // source conversationId — lets None-mode "jump to this conversation" scroll to it
 
 const EVENT_GRADIENT =
@@ -1754,6 +1755,8 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
         // channel tag on the bubble differs. Email records also arrive now but carry no bodies yet — skipped.
         const isChat = rec.type === "chat";
         const msgs = useChatSvc ? chatHo.messages.map(chatTurnToSms) : (rec.smsMessages ?? []);
+        // A per-conversation id marker at the start of this SMS/chat run (copyable, for support/debugging).
+        if (msgs.length) out.push({ t: base - 0.5, kind: "convid", channel: rec.type, conversationId: rec.conversationId, cid: rec.conversationId });
         // Pair each tool CALL (assistant msg w/ toolCalls) with its RESULT (role:"tool", toolCallId).
         const resultByCallId: Record<string, { text: string; extra?: string }> = {};
         for (const m of msgs) {
@@ -2004,7 +2007,11 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
             {/* flex-1, not just min-w-0: with basis:auto this column's min-content was the un-truncated
                 name (201px), so it refused to give ground and the header row overflowed by 8px. */}
             <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-              <p className="truncate text-[15px] font-semibold leading-none lg:text-[16px]" style={{ color: C.dark }}>{customer.customer_name || "Unknown"}</p>
+              <div className="flex min-w-0 items-center gap-1">
+                <p className="truncate text-[15px] font-semibold leading-none lg:text-[16px]" style={{ color: C.dark }}>{customer.customer_name || "Unknown"}</p>
+                {/* (i) → the customer id, click to copy. */}
+                <CopyId label="Customer ID" value={customer.customer_id} iconOnly />
+              </div>
               {phone && <a href={`tel:${phone}`} className="inline-block py-1 text-[14px] font-medium leading-none hover:underline" style={{ color: C.sub }}>{phone}</a>}
             </div>
             {lead?.temperature && <TempBadge temp={lead.temperature} />}
@@ -2436,6 +2443,15 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
       </div>
     );
   }
+  if (node.kind === "convid") {
+    // Per-conversation id marker at the start of an SMS/chat conversation — copyable for support/debugging.
+    const chLabel = node.channel === "chat" ? "Web chat" : node.channel === "email" ? "Email" : "SMS";
+    return (
+      <div className="flex justify-center py-0.5">
+        <CopyId label={`${chLabel} ID`} value={node.conversationId} />
+      </div>
+    );
+  }
   return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} human={node.human} images={node.images} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
 }
 
@@ -2736,10 +2752,11 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
           <div className="border-t px-4 py-3" style={{ borderColor: C.border }}>
             {/* autoPlay: expand is a user gesture (clicking the row/Play pill), so the recording starts
                 immediately instead of needing a second click (INVAI-4962). */}
-            {/* onPlay pauses every OTHER audio on the page, so expanding several calls never plays
-                overlapping recordings — only the one you just started plays (INVAI autoplay overlap). */}
+            {/* onPlay pauses every OTHER player (other call cards AND the expanded WaveSurfer drawer) so two
+                recordings never play at once — the WaveSurfer isn't a native <audio>, so we announce via a
+                window event it also listens for (pausing the card by hand no longer leaves the drawer going). */}
             <audio controls autoPlay preload="metadata" src={recording} className="h-9 w-full"
-              onPlay={(e) => { document.querySelectorAll("audio").forEach((a) => { if (a !== e.currentTarget) a.pause(); }); }}>
+              onPlay={(e) => { const el = e.currentTarget; document.querySelectorAll("audio,video").forEach((a) => { if (a !== el) { try { (a as HTMLMediaElement).pause(); } catch { /* noop */ } } }); window.dispatchEvent(new CustomEvent("inbox:media-play", { detail: el })); }}>
               <track kind="captions" />
             </audio>
             <div className="mt-3 flex items-center justify-between border-b" style={{ borderColor: C.border }}>
@@ -2990,6 +3007,36 @@ function TempBadge({ temp }: { temp: string }) {
   const t = temp.toLowerCase();
   const s = TEMP_COLORS[t] || { bg: C.primaryAccent, fg: C.primary };
   return <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: s.bg, color: s.fg }}>{t}</span>;
+}
+
+/* A copy-to-clipboard id affordance (support / debugging). `iconOnly` renders just an (i) icon — used next
+ * to the customer name; otherwise a small labelled chip (LABEL a1b2…c3d4) — used on call cards and at the
+ * start of each SMS/chat conversation. Full id + "click to copy" is in the tooltip; click copies and flashes. */
+function CopyId({ label, value, iconOnly }: { label: string; value?: string | null; iconOnly?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  if (!value) return null;
+  const copy = (e: React.MouseEvent) => {
+    e.stopPropagation(); e.preventDefault();
+    try { void navigator.clipboard?.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 1200); } catch { /* noop */ }
+  };
+  if (iconOnly) {
+    return (
+      <button type="button" onClick={copy} title={`${label}: ${value}\nClick to copy`}
+        className="flex size-5 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[#f2f2f4]"
+        style={{ color: copied ? C.green : C.sub }}>
+        {copied ? <IconCheck size={12} /> : <IconInfo size={13} />}
+      </button>
+    );
+  }
+  const shortId = value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+  return (
+    <button type="button" onClick={copy} title={`${label}: ${value}\nClick to copy`}
+      className="inline-flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[#fafafa]"
+      style={{ borderColor: C.border, color: C.sub }}>
+      <span className="font-semibold uppercase tracking-wide">{label}</span>
+      <span className="font-mono">{copied ? "Copied ✓" : shortId}</span>
+    </button>
+  );
 }
 
 function ThreadSkeleton() {
