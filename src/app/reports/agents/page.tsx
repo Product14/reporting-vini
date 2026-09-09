@@ -256,6 +256,27 @@ function AgentReportsView() {
       : (feed?.start && feed?.end ? { start: feed.start, end: feed.end } : rangeFor(bucket)),
     [bucket, custom, feed?.start, feed?.end],
   );
+  /* THE ROWS BEHIND THE APPOINTMENT TILE — the exact list the tile counted, not a second query.
+   *
+   * The tile's AI-booked number now comes from the live meetings API, and namedAppointments is built
+   * from that same live set server-side, so filtering it here makes the drill-down agree with the tile
+   * by construction. The modal's own fetch resolved its lead set from the stale aggregate AND kept one
+   * meeting per lead, so it undercounted twice over — Heiser Chevrolet showed 26 behind a tile of 36.
+   *
+   * Assisted rows are excluded: the tile is labelled "Appointments — AI-booked" and counts only those. */
+  const apptModalItems = useMemo(() => {
+    if (!apptModal) return null;
+    const dir = apptModal.agentType.endsWith("_ob") ? "Outbound" : "Inbound";
+    return (feed?.namedAppointments ?? [])
+      .filter((a) => !a.assisted && a.serviceType === apptModal.service && a.channel === dir)
+      .map((a) => ({
+        id: "", leadId: null,
+        customer: a.customer, phone: a.phone || null, vehicle: a.vehicle,
+        when: a.when ?? "", tz: null, status: a.status,
+        serviceType: a.serviceType, assignedTo: null, intent: null, bookedAt: a.bookedAt,
+      }));
+  }, [apptModal, feed?.namedAppointments]);
+
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
@@ -1236,6 +1257,7 @@ function AgentReportsView() {
         title={apptModal?.title ?? "Appointments"}
         sub={apptModal?.sub}
         fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", agentType: apptModal?.agentType, scope: "window", ...meetingWindow, spyneToken, spyneEnv }}
+        items={apptModalItems}
       />
     </div>
   );

@@ -63,6 +63,18 @@ function AppointmentsView() {
   );
   const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
     feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
+  /* The modal lists the report's OWN rows, so it cannot disagree with the tiles it opened from. Its old
+   * fetch resolved a lead set from the stale aggregate and kept one meeting per lead, undercounting on
+   * both axes. Same fix as the By-agent drill-down. */
+  const modalItems = useMemo(
+    () => appts.map((a) => ({
+      id: "", leadId: null,
+      customer: a.customer, phone: a.phone || null, vehicle: a.vehicle,
+      when: a.when ?? "", tz: null, status: a.status,
+      serviceType: a.serviceType, assignedTo: null, intent: null, bookedAt: a.bookedAt,
+    })),
+    [appts],
+  );
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
@@ -132,6 +144,7 @@ function AppointmentsView() {
         title={`Appointments · ${periodLabel}`}
         sub="Every booked appointment across this rooftop — sales & service"
         fetchOpts={{ teamId, enterpriseId, service: dept === "all" ? "both" : dept, scope: "window", ...meetingWindow, spyneToken, spyneEnv }}
+        items={modalItems}
       />
     </div>
   );

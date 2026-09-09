@@ -1553,12 +1553,20 @@ export function MeetingsModal({
   title,
   sub,
   fetchOpts,
+  items,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   sub?: string;
   fetchOpts: MeetingFetchOpts;
+  /* THE ROWS THE TILE COUNTED. When supplied this renders them and does not fetch at all, which is the
+   * only way a drill-down cannot disagree with the number it opened from.
+   *
+   * The fetch path below counted differently on two axes and always undercounted: it resolved the lead
+   * set from agent_lead_days (the Supabase aggregate, hours stale) and then kept ONE meeting per lead,
+   * so a customer with two bookings showed once. Heiser Chevrolet: tile 36, modal 26. */
+  items?: Meeting[] | null;
 }) {
   // `total` is the authoritative count (matches the tile); `meetings` is the live detail list, which may
   // be shorter when a booked lead's meeting record can't be fetched — hence the "showing X of N" footer.
@@ -1566,9 +1574,16 @@ export function MeetingsModal({
   // Refetch only when the actual params change (object identity would refetch every render).
   const key = JSON.stringify([fetchOpts.teamId, fetchOpts.service, fetchOpts.scope, fetchOpts.bucket, fetchOpts.start, fetchOpts.end, fetchOpts.agentType]);
 
+  const supplied = items ?? null;
   useEffect(() => {
     if (!open) return;
     let on = true;
+    if (supplied) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setState({ loading: false, meetings: supplied, total: supplied.length, error: false });
+      track("appointments_drilldown_result", { team_id: fetchOpts.teamId, status: supplied.length ? "ok" : "empty", count: supplied.length });
+      return;
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setState({ loading: true, meetings: [], total: 0, error: false });
     fetchMeetings(fetchOpts)
@@ -1591,7 +1606,8 @@ export function MeetingsModal({
       });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, key]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, key, supplied]);
 
   useEffect(() => {
     if (!open) return;
