@@ -48,7 +48,7 @@ export interface ReportDef {
   title: string;
   /** The question a dealer would ask out loud. This is the card's subtitle — not a feature description. */
   question: string;
-  category: "Appointments" | "Speed & response" | "Lead quality" | "Conversations" | "Team" | "Outbound";
+  category: "Appointments" | "Speed & response" | "Lead quality" | "Conversations" | "Team" | "Outbound" | "Service drive";
   /** Who reads it — helps a manager pick fast, and gives the future builder a facet to filter on. */
   who: string;
   /** Live source, shown on the report so a number can always be traced back. */
@@ -192,6 +192,36 @@ function effortTotals(c: ReportCtx): { leads: number; dials: number; avg: number
   const dials = rows.reduce((s, r) => s + r.leads * r.attempts, 0);
   const heavy = rows.filter((r) => r.attempts >= 6).reduce((s, r) => s + r.leads, 0);
   return leads ? { leads, dials, avg: dials / leads, heavy } : null;
+}
+
+
+/* SERVICE-DESK TOOLS. Names come back as `service_create_appointment_v2`; the version suffix and the
+ * prefix are implementation detail, so lookups are by the middle. Returns null when the rooftop has never
+ * used that capability, which is different from using it and failing — the reports rely on that
+ * distinction to decide whether to offer themselves at all. */
+function svcRows(c: ReportCtx): { tool: string; ok: number; failed: number }[] {
+  return c.insights?.serviceTools ?? [];
+}
+function svcTool(c: ReportCtx, name: string): { tool: string; ok: number; failed: number } | null {
+  const hit = svcRows(c).find((t) => t.tool.includes(name));
+  return hit && hit.ok + hit.failed > 0 ? hit : null;
+}
+/** Tool id → what the CUSTOMER was trying to do. A fixed-ops director should never read a function name. */
+const SVC_LABELS: Record<string, string> = {
+  create_appointment: "Book a service appointment",
+  reschedule_appointment: "Move an existing appointment",
+  cancel_appointment: "Cancel an appointment",
+  list_available_time_slots: "See open times",
+  list_existing_appointments: "Check an appointment they already had",
+  list_available_services: "Ask what services you offer",
+  list_transportation_options: "Ask about a loaner or shuttle",
+  check_vehicle_eligibility: "Check recall or warranty cover",
+  lookup_customer: "Be found in your records",
+  list_repair_orders: "Ask about a repair order",
+};
+function svcLabel(tool: string): string {
+  const key = Object.keys(SVC_LABELS).find((k) => tool.includes(k));
+  return key ? SVC_LABELS[key] : tool.replace(/^service_/, "").replace(/_v\d+$/, "").replace(/_/g, " ");
 }
 
 const anyOutcome = (c: ReportCtx) => c.outcomes.inbound ?? c.outcomes.outbound ?? null;
@@ -1271,6 +1301,201 @@ export const REPORTS: ReportDef[] = [
       );
     },
   },
+
+  // 24 ─── SERVICE ────────────────────────────────────────────────────────────
+  {
+    id: "service-bookings",
+    title: "Service appointments the AI booked",
+    question: "How much of the service schedule is the AI filling on its own?",
+    category: "Service drive",
+    who: "Service manager · fixed ops director",
+    source: "Appointments the AI created, rescheduled and cancelled in your scheduler",
+    depts: ["service"],
+    available: (c) => svcTool(c, "create_appointment") !== null,
+    takeaway: (c) => {
+      const made = svcTool(c, "create_appointment")!;
+      const resched = svcTool(c, "reschedule_appointment");
+      const cancelled = svcTool(c, "cancel_appointment");
+      const extra = resched || cancelled
+        ? ` It also handled ${fmtInt((resched?.ok ?? 0) + (cancelled?.ok ?? 0))} changes to existing appointments without anyone at the desk picking up.`
+        : "";
+      return `${fmtInt(made.ok)} service appointments were booked straight into your scheduler by the AI.${extra}`;
+    },
+    render: (c) => {
+      const made = svcTool(c, "create_appointment")!;
+      const resched = svcTool(c, "reschedule_appointment");
+      const cancelled = svcTool(c, "cancel_appointment");
+      const slots = svcTool(c, "list_available_time_slots");
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Appointments booked", value: fmtInt(made.ok), sub: "written into your scheduler", accent: "#15803d" },
+              { label: "Rescheduled", value: fmtInt(resched?.ok ?? 0), sub: "moved without a call to the desk" },
+              { label: "Cancelled", value: fmtInt(cancelled?.ok ?? 0), sub: "freed the slot for someone else" },
+              ...(made.failed
+                ? [{ label: "Booking failures", value: fmtInt(made.failed), sub: `${pct(made.failed, made.ok + made.failed)}% of attempts`, accent: "#dc2626" }]
+                : []),
+            ]}
+          />
+          <Card title="The booking path" sub="Every step the AI takes to put a car on your schedule">
+            <RankBars
+              rows={[
+                ...(slots ? [{ label: "Looked up open slots", value: slots.ok + slots.failed }] : []),
+                { label: "Booked the appointment", value: made.ok },
+                ...(resched ? [{ label: "Rescheduled one", value: resched.ok }] : []),
+                ...(cancelled ? [{ label: "Cancelled one", value: cancelled.ok }] : []),
+              ].filter((r) => r.value > 0)}
+              accent="#15803d"
+            />
+            <Note>
+              Every one of these is a call your advisors did not have to take, at the times of day the
+              phones are busiest. Failures are counted separately below in Where the desk is letting
+              customers down.
+            </Note>
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 25 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "service-friction",
+    title: "Where the desk is letting customers down",
+    question: "Which service requests are failing when a customer tries to self-serve?",
+    category: "Service drive",
+    who: "Service manager · fixed ops director",
+    source: "Success and failure of every service action the AI attempted",
+    depts: ["service"],
+    available: (c) => svcRows(c).some((t) => t.failed > 0),
+    takeaway: (c) => {
+      const worst = svcRows(c)
+        .filter((t) => t.ok + t.failed >= 10)
+        .sort((a, b) => b.failed / (b.ok + b.failed) - a.failed / (a.ok + a.failed))[0];
+      if (!worst) return "Nothing is failing often enough this period to be worth chasing.";
+      const total = worst.ok + worst.failed;
+      return `${svcLabel(worst.tool)} fails ${pct(worst.failed, total)}% of the time — ${fmtInt(worst.failed)} of ${fmtInt(total)} attempts. Every one of those is a customer who wanted to sort something themselves and ended up needing your desk.`;
+    },
+    render: (c) => {
+      const rows = svcRows(c)
+        .filter((t) => t.ok + t.failed > 0)
+        .map((t) => ({ ...t, total: t.ok + t.failed, rate: t.failed / (t.ok + t.failed) }))
+        .sort((a, b) => b.rate - a.rate || b.total - a.total);
+      const failing = rows.filter((r) => r.failed > 0);
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Actions attempted", value: fmtInt(rows.reduce((s, r) => s + r.total, 0)), sub: c.periodLabel },
+              { label: "Failed", value: fmtInt(rows.reduce((s, r) => s + r.failed, 0)), accent: "#dc2626" },
+              { label: "Requests with failures", value: fmtInt(failing.length), sub: `of ${fmtInt(rows.length)} types` },
+            ]}
+          />
+          <Card title="Failure rate by request" sub="Worst first — anything above a few percent is worth a look" pad={false}>
+            <Table
+              head={[{ label: "What the customer wanted" }, { label: "Attempts", align: "right" }, { label: "Failed", align: "right" }, { label: "Failure rate", align: "right" }]}
+              rows={rows.map((r) => [
+                <span key="t" className="font-semibold text-[#111]">{svcLabel(r.tool)}</span>,
+                fmtInt(r.total),
+                <span key="f" style={{ color: r.failed ? "#dc2626" : "#9ca3af" }}>{fmtInt(r.failed)}</span>,
+                <span key="r" className="font-semibold" style={{ color: r.rate >= 0.25 ? "#dc2626" : r.rate >= 0.1 ? "#d97706" : "#374151" }}>
+                  {pct(r.failed, r.total)}%
+                </span>,
+              ])}
+            />
+          </Card>
+          <Note>
+            A high failure rate here is almost never the customer&apos;s fault — it is usually the
+            scheduler refusing a lookup or an appointment record the AI cannot see. Worth raising with
+            your Spyne team with this list in hand.
+          </Note>
+        </div>
+      );
+    },
+  },
+
+  // 26 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "service-transport",
+    title: "Loaner and shuttle demand",
+    question: "How many service customers need a ride, and are we set up for it?",
+    category: "Service drive",
+    who: "Service manager",
+    source: "Transportation options the AI looked up for customers",
+    depts: ["service"],
+    available: (c) => (svcTool(c, "list_transportation_options")?.ok ?? 0) > 0,
+    takeaway: (c) => {
+      const t = svcTool(c, "list_transportation_options")!;
+      const booked = svcTool(c, "create_appointment")?.ok ?? 0;
+      /* Deliberately NOT a percentage. The two are different populations — a customer can ask about a
+       * ride without booking, and did here — so the share ran to 102%, which reads as a broken number.
+       * Two counts side by side make the same point and cannot exceed anything. */
+      const vs = booked ? ` — against ${fmtInt(booked)} appointments booked in the same period.` : ".";
+      return `${fmtInt(t.ok)} service customers asked what you could do about getting them around while their car is in${vs}`;
+    },
+    render: (c) => {
+      const t = svcTool(c, "list_transportation_options")!;
+      const booked = svcTool(c, "create_appointment")?.ok ?? 0;
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Asked about a ride", value: fmtInt(t.ok), sub: "loaner, shuttle or pick-up", accent: "#0891b2" },
+              ...(booked ? [{ label: "Appointments booked", value: fmtInt(booked), sub: "same period, for comparison" }] : []),
+            ]}
+          />
+          <Card title="Why this number matters">
+            <Note>
+              Transportation is the most common reason a customer defers service they have already agreed
+              to. A high number here is demand you are being asked to meet — if your loaner fleet or
+              shuttle window cannot cover it, that is where the deferred work is going.
+            </Note>
+          </Card>
+        </div>
+      );
+    },
+  },
+
+  // 27 ────────────────────────────────────────────────────────────────────────
+  {
+    id: "service-recall",
+    title: "Recall and warranty checks",
+    question: "How much open recall and warranty work are we finding on the phone?",
+    category: "Service drive",
+    who: "Service manager · fixed ops director",
+    source: "Vehicle eligibility checks the AI ran during service calls",
+    depts: ["service"],
+    available: (c) => (svcTool(c, "check_vehicle_eligibility")?.ok ?? 0) > 0,
+    takeaway: (c) => {
+      const e = svcTool(c, "check_vehicle_eligibility")!;
+      const booked = svcTool(c, "create_appointment")?.ok ?? 0;
+      return `The AI checked ${fmtInt(e.ok)} vehicles for open recall or warranty cover while it had the customer on the phone${booked ? `, against ${fmtInt(booked)} appointments booked` : ""}.`;
+    },
+    render: (c) => {
+      const e = svcTool(c, "check_vehicle_eligibility")!;
+      const lookups = svcTool(c, "lookup_customer");
+      const booked = svcTool(c, "create_appointment")?.ok ?? 0;
+      return (
+        <div className="flex flex-col gap-4">
+          <Stats
+            items={[
+              { label: "Vehicles checked", value: fmtInt(e.ok), sub: "recall and warranty eligibility", accent: "#813fed" },
+              ...(lookups ? [{ label: "Customers looked up", value: fmtInt(lookups.ok), sub: "matched to your records" }] : []),
+              ...(booked ? [{ label: "Appointments booked", value: fmtInt(booked), accent: "#15803d" }] : []),
+            ]}
+          />
+          <Card title="Why this number matters">
+            <Note>
+              Recall work is warranty-paid and it brings a customer into the drive who may not otherwise
+              have come. Every check here happened while you already had them on the phone — the cheapest
+              moment there is to find the work.
+            </Note>
+          </Card>
+        </div>
+      );
+    },
+  },
 ];
 
 const hourLabel = (h: number) => (h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`);
@@ -1289,7 +1514,7 @@ export function availableReports(c: ReportCtx): ReportDef[] {
   });
 }
 
-export const REPORT_CATEGORIES = ["Appointments", "Speed & response", "Lead quality", "Conversations", "Team", "Outbound"] as const;
+export const REPORT_CATEGORIES = ["Appointments", "Speed & response", "Lead quality", "Conversations", "Team", "Outbound", "Service drive"] as const;
 
 export { Stats as ReportStats, Table as ReportTable, RankBars as ReportRankBars, MetricTile };
 

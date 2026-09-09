@@ -43,6 +43,9 @@ export interface InsightsPayload {
   stock: { make: string; model: string; key: string; units: number }[] | null;
   /* Outbound dials per lead: how hard a lead is worked before it connects (or is given up on). */
   effort: { attempts: number; leads: number }[] | null;
+  /* Service-desk tool activity: what the AI actually DID in the drive — booked, rescheduled, cancelled,
+   * checked a recall, offered a loaner — and how often each of those failed. */
+  serviceTools: { tool: string; ok: number; failed: number }[] | null;
 }
 
 /* CRM status → the bucket a dealer thinks in. Statuses are free-form per CRM, so this matches on the
@@ -234,6 +237,17 @@ export async function GET(request: Request): Promise<Response> {
       GROUP BY leadId
     ) GROUP BY attempts ORDER BY attempts LIMIT 40`;
 
+  /* SERVICE DESK — the service tool calls, success and failure. This is the only place that says what
+   * happened in the drive rather than on the phone: an appointment booked, a recall checked, a loaner
+   * offered. Scoped by tool NAME (every service tool is prefixed), so it needs no department column. */
+  const serviceToolsSql = `
+    SELECT toolName AS tool,
+           countIf(status='success') AS ok,
+           countIf(status!='success') AS failed
+    FROM conversation_ai.tool_invocation_events
+    WHERE teamId='${T}' AND toolName LIKE 'service%' AND ${win("timestamp")}
+    GROUP BY tool ORDER BY (ok + failed) DESC LIMIT 30`;
+
   const hoursSql = `
     SELECT toHour(toTimeZone(createdAt,'${TZ}')) AS hour,
            toDayOfWeek(toTimeZone(createdAt,'${TZ}')) AS weekday,
@@ -251,7 +265,7 @@ export async function GET(request: Request): Promise<Response> {
     }
   };
 
-  const [soldRows, routingRows, smsRows, hourRows, vehicleRows, handlingRows, resolutionRows, stockRows, effortRows] = await Promise.all([
+  const [soldRows, routingRows, smsRows, hourRows, vehicleRows, handlingRows, resolutionRows, stockRows, effortRows, serviceToolRows] = await Promise.all([
     safe<{ status: string; leads: string | number }>(soldSql),
     safe<{ department: string; destinationType: string; transfers: string | number }>(routingSql),
     safe<{ outbound: string | number; inbound: string | number; threads: string | number; repliedThreads: string | number }>(smsSql),
@@ -261,6 +275,7 @@ export async function GET(request: Request): Promise<Response> {
     safe<{ intent: string; raised: string | number; resolved: string | number }>(resolutionSql),
     safe<{ mk: string; modelName: string; modelKeyOut: string; units: string | number }>(stockSql),
     safe<{ attempts: string | number; leads: string | number }>(effortSql),
+    safe<{ tool: string; ok: string | number; failed: string | number }>(serviceToolsSql),
   ]);
 
   const n = (v: string | number | undefined) => Number(v ?? 0) || 0;
@@ -308,6 +323,7 @@ export async function GET(request: Request): Promise<Response> {
     resolution: resolutionRows ? resolutionRows.map((r) => ({ intent: r.intent, raised: n(r.raised), resolved: n(r.resolved) })) : null,
     stock: stockRows ? stockRows.map((r) => ({ make: r.mk, model: r.modelName, key: `${r.mk}|${r.modelKeyOut}`.toUpperCase(), units: n(r.units) })) : null,
     effort: effortRows ? effortRows.map((r) => ({ attempts: n(r.attempts), leads: n(r.leads) })) : null,
+    serviceTools: serviceToolRows ? serviceToolRows.map((r) => ({ tool: r.tool, ok: n(r.ok), failed: n(r.failed) })) : null,
   };
 
   return Response.json({ ...payload, window: { start, end, timezone: tz }, degraded: false });
