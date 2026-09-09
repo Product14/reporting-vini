@@ -46,6 +46,9 @@ export interface InsightsPayload {
   /* Service-desk tool activity: what the AI actually DID in the drive — booked, rescheduled, cancelled,
    * checked a recall, offered a loaner — and how often each of those failed. */
   serviceTools: { tool: string; ok: number; failed: number }[] | null;
+  /* Lead type → source, with the whole funnel behind each: the CRM's own lead classification, not the
+   * channel label the aggregate carries. */
+  leadSources: { type: string; source: string; contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number }[] | null;
 }
 
 /* CRM status → the bucket a dealer thinks in. Statuses are free-form per CRM, so this matches on the
@@ -248,6 +251,47 @@ export async function GET(request: Request): Promise<Response> {
     WHERE teamId='${T}' AND toolName LIKE 'service%' AND ${win("timestamp")}
     GROUP BY tool ORDER BY (ok + failed) DESC LIMIT 30`;
 
+  /* LEADS BY TYPE AND SOURCE. The aggregate's leadsBySource carries a channel label — it renders as
+   * "Conversational_AI" and "spyne", which are our own plumbing rather than anywhere a lead came from.
+   * The CRM's real classification lives on the lead: external_type (INTERNET / PHONE / WALK_IN /
+   * PREVIOUS_CUSTOMER …) and source (Edmunds, Costco Auto Program, Autohub Trade In Widget …).
+   *
+   * POPULATION is leads with at least one call in this window and department — NOT leads created in it.
+   * A lead created last month and worked today belongs in today's report.
+   *
+   * `qualified`, `appts` and `actionItems` are LEAD-LEVEL facts that carry no period of their own, so
+   * they describe the lead's current state rather than something that happened inside the window. */
+  const leadSourcesSql = `
+    WITH
+    conv AS (
+      SELECT leadId AS lid,
+             maxIf(1, callDetails_endedReason NOT IN ('voicemail','voicemail_full','no_answer','customer_declined','number_not_found','busy','machine_ivr')) AS reached
+      FROM dealer_leads.endcallreports FINAL
+      WHERE teamId='${T}' AND isTestCall=0 AND ifNull(leadId,'') != ''${deptCall} AND ${win("createdAt")}
+      GROUP BY leadId
+    ),
+    ld AS (
+      SELECT lead_id AS lid,
+             upper(replaceAll(replaceAll(ifNull(external_type,'Unknown'),' ','_'),'-','_')) AS type,
+             ifNull(source,'Unknown') AS source
+      FROM dealer_leads.leads FINAL WHERE team_id='${T}'
+    ),
+    ev AS (SELECT DISTINCT toString(doc.leadId) AS lid FROM dealer_leads_raw.conversationEval WHERE _peerdb_is_deleted=0 AND toString(doc.teamId)='${T}'),
+    lq AS (SELECT toString(doc.leadId) AS lid, max(toString(doc.qualified)='true') AS q FROM dealer_leads_raw.conversationLeadEval WHERE _peerdb_is_deleted=0 AND toString(doc.teamId)='${T}' GROUP BY lid),
+    ap AS (SELECT DISTINCT lead_id AS lid FROM dealer_leads.meetings FINAL WHERE team_id='${T}' AND source='spyne' AND lower(JSONExtractString(ifNull(meta,''),'source')) != 'warm_transfer'),
+    ai AS (SELECT DISTINCT lead_id AS lid FROM dealer_leads.actionItems FINAL WHERE team_id='${T}' AND ifNull(is_active,0)=1)
+    SELECT ld.type AS type, ld.source AS source,
+           count() AS contact, sum(conv.reached) AS reached,
+           countIf(ev.lid != '') AS evaluated, countIf(lq.q = 1) AS qualified,
+           countIf(ap.lid != '') AS appts, countIf(ai.lid != '') AS actionItems
+    FROM conv
+    INNER JOIN ld ON ld.lid = conv.lid
+    LEFT JOIN ev ON ev.lid = conv.lid
+    LEFT JOIN lq ON lq.lid = conv.lid
+    LEFT JOIN ap ON ap.lid = conv.lid
+    LEFT JOIN ai ON ai.lid = conv.lid
+    GROUP BY type, source ORDER BY contact DESC LIMIT 300`;
+
   const hoursSql = `
     SELECT toHour(toTimeZone(createdAt,'${TZ}')) AS hour,
            toDayOfWeek(toTimeZone(createdAt,'${TZ}')) AS weekday,
@@ -265,7 +309,7 @@ export async function GET(request: Request): Promise<Response> {
     }
   };
 
-  const [soldRows, routingRows, smsRows, hourRows, vehicleRows, handlingRows, resolutionRows, stockRows, effortRows, serviceToolRows] = await Promise.all([
+  const [soldRows, routingRows, smsRows, hourRows, vehicleRows, handlingRows, resolutionRows, stockRows, effortRows, serviceToolRows, leadSourceRows] = await Promise.all([
     safe<{ status: string; leads: string | number }>(soldSql),
     safe<{ department: string; destinationType: string; transfers: string | number }>(routingSql),
     safe<{ outbound: string | number; inbound: string | number; threads: string | number; repliedThreads: string | number }>(smsSql),
@@ -276,6 +320,7 @@ export async function GET(request: Request): Promise<Response> {
     safe<{ mk: string; modelName: string; modelKeyOut: string; units: string | number }>(stockSql),
     safe<{ attempts: string | number; leads: string | number }>(effortSql),
     safe<{ tool: string; ok: string | number; failed: string | number }>(serviceToolsSql),
+    safe<{ type: string; source: string; contact: string | number; reached: string | number; evaluated: string | number; qualified: string | number; appts: string | number; actionItems: string | number }>(leadSourcesSql),
   ]);
 
   const n = (v: string | number | undefined) => Number(v ?? 0) || 0;
@@ -324,6 +369,12 @@ export async function GET(request: Request): Promise<Response> {
     stock: stockRows ? stockRows.map((r) => ({ make: r.mk, model: r.modelName, key: `${r.mk}|${r.modelKeyOut}`.toUpperCase(), units: n(r.units) })) : null,
     effort: effortRows ? effortRows.map((r) => ({ attempts: n(r.attempts), leads: n(r.leads) })) : null,
     serviceTools: serviceToolRows ? serviceToolRows.map((r) => ({ tool: r.tool, ok: n(r.ok), failed: n(r.failed) })) : null,
+    leadSources: leadSourceRows
+      ? leadSourceRows.map((r) => ({
+          type: r.type, source: r.source, contact: n(r.contact), reached: n(r.reached),
+          evaluated: n(r.evaluated), qualified: n(r.qualified), appts: n(r.appts), actionItems: n(r.actionItems),
+        }))
+      : null,
   };
 
   return Response.json({ ...payload, window: { start, end, timezone: tz }, degraded: false });

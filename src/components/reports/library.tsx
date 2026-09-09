@@ -11,7 +11,7 @@
  * ADDING A REPORT: append one REPORTS entry. It shows up in the library, gets a card, an availability
  * gate and an export automatically. */
 
-import React from "react";
+import React, { useState } from "react";
 import { Card, fmtInt, StepFunnel, TrendBars, Th } from "@/components/reports/kit";
 import { fmtRate, fmtSecs, fmtDuration, NamedApptsTable, WarmLeadChips, RankedOutcomeTable, MetricTile } from "@/components/reports/kitV3";
 import { CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
@@ -232,6 +232,91 @@ function svcLabel(tool: string): string {
   return key ? SVC_LABELS[key] : tool.replace(/^service_/, "").replace(/_v\d+$/, "").replace(/_/g, " ");
 }
 
+
+/* Lead rows rolled up to TYPE, each carrying its own sources. The CRM writes the type inconsistently
+ * ("INTERNET" and "Internet", "Walk-in" and "WALK_IN"), so the SQL normalises it and this just groups. */
+export interface LeadTypeRow {
+  type: string;
+  contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number;
+  sources: { source: string; contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number }[];
+}
+function leadTypeRollup(c: ReportCtx): LeadTypeRow[] {
+  const rows = c.insights?.leadSources ?? [];
+  const byType = new Map<string, LeadTypeRow>();
+  for (const r of rows) {
+    const hit = byType.get(r.type) ?? { type: r.type, contact: 0, reached: 0, evaluated: 0, qualified: 0, appts: 0, actionItems: 0, sources: [] };
+    hit.contact += r.contact; hit.reached += r.reached; hit.evaluated += r.evaluated;
+    hit.qualified += r.qualified; hit.appts += r.appts; hit.actionItems += r.actionItems;
+    hit.sources.push(r);
+    byType.set(r.type, hit);
+  }
+  return [...byType.values()]
+    .map((t) => ({ ...t, sources: t.sources.sort((a, b) => b.contact - a.contact) }))
+    .sort((a, b) => b.contact - a.contact);
+}
+
+/* The table. A type row opens to reveal its sources — a rooftop can carry 50+ sources under INTERNET
+ * alone, which is unreadable flat but exactly what a marketing manager wants once they pick a type.
+ * EVERY percentage is a share of the row's own population (leads worked). It is tempting to make each
+ * column a share of the previous one so the table reads as a funnel — but qualified, appointments and
+ * open action items are LEAD-LEVEL facts that do not require having been reached in this window, so
+ * against Reached they run over 100% (one rooftop rendered "207 action items, 174%"). Against the
+ * population they cannot. */
+function LeadSourceTable({ types, total }: { types: LeadTypeRow[]; total: number }) {
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const cell = (n: number, denom: number, colour?: string) => (
+    <>
+      <span className="font-semibold" style={{ color: n ? colour ?? "#111" : "#c3cad4" }}>{fmtInt(n)}</span>
+      {denom > 0 && <span className="ml-1.5 text-[11px] text-[#9ca3af]">{pct(n, denom)}%</span>}
+    </>
+  );
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[760px]">
+        <thead className="bg-[#fafafa]">
+          <tr>
+            <Th align="left">Type / source</Th>
+            <Th align="right">Leads worked</Th>
+            <Th align="right">Reached</Th>
+            <Th align="right">Qualified</Th>
+            <Th align="right">Appointments</Th>
+            <Th align="right">Open action items</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {types.map((t) => (
+            <React.Fragment key={t.type}>
+              <tr className="cursor-pointer border-t border-[#f0f0f0] bg-[#fbfbfc] hover:bg-[#faf8ff]" onClick={() => setOpen((s) => ({ ...s, [t.type]: !s[t.type] }))}>
+                <td className="px-4 py-2.5 text-[12.5px] font-bold text-[#111]">
+                  <span className="mr-2 inline-block text-[9px] text-[#813fed]">{open[t.type] ? "▼" : "▶"}</span>
+                  {t.type.replace(/_/g, " ")}
+                  <span className="ml-2 text-[10.5px] font-medium text-[#9ca3af]">{t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
+                </td>
+                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.contact, total)}</td>
+                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.reached, t.contact)}</td>
+                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.qualified, t.contact, "#0891b2")}</td>
+                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.appts, t.contact, "#15803d")}</td>
+                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.actionItems, t.contact, "#d97706")}</td>
+              </tr>
+              {open[t.type] &&
+                t.sources.map((r) => (
+                  <tr key={`${t.type}/${r.source}`} className="border-t border-[#f7f7f9]">
+                    <td className="py-2 pl-11 pr-4 text-[11.5px] text-[#4b5563]">{r.source}</td>
+                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.contact, total)}</td>
+                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.reached, r.contact)}</td>
+                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.qualified, r.contact, "#0891b2")}</td>
+                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.appts, r.contact, "#15803d")}</td>
+                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.actionItems, r.contact, "#d97706")}</td>
+                  </tr>
+                ))}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 const anyOutcome = (c: ReportCtx) => c.outcomes.inbound ?? c.outcomes.outbound ?? null;
 const pct = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
 
@@ -388,44 +473,49 @@ export const REPORTS: ReportDef[] = [
   // 3 ─────────────────────────────────────────────────────────────────────────
   {
     id: "lead-sources",
-    depts: ["sales"],
-    keywords: ["marketing","source","channel","roi by source"],
-    title: "Lead source performance",
-    question: "Which lead sources actually turn into appointments?",
+    keywords: ["marketing","source","channel","roi by source","lead type","internet","walk in","provider"],
+    title: "Leads by type and source",
+    question: "Where do our leads come from, and which ones actually go anywhere?",
     category: "Lead quality",
-    who: "GM · marketing",
-    source: "Leads by source, with the hand-offs and appointments each produced",
-    available: (c) => (inboundAgent(c)?.report.leadsBySource?.length ?? 0) > 0,
+    who: "GM · marketing · BDC manager",
+    source: "Your CRM's own lead type and source, followed through to appointments",
+    available: (c) => (c.insights?.leadSources?.length ?? 0) > 0,
+    takeaway: (c) => {
+      const t = leadTypeRollup(c);
+      const total = t.reduce((s, x) => s + x.contact, 0);
+      const top = t[0];
+      const best = t.filter((x) => x.contact >= 10).sort((a, b) => b.qualified / b.contact - a.qualified / a.contact)[0];
+      const bestBit = best && best.qualified ? ` ${best.type} leads qualify at the highest rate — ${pct(best.qualified, best.contact)}%.` : "";
+      return `${fmtInt(total)} leads were worked this period. ${top.type} is the biggest group at ${pct(top.contact, total)}%.${bestBit}`;
+    },
     render: (c) => {
-      const rows = [...(inboundAgent(c)!.report.leadsBySource ?? [])].sort((a, b) => b.total - a.total);
-      const tot = rows.reduce((s, r) => s + r.total, 0);
-      const appts = rows.reduce((s, r) => s + r.appts, 0);
-      const best = [...rows].filter((r) => r.total >= 3).sort((a, b) => b.appts / (b.total || 1) - a.appts / (a.total || 1))[0];
+      const types = leadTypeRollup(c);
+      const total = types.reduce((s, x) => s + x.contact, 0);
+      const sum = (k: "reached" | "evaluated" | "qualified" | "appts" | "actionItems") => types.reduce((s, x) => s + x[k], 0);
       return (
         <div className="flex flex-col gap-4">
           <Stats
             items={[
-              { label: "Leads", value: fmtInt(tot), sub: `${rows.length} sources` },
-              { label: "Appointments", value: fmtInt(appts), sub: "booked from these leads", accent: "#15803d" },
-              { label: "Overall booking rate", value: fmtRate(appts, tot) },
-              ...(best ? [{ label: "Best converting source", value: best.source, sub: `${pct(best.appts, best.total)}% booked`, accent: "#813fed" }] : []),
+              { label: "Leads worked", value: fmtInt(total), sub: `${types.length} lead types` },
+              { label: "Reached a person", value: fmtInt(sum("reached")), sub: `${pct(sum("reached"), total)}% of leads worked` },
+              { label: "Qualified", value: fmtInt(sum("qualified")), sub: "buying intent on record", accent: "#0891b2" },
+              { label: "Appointments", value: fmtInt(sum("appts")), accent: "#15803d" },
             ]}
           />
-          {/* No hand-offs column: `leadsBySource.handoffs` is hard-coded to 0 in the ETL (build.ts), so
-              it could only ever render a column of zeros. `engaged` is likewise a copy of `interacted`.
-              Showing only the three fields that carry real values. */}
-          <Card title="By source" sub="Leads worked → engaged → appointments booked" pad={false}>
-            <Table
-              head={[{ label: "Source" }, { label: "Total leads", align: "right" }, { label: "Engaged", align: "right" }, { label: "Appointments", align: "right" }, { label: "Booking rate", align: "right" }]}
-              rows={rows.map((r) => [
-                <span key="s" className="font-semibold text-[#111]">{r.source}</span>,
-                fmtInt(r.total),
-                fmtInt(r.interacted),
-                <b key="a" style={{ color: r.appts ? "#15803d" : "#9ca3af" }}>{fmtInt(r.appts)}</b>,
-                `${pct(r.appts, r.total)}%`,
-              ])}
-            />
+          <Card
+            title="Lead type and source"
+            sub="Worked → reached → qualified → appointments · click a type to open its sources"
+            pad={false}
+          >
+            <LeadSourceTable types={types} total={total} />
           </Card>
+          <Note>
+            Counts leads with at least one conversation in this period, not leads created in it — a lead
+            that came in last month and worked today belongs here. Every percentage is a share of the
+            leads worked on that row. Qualified, appointments and open action items describe where the
+            lead stands NOW, so they are not confined to this period and will not tie exactly to the
+            period figures elsewhere.
+          </Note>
         </div>
       );
     },
@@ -1658,8 +1748,11 @@ export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
     }
 
     case "lead-sources":
-      sheets.push({ name: "By source", rows: [["Source", "Total leads", "Engaged", "Appointments", "Booking rate %"],
-        ...(inboundAgent(c)?.report.leadsBySource ?? []).map((r) => [r.source, r.total, r.interacted, r.appts, pct(r.appts, r.total)])] });
+      sheets.push({ name: "By type and source", rows: [["Lead type", "Source", "Leads worked", "Reached", "Qualified", "Appointments", "Open action items"],
+        ...leadTypeRollup(c).flatMap((t) => [
+          [t.type, "(all sources)", t.contact, t.reached, t.qualified, t.appts, t.actionItems],
+          ...t.sources.map((r) => [t.type, r.source, r.contact, r.reached, r.qualified, r.appts, r.actionItems]),
+        ])] });
       break;
 
     case "what-customers-wanted":

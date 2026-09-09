@@ -43,6 +43,7 @@ import {
   type InboxAuth,
   type InboxCustomer,
   type CustomerLead,
+  type LeadVehicleInterest,
   type LeadsPage,
   type ConversationsV2,
   type ConvRecord,
@@ -245,6 +246,7 @@ const IconCheck = (p: IconProps) => <Svg {...p}><path d="m20 6-11 11-5-5" /></Sv
 const IconUser = (p: IconProps) => <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></Svg>;
 const IconInfo = (p: IconProps) => <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>;
 const IconMessage = (p: IconProps) => <Svg {...p}><path d="M21 11.5a8.5 8.5 0 0 1-12.3 7.6L3 21l1.9-5.7A8.5 8.5 0 1 1 21 11.5Z" /></Svg>;
+const IconCar = (p: IconProps) => <Svg {...p}><path d="M5 11l1.6-4.2A2 2 0 0 1 8.5 5.5h7A2 2 0 0 1 17.4 6.8L19 11" /><path d="M3 11h18v5h-3M6 16H3v-5" /><path d="M9 16h6" /><circle cx="7.5" cy="16.5" r="1.5" /><circle cx="16.5" cy="16.5" r="1.5" /></Svg>;
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Root
@@ -416,6 +418,9 @@ function Inbox() {
   const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
   const [filtersOpen, setFiltersOpen] = useState(false);   // desktop popover
   const [sheetOpen, setSheetOpen] = useState(false);        // mobile all-in-one sheet
+  // Desktop hover preview for a customer row (lead type / source / vehicle). Holds the customer + the row's
+  // viewport rect so the floating card can anchor to it.
+  const [hoverCard, setHoverCard] = useState<{ c: InboxCustomer; rect: DOMRect } | null>(null);
   const activeFilterCount = leadFilterCount(leadFilters) + (dateRange !== "all" ? 1 : 0);
   // The mobile button stands in for four controls, so its badge counts every non-default among them.
   const mobileFilterCount = activeFilterCount + (groupBy !== "customer" ? 1 : 0) + (channel !== "all" ? 1 : 0);
@@ -1043,6 +1048,8 @@ function Inbox() {
                     read={readIds.has(c.customer_id)}
                     onClick={() => { setFocusConvId(null); openCustomer(c); }}
                     onVisible={requestEnrich}
+                    onHover={(cust, rect) => setHoverCard({ c: cust, rect })}
+                    onHoverEnd={() => setHoverCard(null)}
                   />
                 ))}
                 {/* infinite-scroll sentinel: loads the next page when it nears the viewport */}
@@ -1115,6 +1122,8 @@ function Inbox() {
             dateBasis={dateBasis} onDateBasis={setDateBasis}
           />
         )}
+        {/* Desktop hover preview — floats over the thread, anchored to the hovered row. */}
+        {hoverCard && <CustomerHoverCard c={hoverCard.c} rect={hoverCard.rect} />}
       </div>
     </div>
   );
@@ -1197,13 +1206,17 @@ function TeamConvRow({ c, active, onClick }: { c: TeamConversation; active: bool
   );
 }
 
-function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: InboxCustomer; meta?: { appt: number; actions: number; preview?: string }; active: boolean; read?: boolean; onClick: () => void; onVisible?: (customerId: string) => void }) {
+function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, onHoverEnd }: { c: InboxCustomer; meta?: { appt: number; actions: number; preview?: string }; active: boolean; read?: boolean; onClick: () => void; onVisible?: (customerId: string) => void; onHover?: (c: InboxCustomer, rect: DOMRect) => void; onHoverEnd?: () => void }) {
   const unread = read ? 0 : c.unreadCounts?.totalUnread ?? 0;
   const callUnread = c.unreadCounts?.callUnread ?? 0;
   const name = c.customer_name || c.mobile_number || "Unknown";
+  const vehicle = vehicleLabel(primaryLead(c)?.leadVehicleInterest);
   // Report visibility ONCE (then disconnect) so the parent enriches this row's appt/action icons only
   // when it's actually scrolled into view — not for the whole list up front.
   const rowRef = useRef<HTMLButtonElement | null>(null);
+  // Short delay before showing the hover preview, so a fast cursor sweeping the list doesn't flash a card
+  // over every row it crosses.
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const el = rowRef.current;
     if (!el || !onVisible) return;
@@ -1213,10 +1226,17 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: Inb
     io.observe(el);
     return () => io.disconnect();
   }, [c.customer_id, onVisible]);
+  useEffect(() => () => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }, []);
   return (
     <button
       ref={rowRef}
       onClick={onClick}
+      onMouseEnter={() => {
+        if (!onHover) return;
+        if (hoverTimer.current) clearTimeout(hoverTimer.current);
+        hoverTimer.current = setTimeout(() => { const el = rowRef.current; if (el) onHover(c, el.getBoundingClientRect()); }, 160);
+      }}
+      onMouseLeave={() => { if (hoverTimer.current) { clearTimeout(hoverTimer.current); hoverTimer.current = null; } onHoverEnd?.(); }}
       className="flex w-full flex-col gap-2.5 border-b px-5 py-2.5 text-left transition-colors hover:bg-[#fafafa]"
       style={{
         borderColor: C.border,
@@ -1253,6 +1273,14 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible }: { c: Inb
         </p>
         {unread > 0 && <span className="size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
       </div>
+      {/* Vehicle of interest — the single most glanceable lead fact for a dealer scanning the list. Type /
+          source / the full picture are on hover (CustomerHoverCard). Only shown when present. */}
+      {vehicle && (
+        <div className="flex min-w-0 items-center gap-1 text-[11px]" style={{ color: C.sub }}>
+          <IconCar size={12} className="shrink-0" />
+          <span className="truncate font-medium">{vehicle}</span>
+        </div>
+      )}
       {/* Which automated journeys reached this customer (0..4) — only rendered when present, so an
           untouched-by-automation row keeps its two-line height. */}
       {(c.engagementJourneys?.length ?? 0) > 0 && <JourneyChips journeys={c.engagementJourneys} />}
@@ -2938,13 +2966,7 @@ function NextScheduledChip({ ns }: { ns: { timing?: string; detail?: string; sch
 
 function TempBadge({ temp }: { temp: string }) {
   const t = temp.toLowerCase();
-  const map: Record<string, { bg: string; fg: string }> = {
-    hot: { bg: "#ffe4e4", fg: "#d52c2f" },
-    warm: { bg: C.orangeAccent, fg: C.orange },
-    cold: { bg: "#e0f2fe", fg: "#0369a1" },
-    dead: { bg: "#f1f5f9", fg: "#64748b" },
-  };
-  const s = map[t] || { bg: C.primaryAccent, fg: C.primary };
+  const s = TEMP_COLORS[t] || { bg: C.primaryAccent, fg: C.primary };
   return <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize" style={{ background: s.bg, color: s.fg }}>{t}</span>;
 }
 
@@ -3572,6 +3594,23 @@ const JOURNEY_META: Record<string, { label: string; bg: string; fg: string }> = 
   FOLLOWUP: { label: "Follow-up", bg: C.orangeAccent, fg: C.orange },
   CAMPAIGN: { label: "Campaign", bg: C.blueAccent, fg: "#2f7bff" },
 };
+// Temperature colours — shared by TempBadge and the filter pills so a "hot" reads the same everywhere.
+const TEMP_COLORS: Record<string, { bg: string; fg: string }> = {
+  hot: { bg: "#ffe4e4", fg: "#d52c2f" },
+  warm: { bg: C.orangeAccent, fg: C.orange },
+  cold: { bg: "#e0f2fe", fg: "#0369a1" },
+  dead: { bg: "#f1f5f9", fg: "#64748b" },
+};
+// "2011 Chevrolet Tahoe LT" from a leadVehicleInterest (year is a string; any field may be null).
+function vehicleLabel(v?: LeadVehicleInterest | null): string {
+  return [v?.year, v?.make, v?.model, v?.trim].filter(Boolean).join(" ");
+}
+// The customer's single most-useful lead for at-a-glance sidebar display: prefer one with a vehicle of
+// interest, else one with any detail, else the first.
+function primaryLead(c: InboxCustomer): CustomerLead | undefined {
+  const leads = c.leads ?? [];
+  return leads.find((l) => vehicleLabel(l.leadVehicleInterest)) ?? leads.find((l) => l.external_type || l.source || l.outcome) ?? leads[0];
+}
 
 // All six lead-level filters as one object (get-customers-list). appointmentBooked is TRISTATE: "all" sends
 // nothing (both), "yes"→true, "no"→false — a checkbox that always sent its value would break the third state.
@@ -3631,6 +3670,42 @@ function LeadDetailCard({ lead }: { lead: CustomerLead }) {
   );
 }
 
+/* Hover preview for a customer row (desktop) — surfaces temperature, journeys and each lead's type /
+ * source / vehicle of interest without opening the thread. Fixed-position + pointer-events-none so it
+ * floats over the thread pane and never steals the hover (which would make it flicker). Rendered only when
+ * there's actually detail to show, so an untouched customer (and every customer on prod, pre-backend) shows
+ * no card. Anchored to the hovered row's viewport rect, flipping left / clamping so it stays on-screen. */
+function CustomerHoverCard({ c, rect }: { c: InboxCustomer; rect: DOMRect }) {
+  const leads = c.leads ?? [];
+  const temp = primaryLead(c)?.temperature || c.temperature || "";
+  const hasDetail = (c.engagementJourneys?.length ?? 0) > 0
+    || leads.some((l) => l.external_type || l.source || l.outcome || vehicleLabel(l.leadVehicleInterest));
+  if (!hasDetail) return null;
+  const W = 288;
+  const spaceRight = window.innerWidth - rect.right;
+  const left = spaceRight > W + 24 ? rect.right + 8 : Math.max(8, rect.left - W - 8);
+  const top = Math.min(Math.max(8, rect.top), Math.max(8, window.innerHeight - 360));
+  return (
+    <div className="pointer-events-none fixed z-[70] hidden lg:block" style={{ top, left, width: W }}>
+      <div className="animate-dropdown-in overflow-hidden rounded-2xl border bg-white shadow-lg" style={{ borderColor: C.border }}>
+        <div className="flex items-center gap-1.5 border-b px-3.5 py-2.5" style={{ borderColor: C.border }}>
+          <span className="min-w-0 truncate text-[13px] font-semibold" style={{ color: C.dark }}>{c.customer_name || c.mobile_number || "Unknown"}</span>
+          {temp && <TempBadge temp={temp} />}
+        </div>
+        <div className="flex max-h-[320px] flex-col gap-3 overflow-y-auto p-3.5">
+          {(c.engagementJourneys?.length ?? 0) > 0 && (
+            <div>
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Reached by</p>
+              <JourneyChips journeys={c.engagementJourneys} size="md" />
+            </div>
+          )}
+          {leads.map((l) => <LeadDetailCard key={l.lead_id} lead={l} />)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type DateRange = "all" | "today" | "7d" | "custom";
 const DATE_RANGES: { v: DateRange; label: string }[] = [
   { v: "all", label: "All time" }, { v: "today", label: "Today" }, { v: "7d", label: "Last 7 days" }, { v: "custom", label: "Custom" },
@@ -3683,7 +3758,7 @@ function FiltersPopover({
   }, [onClose]);
   return (
     <>
-      <div ref={popRef} className="animate-dropdown-in absolute right-0 top-11 z-50 hidden max-h-[70vh] w-64 overflow-y-auto rounded-xl border bg-white p-3 shadow-lg lg:block" style={{ borderColor: C.border }}>
+      <div ref={popRef} className="animate-dropdown-in absolute right-0 top-11 z-50 hidden max-h-[70vh] w-80 overflow-y-auto rounded-xl border bg-white p-3.5 shadow-lg lg:block" style={{ borderColor: C.border }}>
         <FilterSections
           filters={filters} onPatch={onPatch} outcomeOptions={outcomeOptions} sourceOptions={sourceOptions} showLeadFilters={showLeadFilters}
           dateRange={dateRange} onDateRange={onDateRange}
@@ -3809,24 +3884,34 @@ function MobileControlsSheet({
 /* A labelled multi-select checkbox group — one lead-level filter. Module scope so it isn't a fresh type
  * each render. `capitalize` for the temperature values (lowercase in, Title-ish out). Empty options (a
  * data-driven picker with nothing loaded yet) shows a caption instead of an empty block. */
-function FilterCheckGroup({
-  title, options, selected, onToggle, capitalize = false, emptyNote,
-}: {
-  title: string; options: { v: string; label: string }[]; selected: string[];
-  onToggle: (v: string) => void; capitalize?: boolean; emptyNote?: string;
+/* A filter toggle pill — the multi-select unit (replaces the old checkbox lists; pills are faster to scan
+ * and click). `tone` colours the SELECTED state (temperature / journey colours); default is the brand accent. */
+function Pill({ label, active, onClick, tone, cap }: { label: string; active: boolean; onClick: () => void; tone?: { bg: string; fg: string }; cap?: boolean }) {
+  const on = tone ?? { bg: C.primaryAccent, fg: C.primary };
+  return (
+    <button type="button" onClick={onClick}
+      className={`rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors ${cap ? "capitalize" : ""}`}
+      style={active ? { borderColor: on.fg, background: on.bg, color: on.fg } : { borderColor: C.border, color: C.sub }}>
+      {label}
+    </button>
+  );
+}
+
+/* A labelled group of filter pills (one filter). Wraps; scrolls when the option list is long
+ * (outcome / source). Empty options show a caption instead of a blank block. */
+function PillGroup({ title, options, selected, onToggle, tones, cap, emptyNote }: {
+  title: string; options: { v: string; label: string }[]; selected: string[]; onToggle: (v: string) => void;
+  tones?: Record<string, { bg: string; fg: string }>; cap?: boolean; emptyNote?: string;
 }) {
   return (
-    <div className="mb-3">
+    <div className="mb-3.5">
       <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>{title}</p>
       {options.length === 0 ? (
-        <p className="px-2 text-[11px]" style={{ color: C.sub }}>{emptyNote || "None yet"}</p>
+        <p className="text-[11px]" style={{ color: C.sub }}>{emptyNote || "None yet"}</p>
       ) : (
-        <div className="flex max-h-44 flex-col gap-1 overflow-y-auto">
+        <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto">
           {options.map((o) => (
-            <label key={o.v} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2.5 text-[12px] hover:bg-[#fafafa] lg:py-1.5" style={{ color: C.dark }}>
-              <input type="checkbox" checked={selected.includes(o.v)} onChange={() => onToggle(o.v)} className="accent-[#4600f2]" />
-              <span className={capitalize ? "capitalize" : undefined}>{o.label}</span>
-            </label>
+            <Pill key={o.v} label={o.label} cap={cap} active={selected.includes(o.v)} onClick={() => onToggle(o.v)} tone={tones?.[o.v]} />
           ))}
         </div>
       )}
@@ -3852,34 +3937,61 @@ function FilterSections({
     const arr = filters[key] as string[];
     onPatch({ [key]: arr.includes(t) ? arr.filter((x) => x !== t) : [...arr, t] } as Partial<LeadFilters>);
   };
-  const anyActive = leadFilterCount(filters) > 0 || dateRange !== "all";
+  const clearAll = () => { onPatch(EMPTY_LEAD_FILTERS); onDateRange("all"); onCustomStart(""); onCustomEnd(""); };
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  // Applied-filters summary: one removable chip per active value, so the current filter reads at a glance
+  // and clears one at a time — the biggest intuitiveness win over a column of checkboxes.
+  const applied: { key: string; label: string; onRemove: () => void }[] = [];
+  if (dateRange !== "all") applied.push({ key: "date", label: DATE_RANGES.find((d) => d.v === dateRange)?.label || "Date", onRemove: () => { onDateRange("all"); onCustomStart(""); onCustomEnd(""); } });
+  filters.temperature.forEach((t) => applied.push({ key: `t-${t}`, label: cap(t), onRemove: () => toggle("temperature", t) }));
+  filters.externalType.forEach((t) => applied.push({ key: `x-${t}`, label: t, onRemove: () => toggle("externalType", t) }));
+  filters.journeys.forEach((j) => applied.push({ key: `j-${j}`, label: JOURNEY_META[j]?.label || j, onRemove: () => toggle("journeys", j) }));
+  if (filters.appointmentBooked !== "all") applied.push({ key: "appt", label: filters.appointmentBooked === "yes" ? "Has appointment" : "No appointment", onRemove: () => onPatch({ appointmentBooked: "all" }) });
+  filters.outcome.forEach((o) => applied.push({ key: `o-${o}`, label: o, onRemove: () => toggle("outcome", o) }));
+  filters.leadSource.forEach((s) => applied.push({ key: `s-${s}`, label: s, onRemove: () => toggle("leadSource", s) }));
+
   return (
-    <>
-      <div>
-        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Date range</p>
-        <div className="mb-2 flex flex-col gap-1">
-          {DATE_RANGES.map((d) => (
-            <label key={d.v} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2.5 text-[12px] hover:bg-[#fafafa] lg:py-1.5" style={{ color: C.dark }}>
-              <input type="radio" name="daterange" checked={dateRange === d.v} onChange={() => onDateRange(d.v)} className="accent-[#4600f2]" />
-              {d.label}
-            </label>
-          ))}
-          {dateRange === "custom" && (
-            <div className="mt-1 flex flex-col gap-1.5 px-2">
-              <label className="flex items-center justify-between gap-2 text-[11px]" style={{ color: C.sub }}>From
-                <input type="date" value={customStart} max={customEnd || undefined} onChange={(e) => onCustomStart(e.target.value)}
-                  className="rounded-md border px-2 py-1 text-[12px] outline-none focus:border-[#4600f2]" style={{ borderColor: C.border, color: C.dark }} />
-              </label>
-              <label className="flex items-center justify-between gap-2 text-[11px]" style={{ color: C.sub }}>To
-                <input type="date" value={customEnd} min={customStart || undefined} onChange={(e) => onCustomEnd(e.target.value)}
-                  className="rounded-md border px-2 py-1 text-[12px] outline-none focus:border-[#4600f2]" style={{ borderColor: C.border, color: C.dark }} />
-              </label>
-            </div>
-          )}
+    <div>
+      {/* Applied summary + one-click clear (only when something is on). */}
+      {applied.length > 0 && (
+        <div className="mb-3.5">
+          <div className="mb-1.5 flex items-center justify-between">
+            <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Applied</p>
+            <button onClick={clearAll} className="text-[11px] font-semibold" style={{ color: C.primary }}>Clear all</button>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {applied.map((a) => (
+              <button key={a.key} onClick={a.onRemove} title="Remove"
+                className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors hover:bg-[#fafafa]"
+                style={{ borderColor: C.primary, background: C.primaryAccent, color: C.primary }}>
+                {a.label}<span aria-hidden>×</span>
+              </button>
+            ))}
+          </div>
         </div>
+      )}
+
+      {/* Date range — pills, with the custom pickers + the date basis it applies to. */}
+      <div className="mb-3.5">
+        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Date range</p>
+        <div className="flex flex-wrap gap-1.5">
+          {DATE_RANGES.map((d) => <Pill key={d.v} label={d.label} active={dateRange === d.v} onClick={() => onDateRange(d.v)} />)}
+        </div>
+        {dateRange === "custom" && (
+          <div className="mt-2 flex flex-col gap-1.5">
+            <label className="flex items-center justify-between gap-2 text-[11px]" style={{ color: C.sub }}>From
+              <input type="date" value={customStart} max={customEnd || undefined} onChange={(e) => onCustomStart(e.target.value)}
+                className="rounded-md border px-2 py-1 text-[12px] outline-none focus:border-[#4600f2]" style={{ borderColor: C.border, color: C.dark }} />
+            </label>
+            <label className="flex items-center justify-between gap-2 text-[11px]" style={{ color: C.sub }}>To
+              <input type="date" value={customEnd} min={customStart || undefined} onChange={(e) => onCustomEnd(e.target.value)}
+                className="rounded-md border px-2 py-1 text-[12px] outline-none focus:border-[#4600f2]" style={{ borderColor: C.border, color: C.dark }} />
+            </label>
+          </div>
+        )}
         {/* Which date the range (and sort) applies to — lead createdAt vs last_contacted_at (API sortBy). */}
-        <p className="mb-1.5 text-[10px] font-medium" style={{ color: C.sub }}>Apply to</p>
-        <div className="mb-3 flex gap-1.5">
+        <div className="mt-2 flex gap-1.5">
           {([["conversation", "Last conversation"], ["lead", "Lead created"]] as const).map(([v, label]) => (
             <button key={v} onClick={() => onDateBasis(v)}
               className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
@@ -3888,60 +4000,52 @@ function FilterSections({
             </button>
           ))}
         </div>
-
-        {/* Lead temperature — always available (filters via `temperature` on new backends, the legacy
-            `leadType` alias on older ones), so it works on prod today. */}
-        <FilterCheckGroup title="Lead temperature" capitalize
-          options={TEMPERATURES.map((t) => ({ v: t, label: t }))}
-          selected={filters.temperature} onToggle={(v) => toggle("temperature", v)} />
-
-        {/* The rest are the NEW lead-level filters — hidden until the backend serves the new keys (so prod
-            shows only Date + Temperature, exactly as before), then they appear on their own. Each returns
-            customers with ≥1 matching lead (AND across filters). */}
-        {showLeadFilters && (
-          <>
-            <FilterCheckGroup title="Lead type"
-              options={EXTERNAL_TYPES.map((t) => ({ v: t, label: t }))}
-              selected={filters.externalType} onToggle={(v) => toggle("externalType", v)} />
-            <FilterCheckGroup title="Reached by"
-              options={JOURNEYS.map((j) => ({ v: j.v, label: j.label }))}
-              selected={filters.journeys} onToggle={(v) => toggle("journeys", v)} />
-
-            {/* Appointment — THREE states: All (both, sends nothing) / Booked (true) / None (false). */}
-            <div className="mb-3">
-              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Appointment</p>
-              <div className="flex gap-1.5">
-                {([["all", "All"], ["yes", "Booked"], ["no", "None"]] as const).map(([v, label]) => (
-                  <button key={v} onClick={() => onPatch({ appointmentBooked: v })}
-                    className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
-                    style={filters.appointmentBooked === v ? { borderColor: C.primary, color: C.primary, background: C.primaryAccent } : { borderColor: C.border, color: C.sub }}>
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Outcome + Lead source are free text — options come from the values actually seen (grow-only),
-                so they never drift out of sync with a hardcoded list (spec ⚠). */}
-            <FilterCheckGroup title="Outcome"
-              options={outcomeOptions.map((o) => ({ v: o, label: o }))}
-              selected={filters.outcome} onToggle={(v) => toggle("outcome", v)}
-              emptyNote="Populated as leads load" />
-            <FilterCheckGroup title="Lead source"
-              options={sourceOptions.map((s) => ({ v: s, label: s }))}
-              selected={filters.leadSource} onToggle={(v) => toggle("leadSource", v)}
-              emptyNote="Populated as leads load" />
-          </>
-        )}
-
-        {anyActive ? (
-          <button onClick={() => { onPatch(EMPTY_LEAD_FILTERS); onDateRange("all"); onCustomStart(""); onCustomEnd(""); }}
-            className="mt-1 w-full rounded-lg border py-2 text-[11px] font-medium lg:py-1.5" style={{ borderColor: C.border, color: C.sub }}>
-            Clear all
-          </button>
-        ) : null}
       </div>
-    </>
+
+      {/* Lead temperature — always available (filters via `temperature` on new backends, the legacy
+          `leadType` alias on older ones), so it works on prod today. Pills are colour-coded per temperature. */}
+      <PillGroup title="Lead temperature" cap tones={TEMP_COLORS}
+        options={TEMPERATURES.map((t) => ({ v: t, label: t }))}
+        selected={filters.temperature} onToggle={(v) => toggle("temperature", v)} />
+
+      {/* The rest are the NEW lead-level filters — hidden until the backend serves the new keys (so prod
+          shows only Date + Temperature, exactly as before), then they appear on their own. AND across filters. */}
+      {showLeadFilters && (
+        <>
+          <PillGroup title="Lead type"
+            options={EXTERNAL_TYPES.map((t) => ({ v: t, label: t }))}
+            selected={filters.externalType} onToggle={(v) => toggle("externalType", v)} />
+          <PillGroup title="Reached by" tones={JOURNEY_META}
+            options={JOURNEYS.map((j) => ({ v: j.v, label: j.label }))}
+            selected={filters.journeys} onToggle={(v) => toggle("journeys", v)} />
+
+          {/* Appointment — THREE states: All (both, sends nothing) / Booked (true) / None (false). */}
+          <div className="mb-3.5">
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Appointment</p>
+            <div className="flex gap-1.5">
+              {([["all", "All"], ["yes", "Booked"], ["no", "None"]] as const).map(([v, label]) => (
+                <button key={v} onClick={() => onPatch({ appointmentBooked: v })}
+                  className="flex-1 rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
+                  style={filters.appointmentBooked === v ? { borderColor: C.primary, color: C.primary, background: C.primaryAccent } : { borderColor: C.border, color: C.sub }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Outcome + Lead source are free text — options come from the values actually seen (grow-only),
+              so they never drift out of sync with a hardcoded list (spec ⚠). */}
+          <PillGroup title="Outcome"
+            options={outcomeOptions.map((o) => ({ v: o, label: o }))}
+            selected={filters.outcome} onToggle={(v) => toggle("outcome", v)}
+            emptyNote="Populated as leads load" />
+          <PillGroup title="Lead source"
+            options={sourceOptions.map((s) => ({ v: s, label: s }))}
+            selected={filters.leadSource} onToggle={(v) => toggle("leadSource", v)}
+            emptyNote="Populated as leads load" />
+        </>
+      )}
+    </div>
   );
 }
 
