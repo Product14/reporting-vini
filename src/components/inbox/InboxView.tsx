@@ -289,7 +289,13 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
       if (c.callId || c.callData?.callDuration || c.callData?.transcript) {
         // Same rule as the call card: callType, else the record's direction, else no claimed direction.
         const d = convDirection(c);
-        return d === "in" ? "Inbound call" : d === "out" ? "Outbound call" : "Call";
+        const label = d === "in" ? "Inbound call" : d === "out" ? "Outbound call" : "Call";
+        // Append the last spoken line of the transcript (like the flat-list preview) so a call row shows
+        // more than just "Inbound call" — the customer's line bare, the AI's prefixed with the agent name.
+        const turns = parseCallTranscript(c.callData?.transcript || "");
+        const last = turns[turns.length - 1];
+        const line = last?.text ? clip((last.speaker === "Customer" ? "" : currentAgentName() + ": ") + last.text) : "";
+        return line ? `${label} · ${line}` : label;
       }
       continue;
     }
