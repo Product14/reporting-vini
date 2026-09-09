@@ -758,7 +758,10 @@ function AgentReportsView() {
                     <path d="M21 3v6h-6" />
                   </svg>
                 </button>
-                <ExportMenu onPrint={handlePrint} onCSV={() => handleExport("csv")} onXLSX={() => handleExport("xlsx")} />
+                {/* Exports the AGENT report. In library view the reader is looking at something else and
+                    each report carries its own download, so two "Download" buttons would export the wrong
+                    thing half the time. */}
+                {view2 === "agent" && <ExportMenu onPrint={handlePrint} onCSV={() => handleExport("csv")} onXLSX={() => handleExport("xlsx")} />}
               </div>
             ) : (
               <span className="rounded-lg bg-[#f3eaff] px-3 py-1.5 text-[12px] font-semibold text-[#813fed]">{view.liveLabel}</span>

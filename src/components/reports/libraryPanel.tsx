@@ -37,7 +37,8 @@ import {
   type ActionItemStats,
 } from "@/components/reports/liveData";
 import { useOutcomes } from "@/components/reports/outcomes";
-import { REPORTS, availableReports, type ReportCtx, type ReportDef } from "@/components/reports/library";
+import { REPORTS, availableReports, reportSheets, type ReportCtx, type ReportDef } from "@/components/reports/library";
+import { downloadXLSX, downloadCSV, exportFilenameStem } from "@/components/reports/exportReport";
 import { track } from "@/lib/analytics";
 import type { InsightsPayload } from "@/app/api/reports/insights/route";
 
@@ -64,6 +65,37 @@ async function fetchInsights(
 }
 
 
+/* BOOKMARKS — per rooftop, in this browser.
+ *
+ * localStorage rather than the account-wide layout store on purpose: a bookmark is one person saying
+ * "this is the one I open every Monday", not a decision for everyone at the rooftop. Keyed by team so a
+ * group's rooftops don't inherit each other's. */
+const BOOKMARK_KEY = (teamId: string) => `spyne.reportBookmarks.${teamId}`;
+
+function readBookmarks(teamId: string): string[] {
+  if (!teamId || typeof window === "undefined") return [];
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(BOOKMARK_KEY(teamId)) ?? "[]");
+    // A hand-edited or corrupted value must not take the library down.
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function useBookmarks(teamId: string) {
+  /* Read lazily, keyed by team, rather than in an effect: localStorage is synchronous, so an effect just
+   * costs a second render and trips the compiler's set-state-in-effect rule for no benefit. */
+  const [state, setState] = useState<{ team: string; ids: string[] }>(() => ({ team: teamId, ids: readBookmarks(teamId) }));
+  const ids = state.team === teamId ? state.ids : readBookmarks(teamId);
+  const toggle = (id: string) => {
+    const next = ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
+    try { window.localStorage.setItem(BOOKMARK_KEY(teamId), JSON.stringify(next)); } catch { /* private mode — the session still works */ }
+    setState({ team: teamId, ids: next });
+  };
+  return { ids, toggle };
+}
+
 export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: { navQuery: string; onOpenAgent?: (agentId: string) => void; initialReportId?: string | null }) {
   const { bucket, custom } = useDateRange();
   const { dept } = useDept();
@@ -80,6 +112,7 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
   // Distinguishes "still fetching" from "genuinely nothing" — a deep link opened a report before the
   // ClickHouse datasets landed and it rendered the empty state, which reads as broken.
   const [insightsLoading, setInsightsLoading] = useState(true);
+  const bookmarks = useBookmarks(teamId);
 
   useEffect(() => { track("report_viewed", { tab: "library", team_id: teamId }); }, [teamId]);
 
@@ -180,9 +213,11 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
               siblings={live}
               onOpen={openReport}
               backToAgent={backToAgent}
+              bookmarks={bookmarks}
+              accountName={account?.name ?? ""}
             />
           ) : (
-            <Gallery ctx={ctx} live={liveIds} ready={ready} onOpen={openReport} accountName={account?.name ?? ""} navQuery={navQuery} onOpenAgent={onOpenAgent} />
+            <Gallery ctx={ctx} live={liveIds} ready={ready} onOpen={openReport} accountName={account?.name ?? ""} navQuery={navQuery} onOpenAgent={onOpenAgent} bookmarks={bookmarks} />
           )}
     </div>
   );
@@ -197,16 +232,32 @@ const BUCKET_TEXT: Record<string, string> = {
  * categories hold two or three reports, so grouping into separate rows left two cards floating in a
  * four-column space. Every card leads with the QUESTION it answers — a manager picks by "what do I want
  * to know", not by chart type. */
-function Gallery({ ctx, live, ready, onOpen, accountName, navQuery, onOpenAgent }: { ctx: ReportCtx; live: Set<string>; ready: boolean; onOpen: (r: ReportDef) => void; accountName: string; navQuery: string; onOpenAgent?: (agentId: string) => void }) {
+function Gallery({ ctx, live, ready, onOpen, accountName, navQuery, onOpenAgent, bookmarks }: { ctx: ReportCtx; live: Set<string>; ready: boolean; onOpen: (r: ReportDef) => void; accountName: string; navQuery: string; onOpenAgent?: (agentId: string) => void; bookmarks: { ids: string[]; toggle: (id: string) => void } }) {
   const [cat, setCat] = useState<string>("All");
   /* Reports meaningful only to the OTHER department are removed outright, not dimmed: a dimmed card still
    * tells a service manager that "vehicles customers are asking for" is a thing their agent measures. */
   const inScope = REPORTS.filter((r) => !r.depts || !ctx.dept || ctx.dept === "all" || r.depts.includes(ctx.dept));
-  const cats = ["All", ...Array.from(new Set(inScope.map((r) => r.category)))];
+  const [q, setQ] = useState("");
+  const cats = ["All", ...(bookmarks.ids.length ? ["Bookmarked"] : []), ...Array.from(new Set(inScope.map((r) => r.category)))];
+  /* Search covers the QUESTION and the audience too, not just the title — someone looking for "show
+   * rate" or "BDC" is describing what they want, not naming a report they already know. */
+  /* Every TERM must appear somewhere, rather than the phrase verbatim: a dealer types "show rate", and
+   * the report is called "Did the appointments show?" — a phrase match finds nothing, which is how the
+   * placeholder ended up suggesting a search that returned zero. `keywords` carries the words a dealer
+   * uses that the report's own copy doesn't. */
+  const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const matches = (r: ReportDef) => {
+    if (!terms.length) return true;
+    const hay = `${r.title} ${r.question} ${r.category} ${r.who} ${r.source} ${(r.keywords ?? []).join(" ")}`.toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  };
+  const needle = terms.join(" ");
   // Available reports first — a dealer should never have to hunt past dimmed cards to find a live one.
-  const shown = inScope.filter((r) => cat === "All" || r.category === cat)
+  const shown = inScope
+    .filter((r) => (cat === "Bookmarked" ? bookmarks.ids.includes(r.id) : cat === "All" || r.category === cat))
+    .filter(matches)
     .slice()
-    .sort((a, b) => Number(live.has(b.id)) - Number(live.has(a.id)));
+    .sort((a, b) => Number(bookmarks.ids.includes(b.id)) - Number(bookmarks.ids.includes(a.id)) || Number(live.has(b.id)) - Number(live.has(a.id)));
 
   return (
     <div className="flex flex-col gap-7">
@@ -222,9 +273,23 @@ function Gallery({ ctx, live, ready, onOpen, accountName, navQuery, onOpenAgent 
         {ctx.timezone && <span className="flex-none text-[11px] text-[#9ca3af]">Times in {tzShortLabel(ctx.timezone)}</span>}
       </div>
 
+      <div className="no-print flex flex-wrap items-center gap-2">
+        <label className="relative flex-1 min-w-[220px] max-w-[360px]">
+          <span className="sr-only">Search reports</span>
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={`Search reports — try “show rate”, “loaner” or “ROI”`}
+            className="w-full rounded-lg border border-[#e5e7eb] bg-white px-3 py-2 text-[12.5px] text-[#374151] placeholder:text-[#9ca3af]"
+          />
+        </label>
+        {needle && <span className="text-[11.5px] text-[#9ca3af]">{shown.length} match{shown.length === 1 ? "" : "es"}</span>}
+      </div>
+
       <div className="no-print flex flex-wrap gap-1.5">
         {cats.map((k) => {
-          const n = k === "All" ? inScope.length : inScope.filter((r) => r.category === k).length;
+          const n = k === "All" ? inScope.length : k === "Bookmarked" ? bookmarks.ids.length : inScope.filter((r) => r.category === k).length;
           return (
             <button
               key={k}
@@ -244,15 +309,19 @@ function Gallery({ ctx, live, ready, onOpen, accountName, navQuery, onOpenAgent 
         {shown.map((r) => {
           const on = live.has(r.id);
           return (
-            <button
+            /* The star is its own control, so the card body is a div with a click handler rather than a
+               button — a button inside a button is invalid HTML and swallows the inner click. */
+            <div
               key={r.id}
-              type="button"
-              disabled={!on}
-              onClick={() => onOpen(r)}
-              className={`flex h-full flex-col items-start gap-2 rounded-2xl border px-5 py-4 text-left transition-shadow ${
-                on ? "border-[#e5e7eb] bg-white shadow-sm hover:border-[#d6c9f5] hover:shadow-md" : "cursor-not-allowed border-dashed border-[#e5e7eb] bg-[#fbfbfc]"
-              }`}
+              className={`relative flex h-full flex-col items-start gap-2 rounded-2xl border px-5 py-4 text-left transition-shadow ${
+                on ? "border-[#e5e7eb] bg-white shadow-sm hover:border-[#d6c9f5] hover:shadow-md" : "border-dashed border-[#e5e7eb] bg-[#fbfbfc]"
+              } ${on ? "cursor-pointer" : "cursor-not-allowed"}`}
+              onClick={on ? () => onOpen(r) : undefined}
+              role={on ? "button" : undefined}
+              tabIndex={on ? 0 : undefined}
+              onKeyDown={on ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(r); } } : undefined}
             >
+              <BookmarkStar on={bookmarks.ids.includes(r.id)} onToggle={() => bookmarks.toggle(r.id)} />
               <span className="text-[10px] font-bold uppercase tracking-wide text-[#c3b5e8]">{r.category}</span>
               <span className={`text-[13.5px] font-bold leading-tight ${on ? "text-[#111]" : "text-[#9ca3af]"}`}>{r.title}</span>
               <span className={`text-[11.5px] leading-snug ${on ? "text-[#6b7280]" : "text-[#b9bec7]"}`}>{r.question}</span>
@@ -264,7 +333,7 @@ function Gallery({ ctx, live, ready, onOpen, accountName, navQuery, onOpenAgent 
                   <span className="text-[10.5px] font-medium text-[#c3cad4]">{ready ? "No data yet" : "…"}</span>
                 )}
               </span>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -349,9 +418,10 @@ function AgentReportCards({ ctx, navQuery, onOpenAgent }: { ctx: ReportCtx; navQ
 
 /** One opened report: header with the question and its source, then the report itself. */
 function ReportPane({
-  report, ctx, onBack, enabled, loading, siblings, onOpen, backToAgent,
+  report, ctx, onBack, enabled, loading, siblings, onOpen, backToAgent, bookmarks, accountName,
 }: {
   report: ReportDef; ctx: ReportCtx; onBack: () => void; enabled: boolean; loading?: boolean;
+  bookmarks: { ids: string[]; toggle: (id: string) => void }; accountName: string;
   /* Reports with live data for this window, in catalog order — drives the switcher and prev/next. */
   siblings: ReportDef[];
   onOpen: (r: ReportDef) => void;
@@ -384,7 +454,11 @@ function ReportPane({
           <p className="mt-0.5 text-[12.5px] text-[#6b7280]">{report.question}</p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <ReportSwitcher current={report} siblings={siblings} onOpen={onOpen} />
+          <div className="no-print flex items-center gap-2">
+            <BookmarkStar inline on={bookmarks.ids.includes(report.id)} onToggle={() => bookmarks.toggle(report.id)} />
+            <DownloadButton report={report} ctx={ctx} accountName={accountName} disabled={!enabled} />
+            <ReportSwitcher current={report} siblings={siblings} onOpen={onOpen} />
+          </div>
           <div className="text-right">
             <p className="text-[11px] font-semibold text-[#374151]">{ctx.periodLabel}</p>
             <p className="text-[10.5px] text-[#9ca3af]">{report.source}</p>
@@ -598,4 +672,74 @@ function StepButton({ r, dir, onOpen }: { r: ReportDef; dir: "prev" | "next"; on
 function CardShell({ href, onClick, children }: { href?: string; onClick?: () => void; children: React.ReactNode }) {
   const cls = "flex flex-col gap-4 rounded-2xl border border-[#e5e7eb] bg-white px-6 py-5 text-left shadow-sm transition-shadow hover:border-[#d6c9f5] hover:shadow-md";
   return href ? <a href={href} className={cls}>{children}</a> : <button type="button" onClick={onClick} className={cls}>{children}</button>;
+}
+
+/* Bookmark toggle. Absolutely positioned on a gallery card (so it sits clear of the card's own click
+ * target) and inline in the report header. */
+function BookmarkStar({ on, onToggle, inline }: { on: boolean; onToggle: () => void; inline?: boolean }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-label={on ? "Remove bookmark" : "Bookmark this report"}
+      title={on ? "Remove bookmark" : "Bookmark this report"}
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className={`no-print flex h-7 w-7 flex-none items-center justify-center rounded-lg border transition-colors ${
+        on ? "border-[#e6d9ff] bg-[#faf8ff] text-[#813fed]" : "border-transparent text-[#c3cad4] hover:border-[#e5e7eb] hover:text-[#9ca3af]"
+      } ${inline ? "" : "absolute right-3 top-3"}`}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill={on ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+        <path d="M12 3.5l2.6 5.3 5.9.85-4.25 4.15 1 5.85L12 16.9l-5.25 2.75 1-5.85L3.5 9.65l5.9-.85z" />
+      </svg>
+    </button>
+  );
+}
+
+/* Download this report's own data — the numbers on screen, as sheets, not a screenshot. XLSX by default
+ * because it is what a manager forwards; CSV for anyone piping it somewhere. */
+function DownloadButton({ report, ctx, accountName, disabled }: { report: ReportDef; ctx: ReportCtx; accountName: string; disabled?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (disabled) return null;
+
+  const run = async (fmt: "xlsx" | "csv") => {
+    setOpen(false);
+    setBusy(true);
+    try {
+      const sheets = reportSheets(report, ctx);
+      const stem = `${exportFilenameStem(accountName, ctx.periodLabel)} - ${report.title}`.replace(/[/\\?%*:|"<>]/g, "-");
+      if (fmt === "xlsx") await downloadXLSX(`${stem}.xlsx`, sheets);
+      else downloadCSV(`${stem}.csv`, sheets);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy}
+        className="flex items-center gap-1.5 rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#374151] hover:bg-[#faf8ff] disabled:opacity-60"
+      >
+        {busy ? "Preparing…" : "Download"}
+        <span className="text-[9px] text-[#9ca3af]">▼</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-lg">
+          {(["xlsx", "csv"] as const).map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => run(f)}
+              className="block w-full px-3 py-2 text-left text-[12px] font-semibold text-[#374151] hover:bg-[#faf8ff]"
+            >
+              {f === "xlsx" ? "Excel (.xlsx)" : "CSV (.csv)"}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

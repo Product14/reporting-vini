@@ -19,6 +19,7 @@ import type { EvalOutcomes, EvalDirection } from "@/lib/spyne/evalPipeline";
 import type { AgentData, NamedAppt, WarmLeadItem } from "@/components/reports/data";
 import type { FetchResult, FleetLive, ActionItem, ActionItemStats, ReportMetrics } from "@/components/reports/liveData";
 import type { InsightsPayload } from "@/app/api/reports/insights/route";
+import type { ExportSheet } from "@/components/reports/exportReport";
 
 // ───────────────────────── context ─────────────────────────
 
@@ -56,6 +57,9 @@ export interface ReportDef {
   /* Which sales agent this report belongs under, driving the "more reports" strip on the By-agent page.
    * Omitted = relevant to both, which is the common case (most reports are rooftop-wide). */
   agents?: ("sales_ib" | "sales_ob")[];
+  /* Words a dealer would search that the report's own copy does not contain — "show rate", "loaner",
+   * "recall", "ROI". Without these, search only finds reports you could already name. */
+  keywords?: string[];
   /* Departments this report is MEANINGFUL for. Omitted = both. A vehicle-shopping report has no meaning
    * in the service drive, and offering it there is worse than not offering it: the reader assumes it is
    * about their department. */
@@ -331,6 +335,7 @@ export const REPORTS: ReportDef[] = [
   // 2 ─────────────────────────────────────────────────────────────────────────
   {
     id: "speed-to-lead",
+    keywords: ["response time","first touch","lead response","speed"],
     title: "Speed to lead",
     question: "How fast is a new lead getting its first touch — and does speed win appointments?",
     category: "Speed & response",
@@ -378,6 +383,7 @@ export const REPORTS: ReportDef[] = [
   // 3 ─────────────────────────────────────────────────────────────────────────
   {
     id: "lead-sources",
+    keywords: ["marketing","source","channel","roi by source"],
     title: "Lead source performance",
     question: "Which lead sources actually turn into appointments?",
     category: "Lead quality",
@@ -463,6 +469,7 @@ export const REPORTS: ReportDef[] = [
   // 6 ─────────────────────────────────────────────────────────────────────────
   {
     id: "handoffs",
+    keywords: ["transfer","escalation","live agent","receptionist"],
     title: "Hand-offs to your team",
     question: "When a customer asked for a person, did they actually reach one?",
     category: "Team",
@@ -496,6 +503,7 @@ export const REPORTS: ReportDef[] = [
   // 7 ─────────────────────────────────────────────────────────────────────────
   {
     id: "missed-opportunities",
+    keywords: ["hot leads","warm leads","follow up","opportunity","unworked"],
     title: "Money on the table",
     question: "Which interested customers have not been booked yet?",
     category: "Lead quality",
@@ -532,6 +540,7 @@ export const REPORTS: ReportDef[] = [
   // 8 ─────────────────────────────────────────────────────────────────────────
   {
     id: "follow-ups",
+    keywords: ["action items","tasks","compliance","overdue"],
     title: "Follow-up compliance",
     question: "Is the team closing the follow-ups the AI logged?",
     category: "Team",
@@ -576,6 +585,7 @@ export const REPORTS: ReportDef[] = [
   // 9 ─────────────────────────────────────────────────────────────────────────
   {
     id: "after-hours",
+    keywords: ["evenings","weekends","out of hours","closed"],
     title: "After-hours capture",
     question: "What would we have missed if nobody answered outside opening hours?",
     category: "Speed & response",
@@ -609,6 +619,7 @@ export const REPORTS: ReportDef[] = [
   // 10 ────────────────────────────────────────────────────────────────────────
   {
     id: "outbound-campaigns",
+    keywords: ["campaign","bdc","dialer","outreach"],
     title: "Outbound campaign performance",
     question: "Which outbound campaigns are producing appointments?",
     category: "Outbound",
@@ -657,6 +668,7 @@ export const REPORTS: ReportDef[] = [
   // 11 ────────────────────────────────────────────────────────────────────────
   {
     id: "agent-scorecard",
+    keywords: ["compare","scorecard","performance","versus"],
     title: "Agent scorecard",
     question: "How do the inbound and outbound agents compare?",
     category: "Team",
@@ -726,6 +738,7 @@ export const REPORTS: ReportDef[] = [
   // 13 ────────────────────────────────────────────────────────────────────────
   {
     id: "sold",
+    keywords: ["roi","return","revenue","closed","units","sales won"],
     depts: ["sales"],
     title: "Did it turn into cars?",
     question: "Of the leads the AI worked, how many have actually sold?",
@@ -766,6 +779,7 @@ export const REPORTS: ReportDef[] = [
   // 14 ────────────────────────────────────────────────────────────────────────
   {
     id: "vehicles",
+    keywords: ["models","makes","inventory demand","voi","interest"],
     depts: ["sales"],
     title: "Vehicles customers are asking for",
     question: "Which makes and models are the leads we spoke to actually shopping?",
@@ -868,6 +882,7 @@ export const REPORTS: ReportDef[] = [
   // 16 ────────────────────────────────────────────────────────────────────────
   {
     id: "texts",
+    keywords: ["sms","text","messaging","reply rate"],
     title: "Text message performance",
     question: "Are customers replying to our texts?",
     category: "Conversations",
@@ -911,6 +926,7 @@ export const REPORTS: ReportDef[] = [
   // 17 ────────────────────────────────────────────────────────────────────────
   {
     id: "coverage",
+    keywords: ["staffing","busiest","peak","cover","roster","hours"],
     title: "When the calls come in",
     question: "What hours and days is the phone actually busy?",
     category: "Speed & response",
@@ -979,6 +995,7 @@ export const REPORTS: ReportDef[] = [
   // 18 ────────────────────────────────────────────────────────────────────────
   {
     id: "objections",
+    keywords: ["opt out","not interested","rejection","pushback"],
     title: "Why leads don't convert",
     question: "What do customers push back on, and why do leads end?",
     category: "Conversations",
@@ -1027,6 +1044,7 @@ export const REPORTS: ReportDef[] = [
   // 19 ────────────────────────────────────────────────────────────────────────
   {
     id: "appt-status",
+    keywords: ["show rate","no show","noshow","kept","turned up","attendance"],
     title: "Did the appointments show?",
     question: "Of the appointments booked, how many actually turned up?",
     category: "Appointments",
@@ -1110,6 +1128,7 @@ export const REPORTS: ReportDef[] = [
   // 21 ────────────────────────────────────────────────────────────────────────
   {
     id: "end-to-end",
+    keywords: ["containment","deflection","minutes saved","self serve","resolution"],
     title: "Handled without your team",
     question: "How many calls did the AI finish on its own — and how much phone time did that save?",
     category: "Team",
@@ -1187,6 +1206,7 @@ export const REPORTS: ReportDef[] = [
   // 23 ────────────────────────────────────────────────────────────────────────
   {
     id: "demand-vs-stock",
+    keywords: ["inventory","stock","supply","order","allocation"],
     depts: ["sales"],
     title: "Demand vs what's on the lot",
     question: "Are we stocked for what customers are actually asking us about?",
@@ -1255,6 +1275,7 @@ export const REPORTS: ReportDef[] = [
   // 24 ────────────────────────────────────────────────────────────────────────
   {
     id: "contact-effort",
+    keywords: ["dials","attempts","cadence","pressure","call frequency"],
     title: "How hard we chase a lead",
     question: "How many calls does it take to reach someone — and are we calling anyone too often?",
     category: "Outbound",
@@ -1305,6 +1326,7 @@ export const REPORTS: ReportDef[] = [
   // 24 ─── SERVICE ────────────────────────────────────────────────────────────
   {
     id: "service-bookings",
+    keywords: ["service appointment","book","scheduler","ro","repair order"],
     title: "Service appointments the AI booked",
     question: "How much of the service schedule is the AI filling on its own?",
     category: "Service drive",
@@ -1362,6 +1384,7 @@ export const REPORTS: ReportDef[] = [
   // 25 ────────────────────────────────────────────────────────────────────────
   {
     id: "service-friction",
+    keywords: ["errors","failures","broken","scheduler","friction"],
     title: "Where the desk is letting customers down",
     question: "Which service requests are failing when a customer tries to self-serve?",
     category: "Service drive",
@@ -1418,6 +1441,7 @@ export const REPORTS: ReportDef[] = [
   // 26 ────────────────────────────────────────────────────────────────────────
   {
     id: "service-transport",
+    keywords: ["loaner","shuttle","courtesy car","ride","transportation"],
     title: "Loaner and shuttle demand",
     question: "How many service customers need a ride, and are we set up for it?",
     category: "Service drive",
@@ -1460,6 +1484,7 @@ export const REPORTS: ReportDef[] = [
   // 27 ────────────────────────────────────────────────────────────────────────
   {
     id: "service-recall",
+    keywords: ["recall","warranty","campaign","eligibility"],
     title: "Recall and warranty checks",
     question: "How much open recall and warranty work are we finding on the phone?",
     category: "Service drive",
@@ -1580,3 +1605,219 @@ export function MoreReports({ agentId, onOpenLibrary, max = 6 }: { agentId: stri
     </Card>
   );
 }
+
+// ───────────────────────── export ─────────────────────────
+
+/* ONE report → the sheets behind it, for XLSX/CSV download.
+ *
+ * Deliberately a single switch rather than a `sheets()` on each definition: the export is the part most
+ * likely to silently rot (a report changes, its export doesn't), and having every one in a single file
+ * makes a missing or stale case obvious at a glance. A report with no case falls through to its headline
+ * numbers rather than downloading an empty workbook.
+ *
+ * Every sheet's first row is its header row, per ExportSheet. */
+export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
+  const meta: ExportSheet = {
+    name: "About",
+    rows: [
+      ["Report", report.title],
+      ["Question", report.question],
+      ["Period", c.periodLabel],
+      ["Source", report.source],
+      ["Generated", new Date().toISOString().slice(0, 16).replace("T", " ")],
+    ],
+  };
+  const sheets: ExportSheet[] = [];
+
+  switch (report.id) {
+    case "appointments":
+      sheets.push({ name: "Summary", rows: [["Measure", "Value"],
+        ["Booked by the AI", c.fleet.appointments], ["Also booked after an AI touch", c.fleet.appointmentsAssisted],
+        ["Qualified leads", c.fleet.qualified]] });
+      sheets.push({ name: "By agent", rows: [["Agent", "Direction", "Appointments"],
+        ...salesAgents(c).map((a) => [a.report.summary.person || a.name, a.dir, a.metrics.appointments])] });
+      sheets.push({ name: "Appointments", rows: [["Customer", "Vehicle", "When", "Booked at"],
+        ...c.namedAppts.map((m) => [m.customer, m.vehicle ?? "", m.when ?? "", m.bookedAt ?? ""])] });
+      break;
+
+    case "speed-to-lead": {
+      const stl = inboundAgent(c)?.report.speedToLead;
+      if (stl) sheets.push({ name: "Speed to lead", rows: [["Measure", "Value"],
+        ["Average first touch", stl.avg], ["Within 5 minutes %", stl.pctWithin5],
+        ["New CRM leads", stl.crmLeadsNew], ["Touched instantly", stl.instantlyTouched],
+        ["Booked from instant touch", stl.instantAppts], ["Instant booking rate %", stl.instantApptRate],
+        ["Caught after hours", stl.afterHoursInstant], ["Missed calls returned", stl.missedCalledBack],
+        ["Leads touched %", stl.pctTouched]] });
+      break;
+    }
+
+    case "lead-sources":
+      sheets.push({ name: "By source", rows: [["Source", "Total leads", "Engaged", "Appointments", "Booking rate %"],
+        ...(inboundAgent(c)?.report.leadsBySource ?? []).map((r) => [r.source, r.total, r.interacted, r.appts, pct(r.appts, r.total)])] });
+      break;
+
+    case "what-customers-wanted":
+      for (const dir of ["inbound", "outbound"] as EvalDirection[]) {
+        const o = c.outcomes[dir];
+        if (!o?.scored) continue;
+        sheets.push({ name: `${dir} flow`, rows: [["Call type", "What they wanted", "Calls", ...OUTCOME_KEYS],
+          ...o.groups.flatMap((g) => [
+            [g.label, "(all)", g.total, ...OUTCOME_KEYS.map((k) => g.outcomes[k] ?? 0)],
+            ...g.primaries.map((p) => [g.label, p.label, p.total, ...OUTCOME_KEYS.map((k) => p.outcomes[k] ?? 0)]),
+          ]),
+          ["Never connected", "", o.ghost, ...OUTCOME_KEYS.map(() => 0)]] });
+      }
+      break;
+
+    case "appointment-leak": {
+      const o = (["inbound", "outbound"] as EvalDirection[]).map((d) => c.outcomes[d]).filter(Boolean).sort((a, b) => b!.funnelBase - a!.funnelBase)[0];
+      const f = o?.funnels.find((x) => x.key === "Appointment");
+      if (f) sheets.push({ name: "Appointment funnel", rows: [["Step", "Conversations"], ...f.steps.map((s) => [s.label, s.count])] });
+      break;
+    }
+
+    case "handoffs":
+      sheets.push({ name: "Hand-offs", rows: [["Measure", "Value"],
+        ["Hand-offs to team", c.fleet.handoffs], ["Transfers completed", c.fleet.transfers],
+        ["Transfers failed", c.fleet.transfersFailed], ["Call-backs requested", c.fleet.callbacks]] });
+      if (c.metrics?.calls_by_reason?.length)
+        sheets.push({ name: "Why people called", rows: [["Reason", "Calls", "Booked"],
+          ...c.metrics.calls_by_reason.map((r) => [r.reason, r.calls, r.booked])] });
+      break;
+
+    case "missed-opportunities":
+      sheets.push({ name: "Leads to work", rows: [["Customer", "Tier", "What they want", "Phone", "Campaign", "Last activity"],
+        ...c.warmLeads.map((w) => [w.customer, w.tier, w.interest, w.phone, w.campaign, w.lastActivity ?? ""])] });
+      if (c.metrics?.missed?.length)
+        sheets.push({ name: "Demand that slipped", rows: [["Category", "Channel", "Count"],
+          ...c.metrics.missed.map((m) => [m.category, m.channel, m.count])] });
+      break;
+
+    case "follow-ups": {
+      const s = c.actionStats;
+      if (s) sheets.push({ name: "Summary", rows: [["Measure", "Value"],
+        ["Created", s.created], ["Closed", s.completed], ["Open", s.open], ["Overdue", s.overdue], ["Due today", s.dueToday]] });
+      sheets.push({ name: "Open items", rows: [["Customer", "What's needed", "Due", "Assigned to"],
+        ...c.actionItems.map((i) => [i.customer ?? i.leadId ?? "", i.description || i.intent, i.dueAt ?? "", i.assignedTo ?? ""])] });
+      break;
+    }
+
+    case "after-hours": {
+      const ib = inboundAgent(c);
+      sheets.push({ name: "After hours", rows: [["Measure", "Value"],
+        ["Handled after hours", c.fleet.afterHours], ["All conversations", c.fleet.conversations]] });
+      if (ib) sheets.push({ name: "By hour", rows: [["Hour", "Activity"], ...ib.hourly.map((v, i) => [HOURS[i] ?? String(i), v])] });
+      break;
+    }
+
+    case "outbound-campaigns": {
+      const ob = outboundAgent(c);
+      sheets.push({ name: "Campaigns", rows: [["Campaign", "Enrolled", "Appointments", "Rate %", "Warm leads", "Opt-outs"],
+        ...(ob?.report.activeCampaigns ?? []).map((k) => [k.name, k.enrolled, k.appts, k.apptRate, k.warmLeads, k.optOuts])] });
+      if (ob?.report.outcomes?.length)
+        sheets.push({ name: "Outcomes", rows: [["Outcome", "Leads"], ...ob.report.outcomes.map((o) => [o.label, o.value])] });
+      break;
+    }
+
+    case "agent-scorecard":
+      sheets.push({ name: "Agents", rows: [["Agent", "Direction", "Leads", "Conversations", "Qualified", "Appointments", "Talk minutes"],
+        ...salesAgents(c).map((a) => [a.report.summary.person || a.name, a.dir,
+          a.leadFunnel?.contacted ?? a.report.leadsAttempted, a.metrics.conversations, a.metrics.qualified,
+          a.metrics.appointments, a.metrics.talkMinutes])] });
+      break;
+
+    case "activity-trend":
+      sheets.push({ name: "Day by day", rows: [["Agent", "Day", "Value"],
+        ...salesAgents(c).flatMap((a) => a.trend7.map((v, i) => [a.report.summary.person || a.name, WEEKDAYS[i] ?? String(i), v]))] });
+      break;
+
+    case "sold": {
+      const t = c.insights?.soldTotals;
+      if (t) sheets.push({ name: "Summary", rows: [["Measure", "Leads"],
+        ["Worked by the AI", t.touched], ["Now sold", t.sold], ["Still active", t.active], ["Closed out", t.lost]] });
+      sheets.push({ name: "By CRM status", rows: [["Status", "Leads"], ...(c.insights?.sold ?? []).map((r) => [r.label, r.leads])] });
+      break;
+    }
+
+    case "vehicles":
+      sheets.push({ name: "Vehicles wanted", rows: [["Make", "Model", "Interested leads", "New", "Used", "Years"],
+        ...(c.insights?.vehicles ?? []).map((v) => [v.make, v.model, v.leads, v.newCount, v.usedCount, v.years])] });
+      break;
+
+    case "transfer-routing":
+      sheets.push({ name: "Transfer routing", rows: [["Department", "Destination type", "Transfers"],
+        ...(c.insights?.routing ?? []).map((r) => [r.department, r.destinationType, r.transfers])] });
+      break;
+
+    case "texts": {
+      const s = c.insights?.sms;
+      if (s) sheets.push({ name: "Texts", rows: [["Measure", "Value"],
+        ["Conversations", s.threads], ["Replied", s.repliedThreads], ["Messages sent", s.outbound], ["Messages received", s.inbound]] });
+      break;
+    }
+
+    case "coverage":
+      sheets.push({ name: "Calls by hour", rows: [["Weekday", "Hour", "Calls"],
+        ...(c.insights?.hours ?? []).map((h) => [WEEKDAYS[h.weekday - 1] ?? String(h.weekday), hourLabel(h.hour), h.calls])] });
+      break;
+
+    case "objections":
+      sheets.push({ name: "Reasons", rows: [["Reason", "Count"], ...objectionRows(c).rows.map((r) => [r.label, r.count])] });
+      break;
+
+    case "appt-status": {
+      const t = apptTotals(c);
+      sheets.push({ name: "Summary", rows: [["Measure", "Appointments"],
+        ["Booked", t.booked], ["Showed", t.showed], ["No-show", t.no_show], ["Cancelled", t.cancelled], ["Upcoming", t.upcoming]] });
+      sheets.push({ name: "By channel", rows: [["Booked via", "Booked", "Showed", "No-show"],
+        ...(c.metrics?.appt_status ?? []).map((r) => [r.booked_via ?? "", r.booked, r.showed, r.no_show])] });
+      break;
+    }
+
+    case "best-calls":
+      sheets.push({ name: "Best calls", rows: [["What happened", "Direction", "When"],
+        ...(c.metrics?.highlights ?? []).map((h) => [h.title ?? "", h.direction ?? "", h.occurred_on ?? ""])] });
+      break;
+
+    case "end-to-end": {
+      const h = handlingTotals(c);
+      if (h) sheets.push({ name: "Handling", rows: [["Measure", "Value"],
+        ["Connected calls", h.connected], ["Handled end to end", h.solo], ["Needed a person", h.transferred],
+        ["Transfer didn't connect", h.transferFailed], ["Never connected", h.unreached], ["Minutes saved", h.minutesSaved]] });
+      const r = resolutionSplit(c);
+      if (r) sheets.push({ name: "Question resolution", rows: [["Question", "Times asked", "Answered"],
+        ...r.rows.map((x) => [x.intent, x.raised, x.resolved])] });
+      break;
+    }
+
+    case "demand-vs-stock":
+      sheets.push({ name: "Demand vs stock", rows: [["Make", "Model", "Interested leads", "In stock", "Leads per unit"],
+        ...demandVsStock(c).map((r) => [r.make, r.model, r.leads, r.units, r.units ? +(r.leads / r.units).toFixed(2) : ""])] });
+      break;
+
+    case "contact-effort":
+      sheets.push({ name: "Dials per lead", rows: [["Calls placed to the lead", "Leads"],
+        ...(c.insights?.effort ?? []).map((e) => [e.attempts, e.leads])] });
+      break;
+
+    case "service-bookings":
+    case "service-transport":
+    case "service-recall":
+    case "service-friction":
+      sheets.push({ name: "Service desk", rows: [["What the customer wanted", "Succeeded", "Failed", "Failure rate %"],
+        ...svcRows(c).map((t) => [svcLabel(t.tool), t.ok, t.failed, pct(t.failed, t.ok + t.failed)])] });
+      break;
+  }
+
+  // Never hand back an empty workbook — the headline numbers are always better than nothing.
+  if (!sheets.length) {
+    sheets.push({ name: "Summary", rows: [["Measure", "Value"],
+      ["Conversations", c.fleet.conversations], ["Qualified leads", c.fleet.qualified],
+      ["Appointments", c.fleet.appointments], ["Hand-offs", c.fleet.handoffs]] });
+  }
+  return [meta, ...sheets];
+}
+
+/** Outcome columns, in the canonical rung order, for the flow export. */
+const OUTCOME_KEYS = ["Appointment", "Transfer", "Callback", "Query Resolved", "Qualified Lead", "None"];
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
