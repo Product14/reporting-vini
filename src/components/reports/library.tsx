@@ -1303,9 +1303,10 @@ export function reportsForAgent(agentId: string): ReportDef[] {
 }
 
 /** Deep link into one library report, carrying the rooftop + window already on screen. */
-export function libraryHref(reportId: string, navQuery: string): string {
+export function libraryHref(reportId: string, navQuery: string, fromAgent?: string): string {
   const sep = navQuery ? (navQuery.startsWith("?") ? "&" : "?") : "?";
-  return `/reports/library${navQuery}${sep}report=${encodeURIComponent(reportId)}`;
+  const from = fromAgent ? `&from=agent&agent=${encodeURIComponent(fromAgent)}` : "";
+  return `/reports/library${navQuery}${sep}report=${encodeURIComponent(reportId)}${from}`;
 }
 
 /* The strip itself. Six is deliberate: enough to feel like a library, few enough to scan without
@@ -1327,7 +1328,7 @@ export function MoreReports({ agentId, navQuery, max = 6 }: { agentId: string; n
         {picks.map((r) => (
           <a
             key={r.id}
-            href={libraryHref(r.id, navQuery)}
+            href={libraryHref(r.id, navQuery, agentId)}
             className="flex h-full flex-col gap-1 rounded-xl border border-[#e5e7eb] bg-white px-4 py-3 transition-shadow hover:border-[#d6c9f5] hover:shadow-md"
           >
             <span className="text-[10px] font-bold uppercase tracking-wide text-[#c3b5e8]">{r.category}</span>

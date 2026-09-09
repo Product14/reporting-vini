@@ -150,6 +150,12 @@ function LibraryView() {
   const live = useMemo(() => (ready ? availableReports(ctx) : []), [ready, ctx]);
   const liveIds = useMemo(() => new Set(live.map((r) => r.id)), [live]);
   const open = openId ? REPORTS.find((r) => r.id === openId) ?? null : null;
+  /* The By-agent strip links in with ?from=agent&agent=<id>; that's what lets a report offer a way back
+   * to the agent report instead of dumping the reader in the gallery they never came from. */
+  const fromAgent = params.get("from") === "agent" ? params.get("agent") : null;
+  const backToAgent = fromAgent
+    ? { href: `/reports/agents${navQuery}${navQuery ? "&" : "?"}agent=${encodeURIComponent(fromAgent)}`, label: "Back to agent report" }
+    : null;
 
   const openReport = (r: ReportDef) => {
     track("library_report_opened", { team_id: teamId, report: r.id });
@@ -173,7 +179,16 @@ function LibraryView() {
           {!teamId ? (
             <Card title="No rooftop selected"><p className="text-[12.5px] text-[#6b7280]">Open this page from the console so it knows which store to report on.</p></Card>
           ) : open ? (
-            <ReportPane report={open} ctx={ctx} onBack={() => setOpenId(null)} enabled={liveIds.has(open.id)} loading={!ready || insightsLoading} />
+            <ReportPane
+              report={open}
+              ctx={ctx}
+              onBack={() => setOpenId(null)}
+              enabled={liveIds.has(open.id)}
+              loading={!ready || insightsLoading}
+              siblings={live}
+              onOpen={openReport}
+              backToAgent={backToAgent}
+            />
           ) : (
             <Gallery ctx={ctx} live={liveIds} ready={ready} onOpen={openReport} accountName={account?.name ?? ""} />
           )}
@@ -264,7 +279,16 @@ function Gallery({ ctx, live, ready, onOpen, accountName }: { ctx: ReportCtx; li
 }
 
 /** One opened report: header with the question and its source, then the report itself. */
-function ReportPane({ report, ctx, onBack, enabled, loading }: { report: ReportDef; ctx: ReportCtx; onBack: () => void; enabled: boolean; loading?: boolean }) {
+function ReportPane({
+  report, ctx, onBack, enabled, loading, siblings, onOpen, backToAgent,
+}: {
+  report: ReportDef; ctx: ReportCtx; onBack: () => void; enabled: boolean; loading?: boolean;
+  /* Reports with live data for this window, in catalog order — drives the switcher and prev/next. */
+  siblings: ReportDef[];
+  onOpen: (r: ReportDef) => void;
+  /* Set when the reader arrived from a By-agent report, so the way back is the agent, not the gallery. */
+  backToAgent?: { href: string; label: string } | null;
+}) {
   // A takeaway that throws (odd feed shape) must not take the report down with it.
   let takeaway: string | null = null;
   try {
@@ -275,16 +299,27 @@ function ReportPane({ report, ctx, onBack, enabled, loading }: { report: ReportD
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <button type="button" onClick={onBack} className="no-print mb-2 text-[11.5px] font-semibold text-[#813fed] hover:underline">
-            ← All reports
-          </button>
+        <div className="min-w-0">
+          <div className="no-print mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+            {/* Two ways back, because there are two ways in: the gallery, and an agent report. */}
+            {backToAgent && (
+              <a href={backToAgent.href} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">
+                ← {backToAgent.label}
+              </a>
+            )}
+            <button type="button" onClick={onBack} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">
+              {backToAgent ? "All reports" : "← All reports"}
+            </button>
+          </div>
           <h1 className="text-[20px] font-extrabold leading-tight text-[#111]">{report.title}</h1>
           <p className="mt-0.5 text-[12.5px] text-[#6b7280]">{report.question}</p>
         </div>
-        <div className="text-right">
-          <p className="text-[11px] font-semibold text-[#374151]">{ctx.periodLabel}</p>
-          <p className="text-[10.5px] text-[#9ca3af]">{report.source}</p>
+        <div className="flex flex-col items-end gap-2">
+          <ReportSwitcher current={report} siblings={siblings} onOpen={onOpen} />
+          <div className="text-right">
+            <p className="text-[11px] font-semibold text-[#374151]">{ctx.periodLabel}</p>
+            <p className="text-[10.5px] text-[#9ca3af]">{report.source}</p>
+          </div>
         </div>
       </div>
 
@@ -310,6 +345,8 @@ function ReportPane({ report, ctx, onBack, enabled, loading }: { report: ReportD
           </p>
         </Card>
       )}
+
+      <PrevNext current={report} siblings={siblings} onOpen={onOpen} />
 
       <p className="text-[10.5px] text-[#9ca3af]">
         {fmtInt(ctx.fleet.conversations)} conversations in this period · source: {report.source}
@@ -424,5 +461,66 @@ function RequestForm({ ctx, accountName }: { ctx: ReportCtx; accountName: string
         </form>
       )}
     </div>
+  );
+}
+
+/* Jump straight to another report without going back to the gallery. A native <select> on purpose:
+ * it is keyboard- and screen-reader-correct for free, it works on a phone, and 20-odd reports in a
+ * hand-rolled menu is a scroll trap. Only reports with live data for this window are listed — offering
+ * a jump to an empty report is the same trap the gallery already avoids by dimming. */
+function ReportSwitcher({ current, siblings, onOpen }: { current: ReportDef; siblings: ReportDef[]; onOpen: (r: ReportDef) => void }) {
+  if (siblings.length < 2) return null;
+  const byCategory = siblings.reduce<Record<string, ReportDef[]>>((acc, r) => {
+    (acc[r.category] ??= []).push(r);
+    return acc;
+  }, {});
+  return (
+    <label className="no-print flex items-center gap-2">
+      <span className="text-[10.5px] font-semibold text-[#9ca3af]">Jump to</span>
+      <select
+        value={current.id}
+        onChange={(e) => {
+          const next = siblings.find((r) => r.id === e.target.value);
+          if (next) onOpen(next);
+        }}
+        className="max-w-[260px] rounded-lg border border-[#e5e7eb] bg-white px-2.5 py-1.5 text-[12px] font-semibold text-[#374151]"
+      >
+        {Object.entries(byCategory).map(([cat, rs]) => (
+          <optgroup key={cat} label={cat}>
+            {rs.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}
+          </optgroup>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/* Read-one-then-the-next. The switcher covers "I know where I'm going"; this covers browsing, which is
+ * how someone meets a library they haven't seen before. */
+function PrevNext({ current, siblings, onOpen }: { current: ReportDef; siblings: ReportDef[]; onOpen: (r: ReportDef) => void }) {
+  const i = siblings.findIndex((r) => r.id === current.id);
+  if (i < 0 || siblings.length < 2) return null;
+  const prev = i > 0 ? siblings[i - 1] : null;
+  const next = i < siblings.length - 1 ? siblings[i + 1] : null;
+  return (
+    <div className="no-print flex flex-wrap gap-3 border-t border-[#f2f2f4] pt-4">
+      {prev ? <StepButton r={prev} dir="prev" onOpen={onOpen} /> : <span className="flex-1" />}
+      {next ? <StepButton r={next} dir="next" onOpen={onOpen} /> : <span className="flex-1" />}
+    </div>
+  );
+}
+
+/* Module scope, not defined inside PrevNext: a component created during render is a new type on every
+ * pass, so React remounts it each time and the compiler refuses to memoize the tree. */
+function StepButton({ r, dir, onOpen }: { r: ReportDef; dir: "prev" | "next"; onOpen: (r: ReportDef) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(r)}
+      className={`flex min-w-0 flex-1 flex-col gap-0.5 rounded-xl border border-[#e5e7eb] bg-white px-4 py-3 text-left transition-shadow hover:border-[#d6c9f5] hover:shadow-md ${dir === "next" ? "items-end text-right" : ""}`}
+    >
+      <span className="text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">{dir === "prev" ? "← Previous" : "Next →"}</span>
+      <span className="truncate text-[12.5px] font-bold text-[#111]">{r.title}</span>
+    </button>
   );
 }
