@@ -320,7 +320,7 @@ function LeadSourceTable({
               key={st.key}
               type="button"
               title={`${st.label} · ${fmtInt(row[st.key])} of ${fmtInt(base)} contacted · click to see them`}
-              onClick={(e) => { e.stopPropagation(); onDrill({ type, source, stage: st }); }}
+              onClick={() => onDrill({ type, source, stage: st })}
               className="h-full min-w-[3px] first:rounded-l-md last:rounded-r-md hover:opacity-80"
               style={{ width: `${(row[st.key] / base) * 100}%`, background: st.color }}
             />
@@ -357,17 +357,25 @@ function LeadSourceTable({
 
       {types.map((t) => (
         <div key={t.type} className="border-b border-[#f4f4f6] py-1 last:border-b-0">
-          <button type="button" onClick={() => setOpen((s) => ({ ...s, [t.type]: !s[t.type] }))} className={`${GRID} w-full rounded-lg px-1 py-2 text-left hover:bg-[#fafafa]`}>
-            <span className="flex min-w-0 items-center gap-2">
+          {/* A DIV holding its own toggle button — the Bar's segments are buttons, and a button inside a
+              button is invalid markup that React warns about and browsers silently un-nest, which was
+              swallowing the segment clicks this table exists for. Same shape as the conversation flow. */}
+          <div className={`${GRID} w-full rounded-lg px-1 py-2 hover:bg-[#fafafa]`}>
+            <button
+              type="button"
+              onClick={() => setOpen((s) => ({ ...s, [t.type]: !s[t.type] }))}
+              aria-expanded={!!open[t.type]}
+              className="flex min-w-0 items-center gap-2 text-left"
+            >
               <span className={`flex-none text-[9px] text-[#813fed] transition-transform ${open[t.type] ? "rotate-90" : ""}`}>▶</span>
               <span className="min-w-0">
                 <span className="block truncate text-[12.5px] font-bold text-[#111]">{t.type.replace(/_/g, " ")}</span>
                 <span className="text-[10.5px] tabular-nums text-[#9ca3af]">{fmtInt(engagedOf(t))} contacted · {pct(engagedOf(t), total)}% · {t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
               </span>
-            </span>
+            </button>
             <Bar row={t} type={t.type} />
             <span className="hidden sm:flex"><Winner row={t} /></span>
-          </button>
+          </div>
 
           {open[t.type] && (
             <div className="ml-3 border-l-2 border-[#ece9f6] pl-3">

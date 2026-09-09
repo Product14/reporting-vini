@@ -491,9 +491,19 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     a.report.followUps = myCallbacks.length
       ? myCallbacks.map((c) => ({ customer: c.customer, due: c.due, intent: c.intent, priority: c.priority }))
       : undefined;
-    // v3 named lists scoped to this agent: dept always; direction when the row carries one (assisted
-    // CRM rows have none → shown on both directions of the dept, matching their lead-level attribution).
-    const myAppts = namedApptItems.filter((n) => n.serviceType === dept && (n.assisted || !n.direction || n.direction === (inbound ? "inbound" : "outbound")));
+    /* v3 named lists scoped to this agent: dept always, plus direction.
+     *
+     * ★ AN AI-BOOKED ROW WITH NO DIRECTION IS LISTED FOR NEITHER AGENT (fixed 2026-09-09). It used to be
+     * listed for BOTH, which double-counted it across the two agents' sheets and put the list above the
+     * card it sits under: on team 9923577d07 the Service Inbound export listed 89 AI-booked records
+     * (87 inbound + 2 undirected) beside a card of 84, and the same 2 rows also appeared under Service
+     * Outbound — 94 + 16 rows drawn from a rooftop that only has 103. The per-agent card cannot count an
+     * appointment it cannot attribute, so the per-agent list must not either. They remain visible in the
+     * rooftop-wide views (Overview, the Appointments tab), which is where an unattributed booking belongs.
+     *
+     * ASSISTED rows still show on both directions of the dept: they carry no direction by nature (a CRM
+     * meeting has no call behind it) and are attributed lead-level, which is how the card counts them. */
+    const myAppts = namedApptItems.filter((n) => n.serviceType === dept && (n.assisted || n.direction === (inbound ? "inbound" : "outbound")));
     a.report.namedAppointments = myAppts.length
       ? myAppts.map(({ direction: _d, ...rest }) => rest) // eslint-disable-line @typescript-eslint/no-unused-vars
       : undefined;

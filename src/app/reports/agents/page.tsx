@@ -40,7 +40,7 @@ import { ExportMenu } from "@/components/reports/ExportMenu";
 import { useOutcomes, OutcomeKpis, CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
 import { MoreReports, LeadsByTypeCard } from "@/components/reports/library";
 import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
-import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
+import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, CANONICAL_DEFINITION_ROWS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
 
@@ -478,9 +478,15 @@ function AgentReportsView() {
         rows: [
           ["How to read this sheet"],
           ["Appointment records listed (AI-booked)", aiBooked.length],
-          ["Headline on the report card (leads with an AI-booked appointment)", scale(m.appointments)],
+          ["Headline on the report card (AI-booked)", scale(m.appointments)],
           ...(aiAssisted > 0 ? [["Appointment records listed (AI-assisted CRM, secondary)", aiAssisted]] : []),
-          ["Why they can differ", "The card counts leads, this sheet lists appointment records, and one lead can hold more than one. Some bookings are also filed against a different lead record than the call they came from, so the two sides credit the same appointment to a different lead. No appointment is counted twice in either number."],
+          /* Both sides count APPOINTMENT RECORDS for this agent, so they should read the same. The old
+             note here said the card counted LEADS and this sheet counted records — true until the card
+             was switched to records, after which it explained a difference that no longer had that
+             cause and hid one that did. */
+          ...(aiBooked.length === scale(m.appointments)
+            ? [["These agree", "Both count AI-booked appointment records for this agent over the same period."]]
+            : [["Why they differ", "The card is read live from the appointments service; this list is built from the reporting aggregate, which the sync rebuilds every so often. A booking made since the last rebuild appears in one before the other. Neither counts an appointment twice."]]),
           [],
           ["Customer", "Phone", "Channel", "Vehicle", "When", "Booked at", "Status", "How", "AI-assisted (CRM)", "Service type"],
           ...r.namedAppointments.map((ap) => [
@@ -525,7 +531,8 @@ function AgentReportsView() {
       });
     }
 
-    sheets.push({ name: "Definitions", rows: [[CANONICAL_DEFINITIONS]] });
+    // One definition per row — a single cell holding the whole paragraph read as an empty sheet in Excel.
+    sheets.push({ name: "Definitions", rows: [["Term", "What it means"], ...CANONICAL_DEFINITION_ROWS] });
     return sheets;
   };
 

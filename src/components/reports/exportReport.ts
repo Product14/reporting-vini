@@ -22,6 +22,23 @@ export interface PdfSection {
 
 // The same glossary shown on-screen (DefinitionsFooter in kitV3.tsx) — verbatim, so a dealer reading the
 // downloaded file without the live report open still gets the exact same definitions.
+/* The same definitions as ROWS, for the spreadsheet exports.
+ *
+ * The Definitions sheet used to be the prose block below dropped into a single cell. Excel renders that
+ * as an apparently EMPTY sheet — one cell, no wrap, a 900-character paragraph clipped at the column
+ * edge — so the one sheet whose whole job is explaining the numbers looked broken. A spreadsheet should
+ * be rows. The prose version stays for the PDF, where a paragraph is the right shape. */
+export const CANONICAL_DEFINITION_ROWS: [string, string][] = [
+  ["Real conversation", "The customer actually spoke on a non-voicemail call, or replied to a text. Voicemail is excluded."],
+  ["Qualified", "Concrete buying intent — vehicle, availability, price, financing, trade-in, test-drive or booking. Same rule for calls and texts. A bare reply counts as Engaged, not Qualified."],
+  ["Appointments — AI-booked", "The AI created the meeting record. This is the headline appointment number."],
+  ["AI-assisted (CRM)", "Booked in your CRM on a lead the AI worked. Reported separately and never folded into the AI-booked total."],
+  ["Hand-offs", "Completed transfers plus requested callbacks. Failed transfers are reported separately."],
+  ["Turn rate", "Qualified leads ÷ real conversations."],
+  ["Close rate", "AI-booked appointments ÷ qualified leads."],
+  ["Consistency", "All figures are de-duplicated and consistent with the live report, the Vini console, and your scorecard and email reports."],
+];
+
 export const CANONICAL_DEFINITIONS =
   "Real conversation = the customer actually spoke on a non-voicemail call, or replied to a text " +
   "(voicemail excluded). Qualified = concrete buying intent (vehicle / availability / price / financing " +
