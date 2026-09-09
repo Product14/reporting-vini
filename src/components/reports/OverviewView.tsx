@@ -207,7 +207,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, feed?.appointmentsUnattributed), [agents, feed]);
 
   const hasTeam = teamId !== "" || sampleMode;
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the

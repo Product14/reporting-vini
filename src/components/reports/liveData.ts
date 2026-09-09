@@ -180,6 +180,8 @@ export interface FetchResult {
   // v3 named lists (rooftop-wide; the per-agent scoped copies live on agent.report). Absent on the
   // mock/degraded path — sections omit. LIVE-ONLY, never fabricated.
   namedAppointments?: NamedAppt[];
+  /** AI-booked bookings that belong to no agent (no direction resolvable) — see aggregateFleet. */
+  appointmentsUnattributed?: number;
   /* When the AGGREGATE was last rebuilt (sync_state.last_run_at), NOT when this client fetched. The
    * header's "Synced …" line reads this: fetchedAt says how fresh the REQUEST is, which is always
    * "just now" and told dealers the numbers were current when the ETL was hours behind. */
@@ -255,7 +257,7 @@ export interface FleetLive {
   bySplit: { inbound: FleetSplit; outbound: FleetSplit };
 }
 
-export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>): FleetLive {
+export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>, unattributedAppointments = 0): FleetLive {
   const sum = (f: (a: AgentData) => number) => agents.reduce((s, a) => s + f(a), 0);
   const calls = sum((a) => a.metrics.calls);
   const connectedCalls = sum((a) => a.metrics.conversations); // connected CALLS — the answer-rate basis
@@ -283,7 +285,11 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     agents.reduce((s, a) => s + (a.leadFunnel ? pick(a.leadFunnel) : 0), 0);
   const conversations = hasLeadFunnel ? lf((f) => f.connected) : connectedCalls; // unique connected leads
   const qualified = hasLeadFunnel ? lf((f) => f.qualified) : sum((a) => a.metrics.qualified); // unique qualified leads
-  const appointments = sum((a) => a.metrics.appointments); // already lead-based (build sets metrics.appointments = apptLeads)
+  /* Rooftop AI-booked = every agent's, PLUS the bookings no agent owns. A meeting with no call, chat or
+   * conversation behind it cannot be attributed to a direction, so it appears on no agent card — but it
+   * is a real appointment and it IS in the rooftop list, so leaving it out of the rooftop number would
+   * put that tile under its own list. Zero on nearly every rooftop; 2 of 103 on team 9923577d07. */
+  const appointments = sum((a) => a.metrics.appointments) + unattributedAppointments;
   const appointmentsAssisted = sum((a) => a.metrics.appointmentsAssisted ?? 0);
   // Hand-offs: transfers are lead-level (build prefers report_lead_counts), callbacks call-level daily
   // sums — both windowed. Failed transfers tracked separately, never added into transfers/handoffs.
@@ -471,6 +477,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
         timezone: j.timezone ?? null,
         namedAppointments: Array.isArray(j.namedAppointments) ? (j.namedAppointments as NamedAppt[]) : undefined,
         syncedAt: typeof j.syncedAt === "string" ? j.syncedAt : null,
+        appointmentsUnattributed: typeof j.appointmentsUnattributed === "number" ? j.appointmentsUnattributed : 0,
         warmLeads: Array.isArray(j.warmLeads) ? (j.warmLeads as WarmLeadItem[]) : undefined,
       };
       CACHE.set(cacheKey, result); // cache ONLY a clean response

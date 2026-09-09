@@ -55,7 +55,7 @@ function AppointmentsView() {
     const all = agentsForAccount(feed?.agents ?? [], account);
     return dept === "all" ? all : all.filter((a) => a.dept.toLowerCase() === dept);
   }, [feed, account, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, feed?.appointmentsUnattributed), [agents, feed]);
   const appts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
   const filtered = useMemo<NamedAppt[]>(
     () => appts.filter((a) => (filter === "all" ? true : filter === "assisted" ? a.assisted : !a.assisted)),

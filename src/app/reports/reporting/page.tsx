@@ -78,7 +78,7 @@ function ReportingView() {
   // Scope to the rooftop's agents, then to the selected department (the shared header switcher).
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior), [agents, feed]);
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, feed?.appointmentsUnattributed), [agents, feed]);
   const split = fleet.bySplit;
   const namedAppts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
 

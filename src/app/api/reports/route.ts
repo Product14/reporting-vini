@@ -426,25 +426,44 @@ export async function GET(request: Request): Promise<Response> {
    * read "Synced just now" beside 1 appointment while the appointments console, reading the live API,
    * showed 3 — the two missing ones were booked AFTER the last sync finished. Telling a dealer a number
    * is current when it is hours behind is how a sync lag gets mistaken for a bug. */
-  /* Per-agent AI-booked counts from the same live set, for the CURRENT and the PRIOR window, so the
-   * period delta compares two live numbers. Only `appointments` moves — assisted, qualified and every
-   * other metric still come from the aggregate, so a rate built on both (close rate = AI-booked ÷
-   * qualified) now divides a live numerator by an aggregate denominator. That is the honest trade: the
-   * numerator dealers check against another Spyne screen is right, and the denominator is no more stale
-   * than it was before. `appointmentsLive` says which is which; the UI labels the tile accordingly. */
-  if (liveAppts) {
-    const cur = countByAgent(liveAppts, start, end).byAgent;
-    const pri = countByAgent(liveAppts, prior.start, prior.end).byAgent;
-    for (const agent of result.agents) {
-      const type = AGENT_TYPE_BY_ID[agent.id];
-      if (!type) continue;
-      agent.metrics.appointments = cur[type] ?? 0;
-      const basis = result.prior?.[agent.id];
-      if (basis && typeof basis.appointments === "number") basis.appointments = pri[type] ?? 0;
+  /* ── ONE SOURCE FOR THE APPOINTMENT NUMBER ──
+   * The per-agent AI-booked count is derived from the SAME rows the list shows — always, not only when
+   * the live fetch succeeded. This is what stops the card and its own drill-down disagreeing.
+   *
+   * It used to come from agent_daily, i.e. the spine, which counts a meeting only once it attaches to a
+   * conversation belonging to a lead that exists. That drops 5.2% of AI-booked meetings fleet-wide and
+   * put the card under its own export: team 9923577d07 Service Inbound read 84 beside a sheet listing
+   * 87. `windowedAppointments` is the meetings API when we have a credential and the meetings-table
+   * snapshot when we don't, and both are a direct read of the booking records — neither needs a
+   * conversation to exist. Whichever it is, the number and the list are now the same rows counted once.
+   *
+   * The prior window uses live rows when we have them and otherwise leaves the aggregate's basis alone —
+   * the snapshot only covers the current window, so recomputing it from these rows would read zero. */
+  const curByAgent: Record<string, number> = {};
+  let appointmentsUnattributed = 0;
+  for (const a of windowedAppointments) {
+    if (a.assisted) continue;
+    const svc = (a.service_type || "").toLowerCase();
+    const dir = (a.direction || "").toLowerCase();
+    if ((svc !== "sales" && svc !== "service") || (dir !== "inbound" && dir !== "outbound")) {
+      // Real bookings with no call, chat or conversation behind them — no agent owns them. Counted at
+      // rooftop level (see appointmentsUnattributed) and listed there, never guessed onto an agent.
+      appointmentsUnattributed++;
+      continue;
     }
+    const type = `${svc === "sales" ? "Sales" : "Service"} ${dir === "inbound" ? "Inbound" : "Outbound"}`;
+    curByAgent[type] = (curByAgent[type] ?? 0) + 1;
+  }
+  const priByAgent = liveAppts ? countByAgent(liveAppts, prior.start, prior.end).byAgent : null;
+  for (const agent of result.agents) {
+    const type = AGENT_TYPE_BY_ID[agent.id];
+    if (!type) continue;
+    agent.metrics.appointments = curByAgent[type] ?? 0;
+    const basis = result.prior?.[agent.id];
+    if (priByAgent && basis && typeof basis.appointments === "number") basis.appointments = priByAgent[type] ?? 0;
   }
 
-  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, everLive: everLiveResolved }, {
+  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, everLive: everLiveResolved }, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

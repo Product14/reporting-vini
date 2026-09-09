@@ -175,11 +175,16 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
         customer: a.customer_name?.trim() || "—",
         phone: a.phone ?? "",
         channel: (a.assisted ? null : a.direction === "inbound" ? "Inbound" : a.direction === "outbound" ? "Outbound" : null) as NamedAppt["channel"],
+        /* "on call" only when we KNOW it was a call. It used to be the fallback for an unknown channel,
+           which labelled bookings that have no call, chat or conversation at all as "AI-booked, on
+           call" — team 9923577d07 had two. Unknown now says just "AI-booked" rather than asserting a
+           channel we cannot show. */
         how: a.assisted
           ? "AI-assisted → CRM"
           : a.booked_via === "sms" ? "AI-booked, via SMS"
             : a.booked_via === "chat" ? "AI-booked, in web chat"
-              : "AI-booked, on call",
+              : a.booked_via === "call" ? "AI-booked, on call"
+                : "AI-booked",
         vehicle: fmtVehicle(a.vehicle),
         when: a.meeting_start ?? null,
         bookedAt: a.booked_at ?? null,
