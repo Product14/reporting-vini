@@ -498,18 +498,19 @@ meet AS (
       AND m.service_type IN ('sales','service')
       AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
       AND toDate(m.created_at) >= ${startFloor}
-      -- ★ THE LEAD MUST ACTUALLY EXIST (added 2026-09-09). The spine's lead_canonical JOINs
-      -- dealer_leads.leads, so a meeting booked against a lead_id with NO leads row can never reach the
-      -- report card; this query joined no leads table, so it listed them. That was the last remaining
-      -- reason the CSV and the card could not be tied: Honda of Downtown Los Angeles, trailing 30d, had
-      -- exactly 2 such leads (lead_acbd1cd2…, lead_ebd0a71b… — conversations exist, leads rows do not).
-      -- Same service_type screen as lead_canonical so the two sides gate identically.
-      AND m.lead_id IN (
-          SELECT l.lead_id FROM dealer_leads.leads AS l FINAL
-          WHERE l.is_deleted = 0 AND l.__deleted = 0
-            AND l.service_type IN ('sales','service')
-            ${teamPred("l.team_id", teamId)}
-      )
+      /* ★ NO LEAD-EXISTENCE GATE (removed 2026-09-09, same day it was added).
+       * It was added to tie this list to the report card by DROPPING rows the card's spine could not
+       * reach — a meeting whose lead_id has no dealer_leads.leads row. But the meetings API is the
+       * system of record for appointments, and those rows are real bookings: on Honda Universe
+       * (team 5895de05b) the four it removed are named customers with phone numbers, assigned advisors
+       * and service codes (RECALL, TBS) — one already COMPLETED, one a no-show. Fleet-wide the gate hid
+       * 1,146 of 24,389 AI-booked meetings (4.7%) across 70 rooftops.
+       *
+       * Whether a dealer_leads.leads row exists is internal plumbing; the dealer booked the appointment either way,
+       * and a dealer comparing this console to the appointments console must see the same number. With
+       * the gate gone this query returns exactly the API's set — verified id-for-id on 5895de05b, 326 =
+       * 326, no row on either side that the other lacks. Tying the list to the card by deleting real
+       * appointments was the wrong direction to reconcile in. */
       AND ed.is_test_account = 0 AND ${resellerScope("ed")}
       AND lower(ifNull(ed.name,'')) NOT LIKE '%test%'
       AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
