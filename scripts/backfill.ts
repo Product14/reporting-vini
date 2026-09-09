@@ -449,4 +449,28 @@ function deltaSql(effWm: string, cap: string): string {
     await sb.from("sync_state").update(update).eq("id", 1);
   }
   console.log(`done. ${totalDaily} daily rows across ${firstStart} .. ${lastEnd} in ${ranges.length} chunk(s)${partial ? ` — PARTIAL (${failedChunks.length} failed: ${failedChunks.join(",")})` : ""}.${scoped ? " (scoped)" : historical ? " (segment)" : ` watermark=${update.watermark}`}`);
+
+  /* ★ A PARTIAL RUN IS A FAILURE (2026-09-09). This used to print "PARTIAL (n failed)" and exit 0, so a
+   * dropped chunk was invisible to the scheduler — the same "CI stays green" hole that let agent_daily
+   * freeze for four months. It is not a theoretical risk: on 2026-09-09 a transient ClickHouse
+   * "fetch failed" dropped [2026-08-04,2026-08-18) for one rooftop mid-migration and the run reported
+   * success, leaving that window on the OLD appointment grain while every neighbouring window carried
+   * the new one. A 30-day card then silently summed two different definitions — worse than a gap,
+   * because nothing looks broken. Re-running with CHUNK_DAYS=7 completed it.
+   *
+   * A chunk that failed on the ClickHouse READ is harmless (its delete never fired, the old rows
+   * survive), but one that failed on the WRITE has already committed its delete — so a partial run can
+   * mean a HOLE, and the operator has to be told either way. Exiting non-zero costs a re-run; exiting
+   * zero costs a wrong number nobody notices.
+   *
+   * Deliberately AFTER the sync_state update above, so the partial reason is still recorded for the
+   * fleet health view before the process dies. */
+  if (partial) {
+    console.error(
+      `FAILED: ${failedChunks.length}/${ranges.length} chunk(s) did not complete: ${failedChunks.join(", ")}. ` +
+        `Data for those ranges is stale or missing — re-run them (a smaller CHUNK_DAYS, e.g. CHUNK_DAYS=7, ` +
+        `usually clears a transient ClickHouse fetch failure).`,
+    );
+    process.exit(1);
+  }
 })().catch((e) => { console.error("FAILED:", e.message); process.exit(1); });
