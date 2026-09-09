@@ -35,7 +35,7 @@ import { useScenario, ScenarioView } from "@/components/reports/scenario";
 import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { goCrossPage } from "@/components/reports/parentNav";
-import { UpsellAgent, StlUpsell } from "@/components/reports/upsell";
+import { StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
 import { useOutcomes, OutcomeKpis, CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
 import { MoreReports } from "@/components/reports/library";
@@ -79,8 +79,6 @@ function AgentReportsView() {
   // True once the user has clicked a pill — stops the activity-based default below from overriding an
   // explicit choice (e.g. deliberately opening a quiet agent).
   const userPickedRef = useRef(false);
-  // when set, the rooftop doesn't run this agent → show the upsell pitch instead of a report
-  const [upsellId, setUpsellId] = useState<string | null>(null);
   // when set, the appointment-count drill-down modal is open (lists the leads behind the number)
   const [apptModal, setApptModal] = useState<{ service: "sales" | "service"; agentType: string; title: string; sub: string } | null>(null);
   // Resolved up-front (before the effects/handlers below that reference teamId for analytics).
@@ -167,11 +165,16 @@ function AgentReportsView() {
   // mock metrics/pills.
   // Scope the agent pills to the top-level dept when one is chosen; fall back to the full set if this
   // rooftop runs no agent in that dept, so `visibleAgents` is never empty (agentById → agents[0]).
+  /* STRICT department scope. The URL says sales or service and that is the whole answer: sales shows
+   * Sales Inbound and Sales Outbound, service shows Service Inbound and Service Outbound, and neither
+   * ever shows the other's agents. The previous fallback — "if this department has no agents, show them
+   * all" — meant a service rooftop with no service agent configured silently rendered the SALES agents
+   * under a Service header, which is the one thing a departmental report must never do. A department
+   * with nothing live now renders its empty state instead. */
   const visibleAgents = useMemo(() => {
     const base = AGENTS.length ? AGENTS : skeleton;
     if (dept === "all") return base;
-    const scoped = base.filter((ag) => ag.dept.toLowerCase() === dept);
-    return scoped.length ? scoped : base;
+    return base.filter((ag) => ag.dept.toLowerCase() === dept);
   }, [AGENTS, skeleton, dept]);
   const a = useMemo(() => agentById(activeId, visibleAgents), [activeId, visibleAgents]);
   // keep the selected agent valid when the rooftop (and thus its agent set) changes, and default to an
@@ -190,16 +193,6 @@ function AgentReportsView() {
     const best = visibleAgents.filter(hasAgentActivity).reduce<AgentData | null>((b, x) => (!b || score(x) > score(b) ? x : b), null);
     if (best && best.id !== activeId) setActiveId(best.id);
   }, [visibleAgents, activeId, paramAgent]);
-  // agents this rooftop does NOT run — pitched as an upsell rather than hidden
-  const upsellAgents = useMemo(() => {
-    const liveIds = new Set(visibleAgents.map((x) => x.id));
-    return MOCK_AGENTS.filter((x) => !liveIds.has(x.id));
-  }, [visibleAgents]);
-  const upsell = useMemo(() => (upsellId ? upsellAgents.find((x) => x.id === upsellId) ?? null : null), [upsellId, upsellAgents]);
-  // drop a stale upsell selection if the rooftop changes and now runs that agent
-  useEffect(() => {
-    if (upsellId && !upsellAgents.some((x) => x.id === upsellId)) setUpsellId(null);
-  }, [upsellAgents, upsellId]);
   const m = a.metrics;
   const r = a.report;
   const inbound = a.dir === "Inbound";
@@ -819,11 +812,11 @@ function AgentReportsView() {
           {/* agent switcher — full-width row of equal pills; the selected one drives the report below */}
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
             {visibleAgents.map((ag) => {
-              const selected = ag.id === activeId && !upsell;
+              const selected = ag.id === activeId;
               return (
                 <button
                   key={ag.id}
-                  onClick={() => { userPickedRef.current = true; setActiveId(ag.id); setUpsellId(null); track("agent_switched", { team_id: teamId, agent: ag.id }); }}
+                  onClick={() => { userPickedRef.current = true; setActiveId(ag.id); track("agent_switched", { team_id: teamId, agent: ag.id }); }}
                   className={`flex items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-all ${
                     selected
                       ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
@@ -842,39 +835,8 @@ function AgentReportsView() {
                 </button>
               );
             })}
-            {upsellAgents.map((ag) => {
-              const selected = upsell?.id === ag.id;
-              return (
-                <button
-                  key={ag.id}
-                  onClick={() => { setUpsellId(ag.id); track("agent_upsell_viewed", { team_id: teamId, agent: ag.id }); }}
-                  className={`flex items-center gap-3 rounded-xl border border-dashed px-3.5 py-2.5 text-left transition-all ${
-                    selected
-                      ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
-                      : "border-[#dcd3f5] bg-[#fcfcfd] hover:border-[#c4b5fd] hover:bg-[#faf8ff]"
-                  }`}
-                >
-                  <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#f3eaff] text-[18px] leading-none opacity-70">{ag.icon}</span>
-                  <span className="flex flex-col">
-                    <span className="text-[13px] font-bold leading-tight text-[#6b7280]">{ag.name}</span>
-                    <span className="mt-0.5 text-[11px] font-semibold leading-none text-[#813fed]">+ Add · see what it does</span>
-                  </span>
-                </button>
-              );
-            })}
           </div>
 
-          {upsell && (
-            <UpsellAgent
-              agent={upsell}
-              accountName={account.name}
-              teamId={teamId}
-              peerCalls={live ? visibleAgents.reduce((s, x) => s + x.metrics.calls, 0) : undefined}
-            />
-          )}
-
-          {!upsell && (
-          <>
           {scenario === "onboarding" && <OnboardingAgents agent={a} view={view} />}
 
           {live && agentEmpty && (
@@ -1256,8 +1218,6 @@ function AgentReportsView() {
           {/* Both departments: a service manager wants the rest of the library as much as sales does. */}
           <MoreReports agentId={a.id} onOpenLibrary={(reportId?: string) => { setLibraryReport(reportId ?? null); setView2("library"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
 
-          </>
-          )}
           </>
           )}
           </>
