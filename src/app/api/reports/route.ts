@@ -1,4 +1,4 @@
-import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS } from "@/lib/reports/supabase";
+import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS, SYNC_STATE } from "@/lib/reports/supabase";
 import { buildResult } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 import { assistedApptLeads, assistedInWindow } from "@/lib/reports/assistedAppts";
@@ -69,6 +69,19 @@ async function leadCountsBoth(sb: any, teamId: string, start: string, end: strin
     return { cur, prior };
   } catch {
     return {};
+  }
+}
+
+/* sync_state.last_run_at — when the ETL last finished. null when unavailable, in which case the UI
+ * falls back to its previous behaviour rather than claiming a freshness it cannot prove. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function lastSyncAt(sb: any): Promise<string | null> {
+  try {
+    const { data, error } = await sb.from(SYNC_STATE).select("last_run_at").eq("id", 1).maybeSingle();
+    if (error || !data?.last_run_at) return null;
+    return String(data.last_run_at);
+  } catch {
+    return null;
   }
 }
 
@@ -299,12 +312,13 @@ export async function GET(request: Request): Promise<Response> {
 
   // Detail tables (one rpc, fallback to six reads) + both lead-count windows (one rpc) + the
   // lifetime "ever live" probe in parallel.
-  const [detail, lc, sourceCounts, everLive, assistedLeads] = await Promise.all([
+  const [detail, lc, sourceCounts, everLive, assistedLeads, syncedAt] = await Promise.all([
     fetchDetailCombined(sb, teamId).then((d) => d ?? fetchDetailPerTable(sb, teamId)),
     leadCountsBoth(sb, teamId, start, end, prior.start, prior.end),
     sourceCountsFor(sb, teamId, start, end),
     teamEverLive(sb, teamId),
     assistedApptLeads(sb, teamId, start, end),
+    lastSyncAt(sb),
   ]);
   const { callbacks, campaigns, outcomes, appointments, warmLeads } = detail ?? EMPTY_DETAIL;
   // Named appointments are shown for the report window — filter the ~120d snapshot by booking date.
@@ -347,7 +361,13 @@ export async function GET(request: Request): Promise<Response> {
     sourceCounts,
   });
 
-  return Response.json({ ...result, ...meta, everLive: everLiveResolved }, {
+  /* syncedAt = when the AGGREGATE was last rebuilt, not when this request ran. The header used to say
+   * "Synced just now" off the client's own fetch time, over data that can be hours old: the sync
+   * workflow is scheduled hourly but GitHub actually fires it every 1.4-5.5h. On Heiser Chevrolet that
+   * read "Synced just now" beside 1 appointment while the appointments console, reading the live API,
+   * showed 3 — the two missing ones were booked AFTER the last sync finished. Telling a dealer a number
+   * is current when it is hours behind is how a sync lag gets mistaken for a bug. */
+  return Response.json({ ...result, ...meta, syncedAt, everLive: everLiveResolved }, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

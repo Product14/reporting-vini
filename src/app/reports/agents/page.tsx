@@ -864,7 +864,13 @@ function AgentReportsView() {
               <span className="no-print flex-none text-[11px] text-[#9ca3af]" title={feed?.timezone ? `Report days & times use this rooftop's timezone (${feed.timezone})` : undefined}>
                 {feed?.timezone ? `Times in ${tzShortLabel(feed.timezone)}` : ""}
                 {feed?.timezone && (feed === null || feed?.fetchedAt) ? " · " : ""}
-                {feed === null ? "Syncing…" : feed?.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
+                {feed === null
+                  ? "Syncing…"
+                  /* The AGGREGATE's own age, not this page's. fetchedAt is always "just now" and said so
+                     over data the ETL had not rebuilt for hours — see syncedAt in liveData. */
+                  : feed?.syncedAt
+                    ? `Synced ${relTime(Date.parse(feed.syncedAt), now)}`
+                    : feed?.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
               </span>
             )}
           </div>

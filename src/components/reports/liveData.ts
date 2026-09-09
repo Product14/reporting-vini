@@ -180,6 +180,10 @@ export interface FetchResult {
   // v3 named lists (rooftop-wide; the per-agent scoped copies live on agent.report). Absent on the
   // mock/degraded path — sections omit. LIVE-ONLY, never fabricated.
   namedAppointments?: NamedAppt[];
+  /* When the AGGREGATE was last rebuilt (sync_state.last_run_at), NOT when this client fetched. The
+   * header's "Synced …" line reads this: fetchedAt says how fresh the REQUEST is, which is always
+   * "just now" and told dealers the numbers were current when the ETL was hours behind. */
+  syncedAt?: string | null;
   warmLeads?: WarmLeadItem[];
 }
 
@@ -466,6 +470,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
         end: j.end,
         timezone: j.timezone ?? null,
         namedAppointments: Array.isArray(j.namedAppointments) ? (j.namedAppointments as NamedAppt[]) : undefined,
+        syncedAt: typeof j.syncedAt === "string" ? j.syncedAt : null,
         warmLeads: Array.isArray(j.warmLeads) ? (j.warmLeads as WarmLeadItem[]) : undefined,
       };
       CACHE.set(cacheKey, result); // cache ONLY a clean response
