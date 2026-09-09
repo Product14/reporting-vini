@@ -2715,7 +2715,7 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full" style={{ background: V.bg, color: V.fg }}><V.Icon size={15} /></span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-semibold" style={{ color: C.dark }}>{V.title}</p>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               {rec.callTitle && <p className="min-w-0 truncate text-[12px]" style={{ color: C.sub }}>{rec.callTitle}</p>}
               {/* Which automated journey produced THIS call (engagementJourney; null = not attributable). */}
               {rec.engagementJourney && JOURNEY_META[rec.engagementJourney] && (
@@ -2723,6 +2723,8 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
                   {JOURNEY_META[rec.engagementJourney].label}
                 </span>
               )}
+              {/* the call's id — copyable, for support/debugging. */}
+              <CopyId label="Call ID" value={rec.callId || rec.conversationId} />
               <span className="shrink-0 text-[11px] lg:hidden" style={{ color: C.sub }}>{fmtTime(rec.createdAt)}</span>
             </div>
           </div>
