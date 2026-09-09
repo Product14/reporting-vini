@@ -307,10 +307,13 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
       if (body) return body;
       continue;
     }
-    // sms / chat — bubbles are chronological, newest last. Skip internal system/tool turns (e.g. the
-    // handover claim/hand-back notices) and prefix a rep's own reply with their name.
+    // sms / chat — smsMessages are NEWEST-FIRST (same as the team endpoint; verified on conversations/v2,
+    // where `_ts` is present on only a few turns so array order is the source of truth). So the FIRST real
+    // (non-system/tool) turn is the LATEST message. (Reading from the END returned the OLDEST turn — the
+    // initial greeting — so the list preview didn't match the thread's last message.) A rep's own reply is
+    // prefixed with their name, the AI's with the agent name, the customer's bare.
     const arr = c.smsMessages ?? [];
-    for (let k = arr.length - 1; k >= 0; k--) {
+    for (let k = 0; k < arr.length; k++) {
       const mm = arr[k];
       const r = (mm.role || "").toLowerCase();
       if (r === "system" || r === "tool") continue;
