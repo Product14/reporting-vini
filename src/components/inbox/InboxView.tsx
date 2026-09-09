@@ -1280,8 +1280,11 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
             <div className="flex min-w-0 flex-col gap-0.5">
               <div className="flex min-w-0 items-center gap-1.5">
                 <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{displayName}</span>
-                {/* temperature at a glance — a colour dot (full word in the hover card / right panel). */}
-                {temp && TEMP_COLORS[temp] && <span title={temp} className="size-2 shrink-0 rounded-full" style={{ background: TEMP_COLORS[temp].fg }} />}
+                {/* temperature at a glance — 🔥 for a hot lead (clearer than a red dot, which reads as
+                    "unread"); a subtle colour dot for warm/cold/dead. Full word in the header / hover card. */}
+                {temp === "hot"
+                  ? <span title="hot" className="shrink-0 text-[12px] leading-none">🔥</span>
+                  : temp && TEMP_COLORS[temp] && <span title={temp} className="size-2 shrink-0 rounded-full" style={{ background: TEMP_COLORS[temp].fg }} />}
               </div>
               {/* lead type + source, tucked under the name (near the avatar) instead of a separate row. */}
               {(ltype || source) && (
