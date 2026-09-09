@@ -809,8 +809,14 @@ function AgentReportsView() {
             <ReportLibraryPanel navQuery={navQuery} initialReportId={libraryReport} onOpenAgent={(id: string) => { setActiveId(id); setView2("agent"); userPickedRef.current = true; }} />
           ) : (
           <>
-          {/* agent switcher — full-width row of equal pills; the selected one drives the report below */}
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+          {/* Agent switcher — equal pills filling the row, the selected one driving the report below.
+              Column count follows the number of agents rather than a fixed four: with the other
+              department's upsell pills removed there are two, and a hard-coded four left half the row
+              empty. */}
+          <div
+            className="grid grid-cols-1 gap-2.5 sm:grid-cols-2"
+            style={visibleAgents.length > 2 ? { gridTemplateColumns: `repeat(${visibleAgents.length}, minmax(0, 1fr))` } : undefined}
+          >
             {visibleAgents.map((ag) => {
               const selected = ag.id === activeId;
               return (

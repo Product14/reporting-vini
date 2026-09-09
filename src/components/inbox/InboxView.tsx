@@ -1254,13 +1254,27 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
           narrow list — "…2Feb 24" with no space between them. */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className="flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(c.customer_id || name) }}>
-              {initials(name)}
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="relative shrink-0">
+              <span className="flex size-8 items-center justify-center rounded-full text-[12px] font-medium text-white" style={{ background: avatarColor(c.customer_id || name) }}>
+                {initials(name)}
+              </span>
+              {/* small circle = lead type (colour-coded; the full type is on the subtitle + tooltip). */}
+              {ltype && <span title={prettify(ltype)} className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full ring-2 ring-white" style={{ background: typeColor(ltype) }} />}
             </span>
-            <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{name}</span>
-            {/* temperature at a glance — a colour dot (the full word is in the hover card / right panel). */}
-            {temp && TEMP_COLORS[temp] && <span title={temp} className="size-2 shrink-0 rounded-full" style={{ background: TEMP_COLORS[temp].fg }} />}
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{name}</span>
+                {/* temperature at a glance — a colour dot (full word in the hover card / right panel). */}
+                {temp && TEMP_COLORS[temp] && <span title={temp} className="size-2 shrink-0 rounded-full" style={{ background: TEMP_COLORS[temp].fg }} />}
+              </div>
+              {/* lead type + source, tucked under the name (near the avatar) instead of a separate row. */}
+              {(ltype || source) && (
+                <span className="min-w-0 truncate text-[11px]" style={{ color: C.sub }}>
+                  {[prettify(ltype), source].filter(Boolean).join(" · ")}
+                </span>
+              )}
+            </div>
           </div>
           {callUnread > 0 && <IconPhone size={12} className="shrink-0 text-[#626f81]" />}
           {/* appointment indicator (green calendar) + open action-item count (orange badge) */}
@@ -1287,12 +1301,6 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
         <div className="flex min-w-0 items-center gap-1 text-[11px]" style={{ color: C.dark }}>
           <IconCar size={12} className="shrink-0" style={{ color: C.sub }} />
           <span className="truncate font-medium">{vehicle}</span>
-        </div>
-      )}
-      {(ltype || source) && (
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px]" style={{ color: C.sub }}>
-          {ltype && <span className="shrink-0 rounded px-1.5 py-0.5 font-medium" style={{ background: "#f1f5f9", color: "#475569" }}>{prettify(ltype)}</span>}
-          {source && <span className="min-w-0 truncate">{source}</span>}
         </div>
       )}
       {/* Which automated journeys reached this customer (0..4) — only rendered when present, so an
@@ -3618,6 +3626,14 @@ const TEMP_COLORS: Record<string, { bg: string; fg: string }> = {
 // "2011 Chevrolet Tahoe LT" from a leadVehicleInterest (year is a string; any field may be null).
 function vehicleLabel(v?: LeadVehicleInterest | null): string {
   return [v?.year, v?.make, v?.model, v?.trim].filter(Boolean).join(" ");
+}
+// Lead-type accent colour, for the small dot on the avatar. Normalise (Walk-in / WALK_IN / walkin → walkin).
+const TYPE_COLORS: Record<string, string> = {
+  internet: "#2f7bff", walkin: "#0a6029", service: C.orange, phone: C.primary,
+  partsorder: "#64748b", previouscustomer: "#0891b2",
+};
+function typeColor(t?: string | null): string {
+  return TYPE_COLORS[(t || "").toLowerCase().replace(/[^a-z]/g, "")] || "#94a3b8";
 }
 // The customer's single most-useful lead for at-a-glance sidebar display: prefer one with a vehicle of
 // interest, else one with any detail, else the first.
