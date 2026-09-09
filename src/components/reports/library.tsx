@@ -2108,6 +2108,7 @@ export function LeadsByTypeCard({
   spyneToken?: string;
 }) {
   const [rows, setRows] = useState<InsightsPayload["leadSources"] | null>(null);
+  const [failed, setFailed] = useState(false);
   const key = `${teamId}|${dept}|${direction}|${win.bucket ?? ""}|${win.start ?? ""}|${win.end ?? ""}|${spyneToken ? 1 : 0}`;
   const [state, setState] = useState<{ key: string; done: boolean }>({ key: "", done: false });
 
@@ -2118,9 +2119,9 @@ export function LeadsByTypeCard({
     if (win.start && win.end) { qs.set("start", win.start); qs.set("end", win.end); }
     else if (win.bucket) qs.set("bucket", win.bucket);
     fetch(`/api/reports/insights?${qs}`, { cache: "no-store", headers: spyneToken ? { Authorization: `Bearer ${spyneToken}` } : undefined })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: InsightsPayload | null) => { if (on) { setRows(j?.leadSources ?? []); setState({ key, done: true }); } })
-      .catch(() => { if (on) { setRows([]); setState({ key, done: true }); } });
+      .then(async (r) => { if (!r.ok) throw new Error(String(r.status)); return r.json() as Promise<InsightsPayload>; })
+      .then((j) => { if (on) { setRows(j?.leadSources ?? []); setFailed(false); setState({ key, done: true }); } })
+      .catch(() => { if (on) { setRows([]); setFailed(true); setState({ key, done: true }); } });
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
@@ -2130,7 +2131,9 @@ export function LeadsByTypeCard({
   const types = fresh && rows?.length ? leadTypeRollup(ctx) : [];
   const total = types.reduce((s, t) => s + t.contact, 0);
 
-  if (fresh && !types.length) return null; // nothing worked in this window for this agent
+  /* Never return null. This card sits in a grid column, so vanishing leaves a hole the width of two
+   * columns next to a lone neighbour — which is exactly how a silent 401 looked in production. An
+   * empty state and a failure state are also different things and say so. */
   return (
     <Card
       title="Leads by type and source"
@@ -2139,6 +2142,14 @@ export function LeadsByTypeCard({
     >
       {!fresh ? (
         <div className="px-5 py-6"><div className="h-24 animate-pulse rounded-xl bg-[#f4f5f7]" /></div>
+      ) : failed ? (
+        <p className="px-5 py-6 text-[12.5px] leading-snug text-[#6b7280]">
+          Couldn&apos;t load lead sources just now. The rest of the report is unaffected — refresh to try again.
+        </p>
+      ) : !types.length ? (
+        <p className="px-5 py-6 text-[12.5px] leading-snug text-[#6b7280]">
+          No leads with a {direction} conversation in this period. Widen the date range to see more.
+        </p>
       ) : (
         <LeadStageExplorer types={types} total={total} ctx={ctx} />
       )}
