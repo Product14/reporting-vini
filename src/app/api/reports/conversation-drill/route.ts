@@ -6,7 +6,7 @@
  * calls behind one of those segments so a manager can listen to them — which is where coaching actually
  * happens, and the only way a share like 58% becomes something you can act on rather than argue about.
  *
- * SOURCE. Read from the warehouse copy of the review pipeline (conversationEval) rather than through the
+ * SOURCE. Read from the warehouse copy of the review pipeline (dealer_leads.conversationEval) rather than through the
  * eval API. Two reasons: the API has no endpoint that returns the conversations behind a bucket, and this
  * way the drill keeps working when the API's token has expired — the panels above it currently do not.
  *
@@ -41,6 +41,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const idOk = (s: string) => /^[A-Za-z0-9_-]{1,64}$/.test(s);
 
 export interface DrillConversation {
+  /** callId for a call, conversationId for a text thread — whichever identifies the row. */
   callId: string;
   leadId: string;
   customer: string;
@@ -50,6 +51,9 @@ export interface DrillConversation {
   summary: string;
   outcome: string;
   hasRecording: boolean;
+  /** Text thread rather than a call: no recording, no duration, message count instead. */
+  isSms: boolean;
+  msgs: number;
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -63,17 +67,23 @@ export async function GET(request: Request): Promise<Response> {
 
   const dept = (searchParams.get("serviceType") || "").toLowerCase();
   const agentType = dept === "service" ? "service" : "sales";
+  /* CHANNEL. "both" covers a merged chart. Calls and texts are stored differently — a text eval carries
+   * no callId at all (0 of 3,802 on the rooftop this was built against, against 3,802 conversationIds
+   * that all resolve) — so each channel is fetched with its own join and the two are concatenated. */
+  const chRaw = (searchParams.get("channel") || "call").toLowerCase();
+  const wantCall = chRaw === "call" || chRaw === "both";
+  const wantSms = chRaw === "sms" || chRaw === "both";
   const dirRaw = (searchParams.get("direction") || "").toLowerCase();
-  const dirSql = dirRaw === "inbound" || dirRaw === "outbound" ? ` AND toString(doc.agentCallType)='${chEsc(dirRaw)}'` : "";
+  const dirSql = dirRaw === "inbound" || dirRaw === "outbound" ? ` AND agentCallType='${chEsc(dirRaw)}'` : "";
 
   // Which cell was clicked. callType alone = a whole lane; + primaryIntent = one row inside it; + outcome
   // = one coloured segment. Each narrows the same set.
   const callType = searchParams.get("callType") || "";
   const primaryIntent = searchParams.get("primaryIntent") || "";
   const outcome = searchParams.get("outcome") || "";
-  const ctSql = callType ? ` AND toString(doc.callType)='${chEsc(callType)}'` : "";
-  const piSql = primaryIntent ? ` AND toString(doc.primaryIntent)='${chEsc(primaryIntent)}'` : "";
-  const ocSql = outcome ? ` AND toString(doc.outcomeAchieved)='${chEsc(outcome)}'` : "";
+  const ctSql = callType ? ` AND callType='${chEsc(callType)}'` : "";
+  const piSql = primaryIntent ? ` AND primaryIntent='${chEsc(primaryIntent)}'` : "";
+  const ocSql = outcome ? ` AND outcomeAchieved='${chEsc(outcome)}'` : "";
 
   const tz = (await getStoreTimeZone(teamId, spyneTokenFrom(request), spyneEnvFrom(request))) || "UTC";
   let start = searchParams.get("start") || "";
@@ -88,20 +98,23 @@ export async function GET(request: Request): Promise<Response> {
   const T = chEsc(teamId);
   const TZ = chEsc(tz);
 
-  /* Windowed on the CALL's own time, taken from the call record — not on when the reviewer scored it,
-   * which lags the call by days and would put weeks-old calls in a 7-day window. */
-  const sql = `
+  /* Windowed on the CONVERSATION's own time, taken from the call/thread record — not on when the reviewer
+   * scored it, which lags by days and would put weeks-old conversations in a 7-day window. */
+  const callSql = `
+    /* dealer_leads.conversationEval is the TYPED copy of the same documents the raw JSON table holds
+     * (verified identical: 129,658 sales call evals on both, same newest row). Typed columns, so no
+     * toString(doc.x) and the filters can use the index. */
     WITH ev AS (
-      SELECT toString(doc.callId) AS cid,
-             toString(doc.leadId) AS leadId,
-             toString(doc.outcomeAchieved) AS outcome,
-             toString(doc.lastTouchSummary) AS summary
-      FROM dealer_leads_raw.conversationEval
-      WHERE _peerdb_is_deleted = 0
-        AND toString(doc.teamId) = '${T}'
-        AND toString(doc.agentType) = '${chEsc(agentType)}'
-        AND toString(doc.channel) = 'call'${dirSql}${ctSql}${piSql}${ocSql}
-        AND toString(doc.callId) != ''
+      SELECT ifNull(callId,'') AS cid,
+             ifNull(leadId,'') AS leadId,
+             ifNull(outcomeAchieved,'') AS outcome,
+             ifNull(lastTouchSummary,'') AS summary
+      FROM dealer_leads.conversationEval
+      WHERE __deleted = 0
+        AND teamId = '${T}'
+        AND agentType = '${chEsc(agentType)}'
+        AND channel = 'call'${dirSql}${ctSql}${piSql}${ocSql}
+        AND ifNull(callId,'') != ''
     ),
     /* FINAL because endcallreports carries triplicate CDC rows per call; one row per callId out.
      * Restricting callId to the eval set is not an optimisation, it is what makes this run at all:
@@ -155,8 +168,77 @@ export async function GET(request: Request): Promise<Response> {
     ORDER BY ecr.at DESC
     LIMIT 150`;
 
+  /* TEXT THREADS take a different path end to end: the eval carries a conversationId and no callId, there
+   * is no endcallreports row, and "length" is a message count rather than seconds. Same filters, same
+   * window, same output shape — so the two can simply be concatenated. */
+  const smsSql = `
+    WITH ev AS (
+      SELECT ifNull(conversationId,'') AS cid,
+             ifNull(leadId,'') AS leadId,
+             ifNull(outcomeAchieved,'') AS outcome,
+             ifNull(lastTouchSummary,'') AS summary
+      FROM dealer_leads.conversationEval
+      WHERE __deleted = 0
+        AND teamId = '${T}'
+        AND agentType = '${chEsc(agentType)}'
+        AND channel = 'sms'${dirSql}${ctSql}${piSql}${ocSql}
+        AND ifNull(conversationId,'') != ''
+    ),
+    cv AS (
+      SELECT conversationId, any(leadId) AS cvLeadId, max(createdAt) AS at
+      FROM dealer_leads.conversations FINAL
+      WHERE teamId = '${T}' AND __deleted = 0 AND ifNull(isTest, 0) = 0
+        AND conversationId IN (SELECT cid FROM ev)
+        AND toTimeZone(createdAt,'${TZ}') >= toDateTime('${start} 00:00:00','${TZ}')
+        AND toTimeZone(createdAt,'${TZ}') <  toDateTime('${end} 00:00:00','${TZ}')
+      GROUP BY conversationId
+    ),
+    -- smsMessages carries no teamId, so it is scoped by the thread ids we already hold.
+    mc AS (
+      SELECT conversationId, uniqExact(messageId) AS msgs
+      FROM dealer_leads.smsMessages
+      WHERE __deleted = 0 AND conversationId IN (SELECT conversationId FROM cv)
+      GROUP BY conversationId
+    ),
+    leadIds AS (
+      SELECT cvLeadId AS lid FROM cv WHERE ifNull(cvLeadId,'') != ''
+      UNION DISTINCT
+      SELECT leadId AS lid FROM ev WHERE leadId != ''
+    ),
+    cu AS (
+      SELECT l.lead_id AS lid, any(c.cname) AS name, any(c.cphone) AS phone
+      FROM (SELECT lead_id, customer_id FROM dealer_leads.leads FINAL WHERE team_id='${T}' AND lead_id IN (SELECT lid FROM leadIds)) AS l
+      LEFT JOIN (SELECT customer_id, any(name) AS cname, any(mobile_number) AS cphone FROM dealer_leads.customer FINAL WHERE team_id='${T}' GROUP BY customer_id) AS c
+        ON c.customer_id = l.customer_id
+      GROUP BY l.lead_id
+    )
+    SELECT ev.cid AS callId,
+           if(ifNull(cv.cvLeadId,'') != '', cv.cvLeadId, ev.leadId) AS leadId,
+           ifNull(cu.name, '') AS customer,
+           ifNull(cu.phone, '') AS phone,
+           toString(cv.at) AS at,
+           0 AS durationSec,
+           ev.summary AS summary,
+           ev.outcome AS outcome,
+           0 AS hasRecording,
+           1 AS isSms,
+           ifNull(mc.msgs, 0) AS msgs
+    FROM ev
+    INNER JOIN cv ON cv.conversationId = ev.cid
+    LEFT JOIN mc ON mc.conversationId = ev.cid
+    LEFT JOIN cu ON cu.lid = if(ifNull(cv.cvLeadId,'') != '', cv.cvLeadId, ev.leadId)
+    ORDER BY cv.at DESC
+    LIMIT 150`;
+
   try {
-    const rows = await runClickhouse<Record<string, string | number>>(sql);
+    const [callRows, smsRows] = await Promise.all([
+      wantCall ? runClickhouse<Record<string, string | number>>(callSql) : Promise.resolve([]),
+      wantSms ? runClickhouse<Record<string, string | number>>(smsSql) : Promise.resolve([]),
+    ]);
+    // Newest first across both channels, then capped — a merged view must not be 150 calls and no texts.
+    const rows = [...callRows, ...smsRows]
+      .sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? "")))
+      .slice(0, 150);
     const conversations: DrillConversation[] = rows.map((r) => ({
       callId: String(r.callId || ""),
       leadId: String(r.leadId || ""),
@@ -167,6 +249,8 @@ export async function GET(request: Request): Promise<Response> {
       summary: String(r.summary || "").trim(),
       outcome: String(r.outcome || ""),
       hasRecording: Number(r.hasRecording) === 1,
+      isSms: Number(r.isSms) === 1,
+      msgs: Number(r.msgs) || 0,
     }));
     return Response.json({ conversations, window: { start, end }, degraded: false });
   } catch (e) {

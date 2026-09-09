@@ -290,10 +290,26 @@ export async function GET(request: Request): Promise<Response> {
              ifNull(source,'Unknown') AS source
       FROM dealer_leads.leads FINAL WHERE team_id='${T}'
     ),
-    ev AS (SELECT DISTINCT toString(doc.leadId) AS lid FROM dealer_leads_raw.conversationEval WHERE _peerdb_is_deleted=0 AND toString(doc.teamId)='${T}'),
-    lq AS (SELECT toString(doc.leadId) AS lid, max(toString(doc.qualified)='true') AS q FROM dealer_leads_raw.conversationLeadEval WHERE _peerdb_is_deleted=0 AND toString(doc.teamId)='${T}' GROUP BY lid),
+    ev AS (SELECT DISTINCT ifNull(leadId,'') AS lid FROM dealer_leads.conversationEval WHERE __deleted=0 AND teamId='${T}' AND ifNull(leadId,'') != ''),
+    /* One row per lead eval DOCUMENT first (argMax on _version), then aggregate to lead grain. Both eval
+       tables carry CDC version churn — Covina Kia has 1,540 rows for 1,374 documents — and a bare max()
+       across versions lets a lead that WAS qualified in a superseded version stay qualified forever.
+       Deduped it reads 144 qualified where the un-deduped max() read 145. */
+    lq AS (
+      SELECT lid, max(q) AS q FROM (
+        SELECT id, argMax(ifNull(leadId,''), _version) AS lid, argMax(qualified, _version) AS q
+        FROM dealer_leads.conversationLeadEval
+        WHERE __deleted=0 AND teamId='${T}'
+        GROUP BY id
+      ) WHERE lid != '' GROUP BY lid
+    ),
     ap AS (SELECT DISTINCT lead_id AS lid FROM dealer_leads.meetings FINAL WHERE team_id='${T}' AND source='spyne' AND lower(JSONExtractString(ifNull(meta,''),'source')) != 'warm_transfer'),
-    ai AS (SELECT DISTINCT lead_id AS lid FROM dealer_leads.actionItems FINAL WHERE team_id='${T}' AND ifNull(is_active,0)=1)
+    /* OPEN action items = active AND NOT completed. is_active alone is "not deleted", so without the
+       completion test this counted every action item the AI ever raised: 2,169 leads at Covina Kia
+       against the 121 the action-items scoreboard calls open. The card said 239 open where the
+       scoreboard said 121; with this filter both read 121. Matches the canonical rule
+       (is_active:true, is_completed != true). */
+    ai AS (SELECT DISTINCT lead_id AS lid FROM dealer_leads.actionItems FINAL WHERE team_id='${T}' AND ifNull(is_active,0)=1 AND ifNull(is_completed,0)!=1)
     SELECT ld.type AS type, ld.source AS source,
            count() AS contact, sum(conv.reached) AS reached,
            countIf(isNotNull(ev.lid)) AS evaluated, countIf(lq.q = 1) AS qualified,

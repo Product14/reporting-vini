@@ -103,7 +103,18 @@ export async function GET(request: Request): Promise<Response> {
              ifNull(source,'Unknown') AS source
       FROM dealer_leads.leads FINAL WHERE team_id='${T}'
     ),
-    lq AS (SELECT toString(doc.leadId) AS lid, max(toString(doc.qualified)='true') AS q FROM dealer_leads_raw.conversationLeadEval WHERE _peerdb_is_deleted=0 AND toString(doc.teamId)='${T}' GROUP BY lid),
+    /* One row per lead eval DOCUMENT first (argMax on _version), then aggregate to lead grain. Both eval
+       tables carry CDC version churn — Covina Kia has 1,540 rows for 1,374 documents — and a bare max()
+       across versions lets a lead that WAS qualified in a superseded version stay qualified forever.
+       Deduped it reads 144 qualified where the un-deduped max() read 145. */
+    lq AS (
+      SELECT lid, max(q) AS q FROM (
+        SELECT id, argMax(ifNull(leadId,''), _version) AS lid, argMax(qualified, _version) AS q
+        FROM dealer_leads.conversationLeadEval
+        WHERE __deleted=0 AND teamId='${T}'
+        GROUP BY id
+      ) WHERE lid != '' GROUP BY lid
+    ),
     ap AS (SELECT DISTINCT lead_id AS lid FROM dealer_leads.meetings FINAL WHERE team_id='${T}' AND source='spyne' AND lower(JSONExtractString(ifNull(meta,''),'source')) != 'warm_transfer'),
     cu AS (SELECT customer_id AS cid, any(name) AS name, any(mobile_number) AS phone FROM dealer_leads.customer FINAL WHERE team_id='${T}' GROUP BY customer_id)
     SELECT conv.lid AS leadId,

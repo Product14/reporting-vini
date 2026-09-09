@@ -244,14 +244,23 @@ function svcLabel(tool: string): string {
  * ("INTERNET" and "Internet", "Walk-in" and "WALK_IN"), so the SQL normalises it and this just groups. */
 export type LeadStageKey = "appt" | "qualifiedOnly" | "reachedOnly" | "notReached";
 
-/* The four stages a worked lead can be in, best first — mutually exclusive, so they stack. The funnel
- * columns (contact/reached/qualified/appts) NEST and cannot be stacked without double counting. */
+/* The three stages a CONTACTED lead can be in, best first — mutually exclusive, so they stack. The funnel
+ * columns (contact/reached/qualified/appts) NEST and cannot be stacked without double counting.
+ *
+ * ★ "Never reached" IS DELIBERATELY NOT HERE. This card answers "of the people we actually got hold of,
+ * where did each source get to" — dialling a number and hitting voicemail says nothing about the source's
+ * quality, and on most rooftops it is 70-80% of every row, which flattened all three real stages into
+ * slivers and made every source look identical. notReached is still computed (it is what defines the
+ * contacted population, engagedOf below) and still has a drill bucket; it is just never a segment. */
 export const LEAD_STAGES: { key: LeadStageKey; label: string; color: string; drill: string }[] = [
   { key: "appt", label: "Appointment", color: "#15803d", drill: "appt" },
   { key: "qualifiedOnly", label: "Qualified, no appointment", color: "#0891b2", drill: "qualified" },
   { key: "reachedOnly", label: "Reached, not qualified", color: "#2563eb", drill: "reached" },
-  { key: "notReached", label: "Never reached", color: "#adb5c0", drill: "not_reached" },
 ];
+
+/** Leads we actually reached = everything the three stages above cover. The card's denominator. */
+export const engagedOf = (r: { appt: number; qualifiedOnly: number; reachedOnly: number }) =>
+  r.appt + r.qualifiedOnly + r.reachedOnly;
 
 export interface LeadRowStats {
   contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number;
@@ -275,9 +284,11 @@ function leadTypeRollup(c: ReportCtx): LeadTypeRow[] {
     hit.sources.push(r);
     byType.set(r.type, hit);
   }
+  // Contacted-lead order, and a type/source nobody was reached at is dropped rather than drawn empty.
   return [...byType.values()]
-    .map((t) => ({ ...t, sources: t.sources.sort((a, b) => b.contact - a.contact) }))
-    .sort((a, b) => b.contact - a.contact);
+    .map((t) => ({ ...t, sources: t.sources.filter((s) => engagedOf(s) > 0).sort((a, b) => engagedOf(b) - engagedOf(a)) }))
+    .filter((t) => engagedOf(t) > 0)
+    .sort((a, b) => engagedOf(b) - engagedOf(a));
 }
 
 /* The table, drawn the way the conversation flow is: one row per lead type, a stacked bar showing where
@@ -295,24 +306,29 @@ function LeadSourceTable({
   onDrill: (d: { type: string; source?: string; stage: (typeof LEAD_STAGES)[number] }) => void;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const max = Math.max(1, ...types.map((t) => t.contact));
+  const max = Math.max(1, ...types.map(engagedOf));
 
-  const Bar = ({ row, type, source }: { row: LeadRowStats; type: string; source?: string }) => (
-    <div className="h-5 w-full rounded-md bg-[#f4f5f7]">
-      <div className="flex h-full overflow-hidden rounded-md" style={{ width: `${Math.max(1.5, (row.contact / max) * 100)}%`, gap: 1 }}>
-        {LEAD_STAGES.filter((st) => row[st.key] > 0).map((st) => (
-          <button
-            key={st.key}
-            type="button"
-            title={`${st.label} · ${fmtInt(row[st.key])} of ${fmtInt(row.contact)} · click to see them`}
-            onClick={(e) => { e.stopPropagation(); onDrill({ type, source, stage: st }); }}
-            className="h-full min-w-[3px] first:rounded-l-md last:rounded-r-md hover:opacity-80"
-            style={{ width: `${(row[st.key] / row.contact) * 100}%`, background: st.color }}
-          />
-        ))}
+  // Width = share of the busiest type's CONTACTED leads; segments = that row's own split of its contacted.
+  const Bar = ({ row, type, source }: { row: LeadRowStats; type: string; source?: string }) => {
+    const base = engagedOf(row);
+    if (!base) return <div className="h-5 w-full rounded-md bg-[#f4f5f7]" />;
+    return (
+      <div className="h-5 w-full rounded-md bg-[#f4f5f7]">
+        <div className="flex h-full overflow-hidden rounded-md" style={{ width: `${Math.max(1.5, (base / max) * 100)}%`, gap: 1 }}>
+          {LEAD_STAGES.filter((st) => row[st.key] > 0).map((st) => (
+            <button
+              key={st.key}
+              type="button"
+              title={`${st.label} · ${fmtInt(row[st.key])} of ${fmtInt(base)} contacted · click to see them`}
+              onClick={(e) => { e.stopPropagation(); onDrill({ type, source, stage: st }); }}
+              className="h-full min-w-[3px] first:rounded-l-md last:rounded-r-md hover:opacity-80"
+              style={{ width: `${(row[st.key] / base) * 100}%`, background: st.color }}
+            />
+          ))}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const Winner = ({ row }: { row: LeadRowStats }) => {
     const top = LEAD_STAGES.filter((st) => row[st.key] > 0).sort((a, b) => row[b.key] - row[a.key])[0];
@@ -321,7 +337,7 @@ function LeadSourceTable({
       <span className="flex items-center gap-1.5 text-[11px] leading-tight">
         <span className="h-2 w-2 flex-none rounded-sm" style={{ background: top.color }} />
         <span className="truncate font-semibold text-[#374151]">{top.label}</span>
-        <span className="flex-none tabular-nums text-[#9ca3af]">{pct(row[top.key], row.contact)}%</span>
+        <span className="flex-none tabular-nums text-[#9ca3af]">{pct(row[top.key], engagedOf(row))}%</span>
       </span>
     );
   };
@@ -346,7 +362,7 @@ function LeadSourceTable({
               <span className={`flex-none text-[9px] text-[#813fed] transition-transform ${open[t.type] ? "rotate-90" : ""}`}>▶</span>
               <span className="min-w-0">
                 <span className="block truncate text-[12.5px] font-bold text-[#111]">{t.type.replace(/_/g, " ")}</span>
-                <span className="text-[10.5px] tabular-nums text-[#9ca3af]">{fmtInt(t.contact)} leads · {pct(t.contact, total)}% · {t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
+                <span className="text-[10.5px] tabular-nums text-[#9ca3af]">{fmtInt(engagedOf(t))} contacted · {pct(engagedOf(t), total)}% · {t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
               </span>
             </span>
             <Bar row={t} type={t.type} />
@@ -359,7 +375,7 @@ function LeadSourceTable({
                 <div key={r.source} className={`${GRID} px-1 py-1.5`}>
                   <span className="min-w-0 pl-4">
                     <span className="block truncate text-[11.5px] font-semibold text-[#374151]">{r.source}</span>
-                    <span className="text-[10px] tabular-nums text-[#9ca3af]">{fmtInt(r.contact)} leads</span>
+                    <span className="text-[10px] tabular-nums text-[#9ca3af]">{fmtInt(engagedOf(r))} contacted</span>
                   </span>
                   <Bar row={r} type={t.type} source={r.source} />
                   <span className="hidden sm:flex"><Winner row={r} /></span>
@@ -370,7 +386,10 @@ function LeadSourceTable({
         </div>
       ))}
 
-      <p className="mt-3 text-[10.5px] text-[#9ca3af]">Bar width is the number of leads · click any segment to see the customers behind it</p>
+      <p className="mt-3 text-[10.5px] text-[#9ca3af]">
+        Leads we reached · bar width is how many · click any segment to see the customers behind it. Leads
+        we never got hold of are left out — they say nothing about where the lead came from.
+      </p>
     </div>
   );
 }
@@ -540,25 +559,29 @@ export const REPORTS: ReportDef[] = [
     source: "Your CRM's own lead type and source, followed through to appointments",
     available: (c) => (c.insights?.leadSources?.length ?? 0) > 0,
     takeaway: (c) => {
+      // Every figure here is of leads we CONTACTED — the population the card draws.
       const t = leadTypeRollup(c);
-      const total = t.reduce((s, x) => s + x.contact, 0);
+      const total = t.reduce((s, x) => s + engagedOf(x), 0);
       const top = t[0];
-      const best = t.filter((x) => x.contact >= 10).sort((a, b) => b.qualified / b.contact - a.qualified / a.contact)[0];
-      const bestBit = best && best.qualified ? ` ${best.type} leads qualify at the highest rate — ${pct(best.qualified, best.contact)}%.` : "";
-      return `${fmtInt(total)} leads were worked this period. ${top.type} is the biggest group at ${pct(top.contact, total)}%.${bestBit}`;
+      const best = t.filter((x) => engagedOf(x) >= 10).sort((a, b) => b.qualified / engagedOf(b) - a.qualified / engagedOf(a))[0];
+      const bestBit = best && best.qualified ? ` ${best.type} leads qualify at the highest rate — ${pct(best.qualified, engagedOf(best))}%.` : "";
+      return `${fmtInt(total)} leads were actually reached this period. ${top.type} is the biggest group at ${pct(engagedOf(top), total)}%.${bestBit}`;
     },
     render: (c) => {
       const types = leadTypeRollup(c);
-      const total = types.reduce((s, x) => s + x.contact, 0);
+      const total = types.reduce((s, x) => s + engagedOf(x), 0);
+      const attempted = types.reduce((s, x) => s + x.contact, 0);
       const sum = (k: "reached" | "evaluated" | "qualified" | "appts" | "actionItems") => types.reduce((s, x) => s + x[k], 0);
       return (
         <div className="flex flex-col gap-4">
           <Stats
             items={[
-              { label: "Leads worked", value: fmtInt(total), sub: `${types.length} lead types` },
-              { label: "Reached a person", value: fmtInt(sum("reached")), sub: `${pct(sum("reached"), total)}% of leads worked` },
-              { label: "Qualified", value: fmtInt(sum("qualified")), sub: "buying intent on record", accent: "#0891b2" },
-              { label: "Appointments", value: fmtInt(sum("appts")), accent: "#15803d" },
+              { label: "Leads contacted", value: fmtInt(total), sub: `of ${fmtInt(attempted)} worked · ${types.length} lead types` },
+              { label: "Qualified", value: fmtInt(sum("qualified")), sub: `${pct(sum("qualified"), total)}% of those contacted`, accent: "#0891b2" },
+              { label: "Appointments", value: fmtInt(sum("appts")), sub: `${pct(sum("appts"), total)}% of those contacted`, accent: "#15803d" },
+              // Scoped to the leads on this card, NOT the rooftop — the action-items page counts every open
+              // item and will read higher. Labelled so the two are not mistaken for the same number.
+              { label: "Open action items", value: fmtInt(sum("actionItems")), sub: "on the leads contacted here" },
             ]}
           />
           <Card
@@ -569,11 +592,12 @@ export const REPORTS: ReportDef[] = [
             <LeadStageExplorer types={types} total={total} ctx={c} />
           </Card>
           <Note>
-            Counts leads with at least one conversation in this period, not leads created in it — a lead
-            that came in last month and worked today belongs here. Every percentage is a share of the
-            leads worked on that row. Qualified, appointments and open action items describe where the
-            lead stands NOW, so they are not confined to this period and will not tie exactly to the
-            period figures elsewhere.
+            This is the breakdown for leads we actually got hold of. Leads we tried and never reached are
+            excluded — they are a dialling outcome, not a signal about where the lead came from. Counts
+            leads with at least one conversation in this period, not leads created in it, so a lead that
+            came in last month and was worked today belongs here. Qualified, appointments and open action
+            items describe where the lead stands NOW, so they are not confined to this period and will not
+            tie exactly to the period figures elsewhere.
           </Note>
         </div>
       );
@@ -2144,7 +2168,7 @@ export function LeadsByTypeCard({
   const fresh = state.key === key && state.done;
   const ctx = { teamId, dept, window: win, spyneToken, insights: { leadSources: rows } } as unknown as ReportCtx;
   const types = fresh && rows?.length ? leadTypeRollup(ctx) : [];
-  const total = types.reduce((s, t) => s + t.contact, 0);
+  const total = types.reduce((s, t) => s + engagedOf(t), 0);
 
   /* Never return null. This card sits in a grid column, so vanishing leaves a hole the width of two
    * columns next to a lone neighbour — which is exactly how a silent 401 looked in production. An

@@ -61,6 +61,16 @@ export interface EvalCallTypeGroup {
   primaries: EvalIntentGroup[];
 }
 
+/** One channel's slice of the flow — same shape the chart draws for calls. */
+export interface EvalChannelFlow {
+  scored: number;
+  ghost: number;
+  engaged: number;
+  groups: EvalCallTypeGroup[];
+  secondary: { id: string; label: string; count: number }[];
+  outcomes: OutcomeTally;
+}
+
 export interface EvalFunnelStep {
   key: string;
   label: string;
@@ -106,6 +116,11 @@ export interface EvalOutcomes {
   smsScored: number | null;
   /** Call-type lanes for the flow — GHOST EXCLUDED. Lane shares are of `scored`, so lanes + ghost = 100%. */
   groups: EvalCallTypeGroup[];
+  /* The SAME flow over this agent's scored TEXT conversations, so "what customers asked for" can be read
+   * by channel instead of silently meaning calls. Null when the SMS fetch failed or the rooftop scored
+   * none. Deliberately carries only the flow-shaped fields: funnels and tool metrics are call-based and
+   * do not have an SMS counterpart, and the coverage line has no SMS denominator to divide by. */
+  smsFlow: EvalChannelFlow | null;
   secondary: { id: string; label: string; count: number }[];
   outcomes: OutcomeTally;
   /** Scored conversations where a better outcome was reachable than the one achieved. */
@@ -306,7 +321,7 @@ const MAX_PAGES = 25; // 5 000 scored conversations per direction — far above 
 /* Every scored SALES conversation for one direction whose own start time falls in [startMs, endMs).
  * The API window is start-open-ended on purpose (see the header note on eval-run vs conversation time). */
 async function listSalesEvals(
-  args: { enterpriseId: string; teamId: string; dir: EvalDirection; agentType: "sales" | "service"; startISO: string },
+  args: { enterpriseId: string; teamId: string; dir: EvalDirection; agentType: "sales" | "service"; startISO: string; channel?: "call" | "sms" },
   token?: string | null,
   env?: string | null,
 ): Promise<RawEval[] | null> {
@@ -317,12 +332,12 @@ async function listSalesEvals(
       teamId: args.teamId,
       agentType: args.agentType,
       agentCallType: args.dir,
-      // CALLS ONLY. SMS conversations are scored by the same pipeline and are 37% of the sales cohort
-      // fleet-wide — but this panel's coverage line divides by the agent's CALL count, and both funnels
-      // and the tool metrics are call-based (tool-metrics joins through endcallreports). Mixing SMS in
-      // inflated the numerator against a call denominator. The SMS cohort is counted separately and
-      // stated on the card so it reads as deliberately excluded, not missing.
-      channel: "call",
+      /* ONE CHANNEL PER CALL, never both in one bucket. SMS conversations are scored by the same
+       * pipeline and are ~37% of the sales cohort fleet-wide, but the coverage line divides by the
+       * agent's CALL count and both funnels and tool metrics are call-based (tool-metrics joins through
+       * endcallreports), so a mixed cohort inflates the numerator against a call denominator. The two
+       * are fetched separately and kept as separate flows — the card lets the reader pick. */
+      channel: args.channel ?? "call",
       startDate: args.startISO,
       page: String(page),
       limit: String(PAGE_SIZE),
@@ -516,7 +531,11 @@ export async function fetchSalesOutcomes(
   if (!enterpriseId || !teamId) return null;
 
   return cached(`eval:${env ?? "prod"}:${teamId}:${agentType}:${dir}:${startISO}:${endISO}`, async () => {
-    const raw = await listSalesEvals({ enterpriseId, teamId, dir, agentType, startISO }, token, env);
+    // Both channels in parallel. A failed SMS fetch degrades to "calls only" rather than failing the card.
+    const [raw, rawSms] = await Promise.all([
+      listSalesEvals({ enterpriseId, teamId, dir, agentType, startISO }, token, env),
+      listSalesEvals({ enterpriseId, teamId, dir, agentType, startISO, channel: "sms" }, token, env),
+    ]);
     if (!raw) return null;
 
     // Re-window on the conversation's OWN start time; rows whose id isn't UUIDv7 fall back to createdAt.
@@ -553,6 +572,29 @@ export async function fetchSalesOutcomes(
       if (it) interest[it] = (interest[it] ?? 0) + 1;
     }
 
+    /* The text flow, built with exactly the same helpers and the same conversation-time window, so the
+     * two channels are directly comparable and the card can merge them without re-deriving anything. */
+    const smsFlow: EvalChannelFlow | null = (() => {
+      if (!rawSms) return null;
+      const sRows = rawSms.filter((r) => {
+        const t = conversationStartedAtMs(r.conversationId || "") ?? (r.createdAt ? Date.parse(r.createdAt) : NaN);
+        return Number.isFinite(t) && t >= startMs && t < endMs;
+      });
+      if (!sRows.length) return null;
+      const sGhost = sRows.filter((r) => GHOST_CALL_TYPES.has((r.callType || "").trim()));
+      const sEngaged = sRows.filter((r) => !GHOST_CALL_TYPES.has((r.callType || "").trim()));
+      const sOutcomes: OutcomeTally = {};
+      for (const r of sEngaged) bump(sOutcomes, (r.outcomeAchieved || "None").trim() || "None");
+      return {
+        scored: sRows.length,
+        ghost: sGhost.length,
+        engaged: sEngaged.length,
+        groups: groupFlow(sEngaged),
+        secondary: topSecondary(sEngaged),
+        outcomes: sOutcomes,
+      };
+    })();
+
     // Funnel / tool cohort: the sales call types this direction actually produced (capped — a rooftop
     // with a long tail shouldn't fan out unbounded).
     const salesTypes = groups.filter((g) => g.sales && g.total > 0).map((g) => g.id).slice(0, 12);
@@ -578,19 +620,14 @@ export async function fetchSalesOutcomes(
     const other = await spyneGet<{ total?: number }>(`/conversation/eval-pipeline?${otherQs}`, token, env);
     const derivedScope: EvalOutcomes["derivedScope"] = other && (other.total ?? 0) === 0 ? "exact" : "sales-approx";
 
-    // How much SMS this panel is leaving out (head request — we only want `total`).
-    const smsQs = new URLSearchParams({
-      enterpriseId, teamId, agentType, agentCallType: dir, channel: "sms",
-      startDate: startISO, endDate: endISO, page: "1", limit: "1",
-    });
-    const sms = await spyneGet<{ total?: number }>(`/conversation/eval-pipeline?${smsQs}`, token, env);
-
     return {
       dir,
       scored: rows.length,
       ghost: ghostRows.length,
       engaged: engagedRows.length,
-      smsScored: typeof sms?.total === "number" ? sms.total : null,
+      // Exact now (was a head-request total counted by SCORING date, which is a different window).
+      smsScored: smsFlow ? smsFlow.scored : rawSms ? 0 : null,
+      smsFlow,
       groups,
       secondary: topSecondary(engagedRows),
       outcomes,

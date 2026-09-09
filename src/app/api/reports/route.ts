@@ -1,6 +1,7 @@
 import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS } from "@/lib/reports/supabase";
 import { buildResult } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
+import { assistedApptLeads, assistedInWindow } from "@/lib/reports/assistedAppts";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
@@ -298,11 +299,12 @@ export async function GET(request: Request): Promise<Response> {
 
   // Detail tables (one rpc, fallback to six reads) + both lead-count windows (one rpc) + the
   // lifetime "ever live" probe in parallel.
-  const [detail, lc, sourceCounts, everLive] = await Promise.all([
+  const [detail, lc, sourceCounts, everLive, assistedLeads] = await Promise.all([
     fetchDetailCombined(sb, teamId).then((d) => d ?? fetchDetailPerTable(sb, teamId)),
     leadCountsBoth(sb, teamId, start, end, prior.start, prior.end),
     sourceCountsFor(sb, teamId, start, end),
     teamEverLive(sb, teamId),
+    assistedApptLeads(sb, teamId, start, end),
   ]);
   const { callbacks, campaigns, outcomes, appointments, warmLeads } = detail ?? EMPTY_DETAIL;
   // Named appointments are shown for the report window — filter the ~120d snapshot by booking date.
@@ -319,7 +321,9 @@ export async function GET(request: Request): Promise<Response> {
     const raw = (a.booked_at ?? "").slice(0, 10);
     if (!raw) return false;
     const day = storeLocalDay(a.booked_at ?? "", timezone ?? undefined, raw);
-    return day >= start && day < end;
+    if (!(day >= start && day < end)) return false;
+    // ★ AI-assisted rows must ALSO have an in-window AI touch — see assistedAppts.ts for why.
+    return assistedInWindow(a, assistedLeads);
   });
   // Invariant: a rooftop that returned real rows in THIS request can't be "never live" — don't let a
   // separate probe (even a clean-but-stale empty read) demote it. The probe still gates brand-new

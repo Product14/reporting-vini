@@ -20,7 +20,7 @@ import { Card, SectionLabel, fmtInt } from "@/components/reports/kit";
 import { ConversationDrawer, fmtSecs, fmtWhenShort } from "@/components/reports/kitV3";
 import { fetchConversations, type Conversation } from "@/components/reports/liveData";
 import type { DrillConversation } from "@/app/api/reports/conversation-drill/route";
-import type { EvalOutcomes, EvalFunnel, EvalDirection } from "@/lib/spyne/evalPipeline";
+import type { EvalOutcomes, EvalFunnel, EvalDirection, EvalCallTypeGroup } from "@/lib/spyne/evalPipeline";
 
 // ───────────────────────── outcome rungs ─────────────────────────
 
@@ -168,8 +168,8 @@ function SmsNote({ o }: { o: EvalOutcomes }) {
   if (!o.smsScored) return null;
   return (
     <p className="text-[10.5px] leading-snug text-[#9ca3af]">
-      Phone calls only — {fmtInt(o.smsScored)} text conversation{o.smsScored === 1 ? "" : "s"} handled in this
-      period {o.smsScored === 1 ? "is" : "are"} not counted above.
+      Phone calls only — the {fmtInt(o.smsScored)} text conversation{o.smsScored === 1 ? "" : "s"} handled in
+      this period {o.smsScored === 1 ? "is" : "are"} under Texts.
     </p>
   );
 }
@@ -203,13 +203,76 @@ function ScopeNote({ o }: { o: EvalOutcomes }) {
 
 type FlowView = "sankey" | "table";
 
+/* Which channel the flow is read over. The eval pipeline scores calls and texts separately and they are
+ * genuinely different conversations — a text thread has no transfer and no voicemail — so they are kept
+ * as separate flows and merged only when the reader asks for both. */
+type FlowChannel = "both" | "call" | "sms";
+
+/** The flow-shaped subset both channels share. */
+interface ChannelFlow {
+  scored: number;
+  ghost: number;
+  engaged: number;
+  groups: EvalCallTypeGroup[];
+  secondary: { id: string; label: string; count: number }[];
+  outcomes: Record<string, number>;
+}
+
+const addTally = (into: Record<string, number>, from: Record<string, number>) => {
+  for (const [k, v] of Object.entries(from)) into[k] = (into[k] ?? 0) + v;
+  return into;
+};
+
+/* Merge the two channels into one tree. Lanes and intents are keyed by their eval id, so the same lane
+ * seen on both channels becomes one row whose segments are the sum — which is what "calls + texts" has to
+ * mean for the shares underneath it to be true. */
+function mergeFlows(a: ChannelFlow, b: ChannelFlow): ChannelFlow {
+  const byId = new Map<string, EvalCallTypeGroup>();
+  for (const g of [...a.groups, ...b.groups]) {
+    const hit = byId.get(g.id);
+    if (!hit) {
+      byId.set(g.id, { ...g, outcomes: { ...g.outcomes }, primaries: g.primaries.map((p) => ({ ...p, outcomes: { ...p.outcomes } })) });
+      continue;
+    }
+    hit.total += g.total;
+    hit.sales = hit.sales || g.sales;
+    addTally(hit.outcomes, g.outcomes);
+    for (const p of g.primaries) {
+      const ph = hit.primaries.find((x) => x.id === p.id);
+      if (ph) { ph.total += p.total; addTally(ph.outcomes, p.outcomes); }
+      else hit.primaries.push({ ...p, outcomes: { ...p.outcomes } });
+    }
+  }
+  const secondary = new Map<string, { id: string; label: string; count: number }>();
+  for (const s2 of [...a.secondary, ...b.secondary]) {
+    const hit = secondary.get(s2.id);
+    if (hit) hit.count += s2.count; else secondary.set(s2.id, { ...s2 });
+  }
+  return {
+    scored: a.scored + b.scored,
+    ghost: a.ghost + b.ghost,
+    engaged: a.engaged + b.engaged,
+    groups: [...byId.values()].map((g) => ({ ...g, primaries: g.primaries.slice().sort((x, y) => y.total - x.total) })).sort((x, y) => y.total - x.total),
+    secondary: [...secondary.values()].sort((x, y) => y.count - x.count),
+    outcomes: addTally(addTally({}, a.outcomes), b.outcomes),
+  };
+}
+
+/** The flow to draw for the selected channel. */
+function flowFor(o: EvalOutcomes, ch: FlowChannel): ChannelFlow {
+  const calls: ChannelFlow = { scored: o.scored, ghost: o.ghost, engaged: o.engaged, groups: o.groups, secondary: o.secondary, outcomes: o.outcomes };
+  if (ch === "call" || !o.smsFlow) return calls;
+  if (ch === "sms") return o.smsFlow;
+  return mergeFlows(calls, o.smsFlow);
+}
+
 const plural = (n: number, word: string) => `${fmtInt(n)} ${word}${n === 1 ? "" : "s"}`;
 
 /* ── the drill ──
  * A share on a chart is an argument until someone can open it. Every segment here names a set of real
  * conversations, and clicking one lists them and plays them back. `callType`/`primaryIntent`/`outcome`
  * are the RAW eval values (group.id / primary.id / rung.key), not the display labels — the route filters
- * dealer_leads_raw.conversationEval on exactly those fields. */
+ * dealer_leads.conversationEval on exactly those fields. */
 export interface FlowDrillCtx {
   teamId: string;
   /** "sales" | "service" — the eval pipeline holds both and they must never mix. */
@@ -257,6 +320,7 @@ function VolumeBar({
   max,
   onTip,
   onPick,
+  noun,
 }: {
   tally: Record<string, number>;
   total: number;
@@ -264,6 +328,8 @@ function VolumeBar({
   onTip: (t: Tip) => void;
   /** Absent = not drillable (no context to query with); the segments then stay plain divs. */
   onPick?: (rungKey: string, label: string, color: string, count: number) => void;
+  /** "call" / "text conversation" / "conversation" — the chart is not always about calls. */
+  noun: string;
 }) {
   const rungs = rungsIn(tally);
   // Floor at 1.5% so a single call is still visible; it stays visibly tiny next to a busy row.
@@ -276,7 +342,7 @@ function VolumeBar({
             onTip({
               x: e.clientX,
               y: e.clientY,
-              label: `${r.label} · ${plural(r.count, "call")} · ${pct(r.count, total)}%${onPick ? " · click to listen" : ""}`,
+              label: `${r.label} · ${plural(r.count, noun)} · ${pct(r.count, total)}%${onPick ? " · click to open" : ""}`,
               color: r.color,
             });
           const style = { width: `${(r.count / total) * 100}%`, background: r.color };
@@ -287,7 +353,7 @@ function VolumeBar({
             <button
               key={r.key}
               type="button"
-              aria-label={`${r.label}, ${plural(r.count, "call")} — open these conversations`}
+              aria-label={`${r.label}, ${plural(r.count, noun)} — open these conversations`}
               className={`${cls} cursor-pointer transition-opacity hover:opacity-75`}
               style={style}
               onMouseMove={tip}
@@ -332,11 +398,13 @@ function RibbonFan({
   total,
   onTip,
   onPick,
+  noun,
 }: {
   tally: Record<string, number>;
   total: number;
   onTip: (t: Tip) => void;
   onPick?: (rungKey: string, label: string, color: string, count: number) => void;
+  noun: string;
 }) {
   // Self-measuring: it lives in the same grid column as the collapsed bars, so it must take that
   // column's width rather than be handed the whole card's.
@@ -368,14 +436,14 @@ function RibbonFan({
             key={r.key}
             role={onPick ? "button" : undefined}
             tabIndex={onPick ? 0 : undefined}
-            aria-label={onPick ? `${r.label}, ${plural(r.count, "call")} — open these conversations` : undefined}
+            aria-label={onPick ? `${r.label}, ${plural(r.count, noun)} — open these conversations` : undefined}
             /* focus-visible only: the hit rect spans the card, so a mouse click was painting a full-width
                box around the ribbon. Keyboard focus still shows one. */
             className={onPick ? "outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#813fed]" : undefined}
             style={onPick ? { cursor: "pointer" } : undefined}
             onClick={onPick ? () => onPick(r.key, r.label, r.color, r.count) : undefined}
             onKeyDown={onPick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(r.key, r.label, r.color, r.count); } } : undefined}
-            onMouseMove={(e) => onTip({ x: e.clientX, y: e.clientY, label: `${r.label} · ${plural(r.count, "call")} · ${pct(r.count, total)}%${onPick ? " · click to listen" : ""}`, color: r.color })}
+            onMouseMove={(e) => onTip({ x: e.clientX, y: e.clientY, label: `${r.label} · ${plural(r.count, noun)} · ${pct(r.count, total)}%${onPick ? " · click to open" : ""}`, color: r.color })}
             onMouseLeave={() => onTip(null)}
           >
             {/* Hit area: the ribbon is a thin curve and the label sits outside it, so without this the
@@ -401,10 +469,12 @@ function SankeyView({
   o,
   onTip,
   onDrill,
+  noun,
 }: {
-  o: EvalOutcomes;
+  o: ChannelFlow;
   onTip: (t: Tip) => void;
   onDrill?: (t: DrillTarget) => void;
+  noun: string;
 }) {
   const [exp, setExp] = useState<Record<string, boolean>>({});
   const toggle = (k: string) => setExp((s) => ({ ...s, [k]: !s[k] }));
@@ -425,7 +495,7 @@ function SankeyView({
                 <Caret open={open} />
                 <span className="min-w-0">
                   <span className="block truncate text-[12.5px] font-bold text-[#111]">{g.label}</span>
-                  <span className="text-[10.5px] tabular-nums text-[#9ca3af]">{plural(g.total, "call")} · {pct(g.total, o.scored)}%</span>
+                  <span className="text-[10.5px] tabular-nums text-[#9ca3af]">{plural(g.total, noun)} · {pct(g.total, o.scored)}%</span>
                 </span>
               </button>
               <VolumeBar
@@ -433,6 +503,7 @@ function SankeyView({
                 total={g.total}
                 max={max}
                 onTip={onTip}
+                noun={noun}
                 onPick={onDrill && ((key, label, color, count) =>
                   onDrill({ callType: g.id, outcome: key, label: `${g.label} · ${label}`, color, count }))}
               />
@@ -453,17 +524,17 @@ function SankeyView({
                           <Caret open={pOpen} />
                           <span className="min-w-0">
                             <span className="block truncate text-[11.5px] font-semibold text-[#374151]">{p.label}</span>
-                            <span className="text-[10px] tabular-nums text-[#9ca3af]">{plural(p.total, "call")}</span>
+                            <span className="text-[10px] tabular-nums text-[#9ca3af]">{plural(p.total, noun)}</span>
                           </span>
                         </button>
-                        {pOpen ? <span /> : <VolumeBar tally={p.outcomes} total={p.total} max={max} onTip={onTip} onPick={pick} />}
+                        {pOpen ? <span /> : <VolumeBar tally={p.outcomes} total={p.total} max={max} onTip={onTip} onPick={pick} noun={noun} />}
                         {!pOpen && <span className="hidden sm:flex"><TopOutcome tally={p.outcomes} total={p.total} /></span>}
                       </div>
                       {pOpen && (
                         <div className={`${ROW_GRID} px-1 pb-3`}>
                           <span />
                           <div className="min-w-0 sm:col-span-2">
-                            <RibbonFan tally={p.outcomes} total={p.total} onTip={onTip} onPick={pick} />
+                            <RibbonFan tally={p.outcomes} total={p.total} onTip={onTip} onPick={pick} noun={noun} />
                           </div>
                         </div>
                       )}
@@ -481,7 +552,7 @@ function SankeyView({
 
 /* The same numbers as a table — every row visible at once, exact counts, no interaction needed. This is
  * also the accessible read of the chart: the segment colours are backed by a column of figures. */
-function TableView({ o, onDrill }: { o: EvalOutcomes; onDrill?: (t: DrillTarget) => void }) {
+function TableView({ o, onDrill, noun }: { o: ChannelFlow; onDrill?: (t: DrillTarget) => void; noun: string }) {
   const rungs = OUTCOME_RUNGS.filter((r) => (o.outcomes[r.key] ?? 0) > 0);
   /* A figure in this table and a segment on the chart are the same set of conversations, so they open the
      same way. Only non-zero cells are clickable — an em-dash has nothing behind it. */
@@ -493,7 +564,7 @@ function TableView({ o, onDrill }: { o: EvalOutcomes; onDrill?: (t: DrillTarget)
         type="button"
         className={`${cls} underline decoration-dotted underline-offset-2 hover:opacity-70`}
         style={{ color: r.color }}
-        aria-label={`${rowLabel}, ${r.label}, ${plural(n, "call")} — open these conversations`}
+        aria-label={`${rowLabel}, ${r.label}, ${plural(n, noun)} — open these conversations`}
         onClick={() => onDrill({ ...t, outcome: r.key, label: `${rowLabel} · ${r.label}`, color: r.color, count: n })}
       >
         {fmtInt(n)}
@@ -506,7 +577,7 @@ function TableView({ o, onDrill }: { o: EvalOutcomes; onDrill?: (t: DrillTarget)
         <thead>
           <tr className="border-b border-[#e9eaee]">
             <th className="py-2 pr-3 text-left text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">What they wanted</th>
-            <th className="px-2 py-2 text-right text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Calls</th>
+            <th className="px-2 py-2 text-right text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">{noun === "call" ? "Calls" : noun === "text conversation" ? "Threads" : "Total"}</th>
             <th className="px-2 py-2 text-right text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Share</th>
             {rungs.map((r) => (
               <th key={r.key} className="px-2 py-2 text-right text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">
@@ -560,7 +631,7 @@ function TableView({ o, onDrill }: { o: EvalOutcomes; onDrill?: (t: DrillTarget)
               <td className="py-2 pr-3 text-[11.5px] text-[#9ca3af]">Never connected</td>
               <td className="px-2 py-2 text-right text-[12px] font-semibold tabular-nums text-[#9ca3af]">{fmtInt(o.ghost)}</td>
               <td className="px-2 py-2 text-right text-[11.5px] tabular-nums text-[#9ca3af]">{pct(o.ghost, o.scored)}%</td>
-              <td className="px-2 py-2 text-right text-[11px] text-[#c3cad4]" colSpan={rungs.length}>hung up · quiet · voicemail</td>
+              <td className="px-2 py-2 text-right text-[11px] text-[#c3cad4]" colSpan={rungs.length}>{noun === "text conversation" ? "no reply · opted out" : "hung up · quiet · voicemail"}</td>
             </tr>
           )}
         </tbody>
@@ -582,11 +653,14 @@ function ConversationDrillPanel({
   target,
   ctx,
   dir,
+  channel,
   onClose,
 }: {
   target: DrillTarget;
   ctx: FlowDrillCtx;
   dir: EvalDirection;
+  /** Must match the chart's channel, or the list is a different set of conversations from the segment. */
+  channel: FlowChannel;
   onClose: () => void;
 }) {
   /* `failed` is tracked separately from an empty list on purpose. When the query errors the route returns
@@ -598,7 +672,7 @@ function ConversationDrillPanel({
   const [missing, setMissing] = useState<string | null>(null);
 
   // Keyed by the request so a slow response for a segment the reader has already moved off can never paint.
-  const key = `${target.callType}|${target.primaryIntent ?? ""}|${target.outcome ?? ""}|${dir}`;
+  const key = `${target.callType}|${target.primaryIntent ?? ""}|${target.outcome ?? ""}|${dir}|${channel}`;
   const rows = state.key === key ? state.rows : null;
 
   useEffect(() => {
@@ -606,6 +680,7 @@ function ConversationDrillPanel({
     const qs = new URLSearchParams({
       team_id: ctx.teamId,
       direction: dir,
+      channel,
       callType: target.callType,
       ...(target.primaryIntent ? { primaryIntent: target.primaryIntent } : {}),
       ...(target.outcome ? { outcome: target.outcome } : {}),
@@ -634,7 +709,8 @@ function ConversationDrillPanel({
     try {
       const list = await fetchConversations(ctx.teamId, {
         leadId: row.leadId,
-        channel: "call",
+        // "both" so a merged view can open either kind; the callId/id match below picks the right one.
+        channel: channel === "call" ? "call" : "both",
         limit: 50,
         spyneToken: ctx.spyneToken,
         spyneEnv: ctx.spyneEnv,
@@ -654,7 +730,7 @@ function ConversationDrillPanel({
           <p className="flex items-center gap-2 text-[12.5px] font-bold text-[#111]">
             <span className="h-2.5 w-2.5 flex-none rounded-[3px]" style={{ background: target.color }} />
             {target.label}
-            <span className="font-semibold text-[#9ca3af]">{plural(target.count, "call")}</span>
+            <span className="font-semibold text-[#9ca3af]">{plural(target.count, channel === "sms" ? "text conversation" : channel === "both" ? "conversation" : "call")}</span>
           </p>
           <button type="button" onClick={onClose} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">Close</button>
         </div>
@@ -677,7 +753,7 @@ function ConversationDrillPanel({
             <p className="mt-1 text-[11px] text-[#9ca3af]">
               {rows.length < target.count
                 ? `${fmtInt(rows.length)} of ${fmtInt(target.count)} available to open · newest first`
-                : `${plural(rows.length, "conversation")} · click one to listen`}
+                : `${plural(rows.length, "conversation")} · click one to ${channel === "sms" ? "read it" : "listen"}`}
             </p>
             <div className="mt-2.5 grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>
               {rows.map((c) => (
@@ -691,12 +767,12 @@ function ConversationDrillPanel({
                   <span className="flex w-full items-baseline justify-between gap-2">
                     <span className="truncate text-[12.5px] font-semibold text-[#111]">{c.customer || "Unknown caller"}</span>
                     <span className="flex-none text-[10.5px] tabular-nums text-[#9ca3af]">
-                      {c.durationSec ? fmtSecs(c.durationSec) : ""}
+                      {c.isSms ? (c.msgs ? `${fmtInt(c.msgs)} msg${c.msgs === 1 ? "" : "s"}` : "") : c.durationSec ? fmtSecs(c.durationSec) : ""}
                     </span>
                   </span>
                   <span className="text-[10.5px] text-[#9ca3af]">
                     {fmtWhenShort(c.at)}
-                    {c.hasRecording ? " · recorded" : " · no recording"}
+                    {c.isSms ? " · text thread" : c.hasRecording ? " · recorded" : " · no recording"}
                   </span>
                   {c.summary && <span className="line-clamp-2 text-[11px] leading-snug text-[#6b7280]">{c.summary}</span>}
                   <span className="text-[10.5px] font-semibold" style={{ color: busy === c.callId ? "#813fed" : "#9ca3af" }}>
@@ -722,14 +798,15 @@ function ConversationDrillPanel({
 /* The ghost row beneath the flow: scored conversations where nothing was ever established. Called out
  * rather than drawn as a lane — on an outbound rooftop it is ~90% of the volume and would flatten every
  * real lane to a sliver. */
-function GhostNote({ o }: { o: EvalOutcomes }) {
+function GhostNote({ o, noun }: { o: ChannelFlow; noun: string }) {
   if (!o.ghost) return null;
+  const sms = noun === "text conversation";
   return (
     <div className="mt-2.5 flex items-center gap-2.5 border-t border-[#f2f2f4] pt-3">
       <span className="h-2.5 w-2.5 flex-none rounded-[3px] bg-[#c3cad4]" />
       <span className="text-[12.5px] font-bold text-[#6b7280]">Never connected</span>
       <span className="text-[11px] leading-snug text-[#9ca3af]">
-        hung up, went quiet or reached voicemail before a conversation started — kept out of the figures above.
+        {sms ? "never replied, or opted straight out, before a conversation started" : "hung up, went quiet or reached voicemail before a conversation started"} — kept out of the figures above.
       </span>
       <span className="ml-auto flex-none text-[14px] font-extrabold text-[#9ca3af] tabular-nums">
         {fmtInt(o.ghost)} · {pct(o.ghost, o.scored)}%
@@ -755,9 +832,17 @@ export function CallFlowCard({
 }) {
   const dirLabel = o.dir === "inbound" ? "Inbound" : "Outbound";
   const [view, setView] = useState<FlowView>("sankey");
+  const [channel, setChannel] = useState<FlowChannel>("both");
   const [tip, setTip] = useState<Tip>(null);
   const [target, setTarget] = useState<DrillTarget | null>(null);
   const onDrill = drill?.teamId ? (t: DrillTarget) => { setTarget(t); setTip(null); } : undefined;
+
+  // Texts only appear as a choice when this agent actually has scored ones — a rooftop that never texts
+  // should not be offered an empty tab.
+  const hasSms = !!o.smsFlow && o.smsFlow.scored > 0;
+  const ch: FlowChannel = hasSms ? channel : "call";
+  const f = flowFor(o, ch);
+  const noun = ch === "sms" ? "text conversation" : ch === "both" ? "conversation" : "call";
 
   if (!o.scored) {
     return (
@@ -775,58 +860,85 @@ export function CallFlowCard({
       title={title ?? `Where your ${dirLabel.toLowerCase()} calls went`}
       sub={sub ?? "What each caller wanted, and what came of it"}
       right={
-        /* Same numbers, two readings: the chart for shape, the table for exact figures. The table is
-           also the non-visual read of the chart — every colour is backed by a column of counts. */
-        <div className="no-print flex flex-none rounded-lg bg-[#f1f2f5] p-0.5" role="group" aria-label="View">
-          {([["sankey", "Chart"], ["table", "Table"]] as [FlowView, string][]).map(([v, label]) => (
-            <button
-              key={v}
-              type="button"
-              onClick={() => { setView(v); setTip(null); }}
-              aria-pressed={view === v}
-              className={`rounded-md px-3 py-1 text-[11.5px] font-semibold transition-colors ${
-                view === v ? "bg-white text-[#813fed] shadow-sm" : "text-[#6b7280] hover:text-[#374151]"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="no-print flex flex-none flex-wrap items-center gap-2">
+          {/* Channel first — it changes WHICH conversations are on the chart, where the toggle beside it
+              only changes how the same ones are drawn. */}
+          {hasSms && (
+            <div className="flex flex-none rounded-lg bg-[#f1f2f5] p-0.5" role="group" aria-label="Channel">
+              {([["both", "Calls + texts"], ["call", "Calls"], ["sms", "Texts"]] as [FlowChannel, string][]).map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => { setChannel(v); setTip(null); setTarget(null); }}
+                  aria-pressed={channel === v}
+                  className={`rounded-md px-2.5 py-1 text-[11.5px] font-semibold transition-colors ${
+                    channel === v ? "bg-white text-[#813fed] shadow-sm" : "text-[#6b7280] hover:text-[#374151]"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {/* Same numbers, two readings: the chart for shape, the table for exact figures. The table is
+              also the non-visual read of the chart — every colour is backed by a column of counts. */}
+          <div className="flex flex-none rounded-lg bg-[#f1f2f5] p-0.5" role="group" aria-label="View">
+            {([["sankey", "Chart"], ["table", "Table"]] as [FlowView, string][]).map(([v, label]) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => { setView(v); setTip(null); }}
+                aria-pressed={view === v}
+                className={`rounded-md px-3 py-1 text-[11.5px] font-semibold transition-colors ${
+                  view === v ? "bg-white text-[#813fed] shadow-sm" : "text-[#6b7280] hover:text-[#374151]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       }
     >
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <Legend tally={o.outcomes} />
-          <span className="text-[10.5px] text-[#9ca3af]">{coverageText(o.scored, calls)}</span>
+          <Legend tally={f.outcomes} />
+          <span className="text-[10.5px] text-[#9ca3af]">
+            {/* The "of N calls" denominator only exists for calls — the agent's call count says nothing
+                about texts, so the other two channels state their own reviewed count and no share. */}
+            {ch === "call"
+              ? coverageText(f.scored, calls)
+              : `${fmtInt(f.scored)} ${noun}${f.scored === 1 ? "" : "s"} reviewed in detail`}
+          </span>
         </div>
 
-        {o.groups.length === 0 ? (
+        {f.groups.length === 0 ? (
           <p className="py-3 text-[12px] text-[#6b7280]">
-            Every call this period ended before a conversation started — see the line below.
+            Every {noun} this period ended before a conversation started — see the line below.
           </p>
         ) : view === "sankey" ? (
           <>
-            <SankeyView o={o} onTip={setTip} onDrill={onDrill} />
+            <SankeyView o={f} onTip={setTip} onDrill={onDrill} noun={noun} />
             <p className="text-[10.5px] text-[#9ca3af]">
-              Bar width is call volume · click any row to open it
-              {onDrill ? " · click a coloured segment to hear those calls" : ""}
+              Bar width is {ch === "sms" ? "how many threads" : "conversation volume"} · click any row to open it
+              {onDrill ? ` · click a coloured segment to open those ${ch === "sms" ? "threads" : "conversations"}` : ""}
             </p>
           </>
         ) : (
-          <TableView o={o} onDrill={onDrill} />
+          <TableView o={f} onDrill={onDrill} noun={noun} />
         )}
 
         {target && drill && (
-          <ConversationDrillPanel target={target} ctx={drill} dir={o.dir} onClose={() => setTarget(null)} />
+          <ConversationDrillPanel target={target} ctx={drill} dir={o.dir} channel={ch} onClose={() => setTarget(null)} />
         )}
 
-        <GhostNote o={o} />
-        <SmsNote o={o} />
+        <GhostNote o={f} noun={noun} />
+        {ch === "call" && <SmsNote o={o} />}
 
-        {o.secondary.length > 0 && (
+        {f.secondary.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 border-t border-[#f2f2f4] pt-3">
             <span className="text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Also came up</span>
-            {o.secondary.map((s) => (
+            {f.secondary.map((s) => (
               <span key={s.id} className="rounded-full border border-[#e5e7eb] px-2.5 py-0.5 text-[11px] font-medium text-[#374151]">
                 {s.label} <span className="font-bold text-[#9ca3af] tabular-nums">{s.count}</span>
               </span>

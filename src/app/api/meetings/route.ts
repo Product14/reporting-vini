@@ -1,5 +1,6 @@
 import { fetchMeetings, type ServiceType } from "@/lib/spyne/meetings";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
+import { assistedApptLeads, assistedInWindow } from "@/lib/reports/assistedAppts";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getSupabase, AGENT_LEAD_DAYS, REPORT_APPOINTMENTS } from "@/lib/reports/supabase";
 import { rangeFor } from "@/components/reports/liveData";
@@ -32,13 +33,18 @@ interface ApptRow {
   meeting_id: string | null; lead_id: string | null; customer_name: string | null; phone: string | null;
   vehicle: string | null; intent: string | null; service_type: string | null;
   meeting_start: string | null; booked_at: string | null;
+  status: string | null; assisted?: boolean | null;
 }
 function toMeeting(r: ApptRow): Meeting {
   return {
     id: r.meeting_id || "", leadId: r.lead_id || null,
     customer: (r.customer_name || "").trim() || "—", phone: r.phone || null,
     vehicle: (r.vehicle || "").trim(), when: r.meeting_start || "", tz: null,
-    status: "scheduled", serviceType: r.service_type || "", assignedTo: null,
+    /* ★ THE ROW'S OWN STATUS (fixed 2026-09-09). This was hard-coded to "scheduled" while the report card
+     * reads the same snapshot column and shows the real one, so one screen called an appointment
+     * cancelled and another called it scheduled — Jorge Villegas at Covina Kia, on the same day. */
+    status: (r.status || "").trim() || "scheduled",
+    serviceType: r.service_type || "", assignedTo: null,
     intent: r.intent || null, bookedAt: r.booked_at || null,
   };
 }
@@ -58,7 +64,15 @@ async function sbAppointments(
     else q = q.gte("meeting_start", startISO).order("meeting_start", { ascending: true });
     const { data, error } = await q;
     if (error || !Array.isArray(data)) return null;
-    return (data as ApptRow[]).map(toMeeting);
+    let rows = data as ApptRow[];
+    /* AI-assisted rows need the window's own AI-touch check, exactly as the report card applies it — the
+     * snapshot's is a trailing 120 days. Without this the same rooftop's appointment list is longer here
+     * than on the card it is supposed to be the detail for. Only meaningful for a bounded window. */
+    if (mode === "window" && rows.some((r) => r.assisted)) {
+      const leads = await assistedApptLeads(sb, teamId, startISO.slice(0, 10), endISO.slice(0, 10));
+      rows = rows.filter((r) => assistedInWindow(r, leads));
+    }
+    return rows.map(toMeeting);
   } catch {
     return null;
   }
