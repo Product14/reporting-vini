@@ -190,7 +190,7 @@ function LibraryView() {
               backToAgent={backToAgent}
             />
           ) : (
-            <Gallery ctx={ctx} live={liveIds} ready={ready} onOpen={openReport} accountName={account?.name ?? ""} />
+            <Gallery ctx={ctx} live={liveIds} ready={ready} onOpen={openReport} accountName={account?.name ?? ""} navQuery={navQuery} />
           )}
         </main>
       </div>
@@ -207,7 +207,7 @@ const BUCKET_TEXT: Record<string, string> = {
  * categories hold two or three reports, so grouping into separate rows left two cards floating in a
  * four-column space. Every card leads with the QUESTION it answers — a manager picks by "what do I want
  * to know", not by chart type. */
-function Gallery({ ctx, live, ready, onOpen, accountName }: { ctx: ReportCtx; live: Set<string>; ready: boolean; onOpen: (r: ReportDef) => void; accountName: string }) {
+function Gallery({ ctx, live, ready, onOpen, accountName, navQuery }: { ctx: ReportCtx; live: Set<string>; ready: boolean; onOpen: (r: ReportDef) => void; accountName: string; navQuery: string }) {
   const [cat, setCat] = useState<string>("All");
   const cats = ["All", ...Array.from(new Set(REPORTS.map((r) => r.category)))];
   // Available reports first — a dealer should never have to hunt past dimmed cards to find a live one.
@@ -216,7 +216,10 @@ function Gallery({ ctx, live, ready, onOpen, accountName }: { ctx: ReportCtx; li
     .sort((a, b) => Number(live.has(b.id)) - Number(live.has(a.id)));
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-7">
+      <AgentReportCards ctx={ctx} navQuery={navQuery} />
+
+      <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="flex-1 min-w-[240px]">
           <SectionLabel hint={ready ? `${live.size} of ${REPORTS.length} ready for ${ctx.periodLabel.toLowerCase()}` : "loading your data…"}>
@@ -274,6 +277,77 @@ function Gallery({ ctx, live, ready, onOpen, accountName }: { ctx: ReportCtx; li
       </div>
 
       <RequestForm ctx={ctx} accountName={accountName} />
+      </div>
+    </div>
+  );
+}
+
+/* THE TWO AGENT REPORTS, at the head of the library.
+ *
+ * The small reports below answer one question each; an agent report is the whole story for one agent, so
+ * it leads rather than sitting as a 25th card of the same size. Two cards because a sales rooftop runs
+ * two agents — the inbound one answering the phone and the outbound one working the list — and a dealer
+ * thinks in exactly those terms.
+ *
+ * Driven by the agents the rooftop ACTUALLY runs (already department-scoped upstream), so a Service-scoped
+ * library shows its service agents and a rooftop running one agent shows one card, not an empty slot. */
+function AgentReportCards({ ctx, navQuery }: { ctx: ReportCtx; navQuery: string }) {
+  const agents = ctx.agents.slice(0, 2);
+  if (!agents.length) return null;
+  const sep = navQuery ? (navQuery.startsWith("?") ? "&" : "?") : "?";
+  return (
+    <div className="flex flex-col gap-3">
+      <SectionLabel hint={ctx.periodLabel}>Your agents</SectionLabel>
+      <div className="grid gap-4" style={{ gridTemplateColumns: agents.length > 1 ? "repeat(auto-fit, minmax(320px, 1fr))" : "1fr" }}>
+        {agents.map((a) => {
+          const name = a.report.summary.person || a.name;
+          /* Canonical wordings, and every label names its OWN unit — calls, leads, appointments — because
+           * these three do not nest. Sales Inbound qualified is the AI's verdict at LEAD grain across
+           * calls AND texts, so it legitimately runs higher than the call count (117 vs 65 on the rooftop
+           * this was built against). A row labelled "Conversations / Qualified / Appointments" reads as a
+           * funnel and invites 117÷45 = 260%, which is the exact ratio the metric spec says never to
+           * build on this agent. */
+          const stats: { label: string; value: string }[] = [
+            { label: a.headlineLabel, value: fmtInt(a.metrics.calls) },
+            { label: "Qualified leads", value: fmtInt(a.metrics.qualified) },
+            { label: "Appointments booked", value: fmtInt(a.metrics.appointments) },
+          ];
+          // Only worth explaining when the numbers look inverted; on outbound they never do.
+          const smsNote = a.metrics.qualified > a.metrics.calls;
+          return (
+            <a
+              key={a.id}
+              href={`/reports/agents${navQuery}${sep}agent=${encodeURIComponent(a.id)}`}
+              className="flex flex-col gap-4 rounded-2xl border border-[#e5e7eb] bg-white px-6 py-5 shadow-sm transition-shadow hover:border-[#d6c9f5] hover:shadow-md"
+            >
+              <div className="flex items-center gap-3">
+                <span className="flex h-11 w-11 flex-none items-center justify-center rounded-xl bg-[#faf8ff] text-[20px] leading-none">{a.icon}</span>
+                <div className="min-w-0">
+                  <p className="truncate text-[15px] font-extrabold leading-tight text-[#111]">{name}</p>
+                  <p className="text-[11.5px] text-[#6b7280]">{a.dept} {a.dir} · {a.dir === "Inbound" ? "answers your phone" : "works your lead list"}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                {stats.map((s) => (
+                  <div key={s.label}>
+                    <p className="text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">{s.label}</p>
+                    <p className="mt-0.5 text-[20px] font-extrabold leading-none tabular-nums text-[#111]">{s.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {smsNote && (
+                <p className="text-[10.5px] leading-snug text-[#9ca3af]">
+                  Qualified counts leads {name} qualified by call or text, so it can run above the call count.
+                </p>
+              )}
+
+              <span className="mt-auto text-[12px] font-bold text-[#813fed]">Open the full report →</span>
+            </a>
+          );
+        })}
+      </div>
     </div>
   );
 }
