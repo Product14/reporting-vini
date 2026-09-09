@@ -11,14 +11,15 @@
  * ADDING A REPORT: append one REPORTS entry. It shows up in the library, gets a card, an availability
  * gate and an export automatically. */
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Card, fmtInt, StepFunnel, TrendBars, Th } from "@/components/reports/kit";
-import { fmtRate, fmtSecs, fmtDuration, NamedApptsTable, WarmLeadChips, RankedOutcomeTable, MetricTile } from "@/components/reports/kitV3";
+import { fmtRate, fmtSecs, fmtDuration, NamedApptsTable, WarmLeadChips, RankedOutcomeTable, MetricTile, ConversationDrawer } from "@/components/reports/kitV3";
 import { CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
 import type { EvalOutcomes, EvalDirection } from "@/lib/spyne/evalPipeline";
 import type { AgentData, NamedAppt, WarmLeadItem } from "@/components/reports/data";
-import type { FetchResult, FleetLive, ActionItem, ActionItemStats, ReportMetrics } from "@/components/reports/liveData";
+import { fetchConversations, type FetchResult, type FleetLive, type ActionItem, type ActionItemStats, type ReportMetrics, type Conversation } from "@/components/reports/liveData";
 import type { InsightsPayload } from "@/app/api/reports/insights/route";
+import type { DrillLead } from "@/app/api/reports/lead-drill/route";
 import type { ExportSheet } from "@/components/reports/exportReport";
 
 // ───────────────────────── context ─────────────────────────
@@ -42,6 +43,8 @@ export interface ReportCtx {
   insights: InsightsPayload | null;
   /** Department the reader is scoped to — reports meaningful only to the other one are not offered. */
   dept?: "sales" | "service" | "all";
+  /** The selected window, so a drill-down can ask the server for the same slice the report is showing. */
+  window?: { bucket?: string; start?: string; end?: string };
 }
 
 export interface ReportDef {
@@ -235,18 +238,36 @@ function svcLabel(tool: string): string {
 
 /* Lead rows rolled up to TYPE, each carrying its own sources. The CRM writes the type inconsistently
  * ("INTERNET" and "Internet", "Walk-in" and "WALK_IN"), so the SQL normalises it and this just groups. */
-export interface LeadTypeRow {
-  type: string;
+export type LeadStageKey = "appt" | "qualifiedOnly" | "reachedOnly" | "notReached";
+
+/* The four stages a worked lead can be in, best first — mutually exclusive, so they stack. The funnel
+ * columns (contact/reached/qualified/appts) NEST and cannot be stacked without double counting. */
+export const LEAD_STAGES: { key: LeadStageKey; label: string; color: string; drill: string }[] = [
+  { key: "appt", label: "Appointment", color: "#15803d", drill: "appt" },
+  { key: "qualifiedOnly", label: "Qualified, no appointment", color: "#0891b2", drill: "qualified" },
+  { key: "reachedOnly", label: "Reached, not qualified", color: "#2563eb", drill: "reached" },
+  { key: "notReached", label: "Never reached", color: "#adb5c0", drill: "not_reached" },
+];
+
+export interface LeadRowStats {
   contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number;
-  sources: { source: string; contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number }[];
+  appt: number; qualifiedOnly: number; reachedOnly: number; notReached: number;
+}
+export interface LeadTypeRow extends LeadRowStats {
+  type: string;
+  sources: (LeadRowStats & { source: string })[];
 }
 function leadTypeRollup(c: ReportCtx): LeadTypeRow[] {
   const rows = c.insights?.leadSources ?? [];
   const byType = new Map<string, LeadTypeRow>();
   for (const r of rows) {
-    const hit = byType.get(r.type) ?? { type: r.type, contact: 0, reached: 0, evaluated: 0, qualified: 0, appts: 0, actionItems: 0, sources: [] };
+    const hit = byType.get(r.type) ?? {
+      type: r.type, contact: 0, reached: 0, evaluated: 0, qualified: 0, appts: 0, actionItems: 0,
+      appt: 0, qualifiedOnly: 0, reachedOnly: 0, notReached: 0, sources: [],
+    };
     hit.contact += r.contact; hit.reached += r.reached; hit.evaluated += r.evaluated;
     hit.qualified += r.qualified; hit.appts += r.appts; hit.actionItems += r.actionItems;
+    hit.appt += r.appt; hit.qualifiedOnly += r.qualifiedOnly; hit.reachedOnly += r.reachedOnly; hit.notReached += r.notReached;
     hit.sources.push(r);
     byType.set(r.type, hit);
   }
@@ -255,67 +276,101 @@ function leadTypeRollup(c: ReportCtx): LeadTypeRow[] {
     .sort((a, b) => b.contact - a.contact);
 }
 
-/* The table. A type row opens to reveal its sources — a rooftop can carry 50+ sources under INTERNET
- * alone, which is unreadable flat but exactly what a marketing manager wants once they pick a type.
- * EVERY percentage is a share of the row's own population (leads worked). It is tempting to make each
- * column a share of the previous one so the table reads as a funnel — but qualified, appointments and
- * open action items are LEAD-LEVEL facts that do not require having been reached in this window, so
- * against Reached they run over 100% (one rooftop rendered "207 action items, 174%"). Against the
- * population they cannot. */
-function LeadSourceTable({ types, total }: { types: LeadTypeRow[]; total: number }) {
+/* The table, drawn the way the conversation flow is: one row per lead type, a stacked bar showing where
+ * those leads actually got to, and the winning stage named on the right. Bar WIDTH is the type's share of
+ * all leads worked, so a 600-lead type and a 2-lead type never look alike; the segments inside it are
+ * that type's own split. Expanding a type reveals its sources drawn the same way.
+ *
+ * Every segment is clickable and opens the leads behind it — a count you cannot open is a count you
+ * cannot act on. */
+function LeadSourceTable({
+  types, total, onDrill,
+}: {
+  types: LeadTypeRow[];
+  total: number;
+  onDrill: (d: { type: string; source?: string; stage: (typeof LEAD_STAGES)[number] }) => void;
+}) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const cell = (n: number, denom: number, colour?: string) => (
-    <>
-      <span className="font-semibold" style={{ color: n ? colour ?? "#111" : "#c3cad4" }}>{fmtInt(n)}</span>
-      {denom > 0 && <span className="ml-1.5 text-[11px] text-[#9ca3af]">{pct(n, denom)}%</span>}
-    </>
+  const max = Math.max(1, ...types.map((t) => t.contact));
+
+  const Bar = ({ row, type, source }: { row: LeadRowStats; type: string; source?: string }) => (
+    <div className="h-5 w-full rounded-md bg-[#f4f5f7]">
+      <div className="flex h-full overflow-hidden rounded-md" style={{ width: `${Math.max(1.5, (row.contact / max) * 100)}%`, gap: 1 }}>
+        {LEAD_STAGES.filter((st) => row[st.key] > 0).map((st) => (
+          <button
+            key={st.key}
+            type="button"
+            title={`${st.label} · ${fmtInt(row[st.key])} of ${fmtInt(row.contact)} · click to see them`}
+            onClick={(e) => { e.stopPropagation(); onDrill({ type, source, stage: st }); }}
+            className="h-full min-w-[3px] first:rounded-l-md last:rounded-r-md hover:opacity-80"
+            style={{ width: `${(row[st.key] / row.contact) * 100}%`, background: st.color }}
+          />
+        ))}
+      </div>
+    </div>
   );
+
+  const Winner = ({ row }: { row: LeadRowStats }) => {
+    const top = LEAD_STAGES.filter((st) => row[st.key] > 0).sort((a, b) => row[b.key] - row[a.key])[0];
+    if (!top) return null;
+    return (
+      <span className="flex items-center gap-1.5 text-[11px] leading-tight">
+        <span className="h-2 w-2 flex-none rounded-sm" style={{ background: top.color }} />
+        <span className="truncate font-semibold text-[#374151]">{top.label}</span>
+        <span className="flex-none tabular-nums text-[#9ca3af]">{pct(row[top.key], row.contact)}%</span>
+      </span>
+    );
+  };
+
+  const GRID = "grid grid-cols-[minmax(150px,230px)_1fr] items-center gap-3 sm:grid-cols-[minmax(170px,250px)_1fr_minmax(140px,190px)]";
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px]">
-        <thead className="bg-[#fafafa]">
-          <tr>
-            <Th align="left">Type / source</Th>
-            <Th align="right">Leads worked</Th>
-            <Th align="right">Reached</Th>
-            <Th align="right">Qualified</Th>
-            <Th align="right">Appointments</Th>
-            <Th align="right">Open action items</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {types.map((t) => (
-            <React.Fragment key={t.type}>
-              <tr className="cursor-pointer border-t border-[#f0f0f0] bg-[#fbfbfc] hover:bg-[#faf8ff]" onClick={() => setOpen((s) => ({ ...s, [t.type]: !s[t.type] }))}>
-                <td className="px-4 py-2.5 text-[12.5px] font-bold text-[#111]">
-                  <span className="mr-2 inline-block text-[9px] text-[#813fed]">{open[t.type] ? "▼" : "▶"}</span>
-                  {t.type.replace(/_/g, " ")}
-                  <span className="ml-2 text-[10.5px] font-medium text-[#9ca3af]">{t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
-                </td>
-                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.contact, total)}</td>
-                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.reached, t.contact)}</td>
-                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.qualified, t.contact, "#0891b2")}</td>
-                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.appts, t.contact, "#15803d")}</td>
-                <td className="px-4 py-2.5 text-right text-[12.5px] tabular-nums">{cell(t.actionItems, t.contact, "#d97706")}</td>
-              </tr>
-              {open[t.type] &&
-                t.sources.map((r) => (
-                  <tr key={`${t.type}/${r.source}`} className="border-t border-[#f7f7f9]">
-                    <td className="py-2 pl-11 pr-4 text-[11.5px] text-[#4b5563]">{r.source}</td>
-                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.contact, total)}</td>
-                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.reached, r.contact)}</td>
-                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.qualified, r.contact, "#0891b2")}</td>
-                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.appts, r.contact, "#15803d")}</td>
-                    <td className="px-4 py-2 text-right text-[11.5px] tabular-nums">{cell(r.actionItems, r.contact, "#d97706")}</td>
-                  </tr>
-                ))}
-            </React.Fragment>
-          ))}
-        </tbody>
-      </table>
+    <div className="px-5 py-4">
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        {LEAD_STAGES.map((st) => (
+          <span key={st.key} className="inline-flex items-center gap-1.5 text-[11px] text-[#374151]">
+            <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: st.color }} />
+            {st.label}
+          </span>
+        ))}
+      </div>
+
+      {types.map((t) => (
+        <div key={t.type} className="border-b border-[#f4f4f6] py-1 last:border-b-0">
+          <button type="button" onClick={() => setOpen((s) => ({ ...s, [t.type]: !s[t.type] }))} className={`${GRID} w-full rounded-lg px-1 py-2 text-left hover:bg-[#fafafa]`}>
+            <span className="flex min-w-0 items-center gap-2">
+              <span className={`flex-none text-[9px] text-[#813fed] transition-transform ${open[t.type] ? "rotate-90" : ""}`}>▶</span>
+              <span className="min-w-0">
+                <span className="block truncate text-[12.5px] font-bold text-[#111]">{t.type.replace(/_/g, " ")}</span>
+                <span className="text-[10.5px] tabular-nums text-[#9ca3af]">{fmtInt(t.contact)} leads · {pct(t.contact, total)}% · {t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
+              </span>
+            </span>
+            <Bar row={t} type={t.type} />
+            <span className="hidden sm:flex"><Winner row={t} /></span>
+          </button>
+
+          {open[t.type] && (
+            <div className="ml-3 border-l-2 border-[#ece9f6] pl-3">
+              {t.sources.map((r) => (
+                <div key={r.source} className={`${GRID} px-1 py-1.5`}>
+                  <span className="min-w-0 pl-4">
+                    <span className="block truncate text-[11.5px] font-semibold text-[#374151]">{r.source}</span>
+                    <span className="text-[10px] tabular-nums text-[#9ca3af]">{fmtInt(r.contact)} leads</span>
+                  </span>
+                  <Bar row={r} type={t.type} source={r.source} />
+                  <span className="hidden sm:flex"><Winner row={r} /></span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      <p className="mt-3 text-[10.5px] text-[#9ca3af]">Bar width is the number of leads · click any segment to see the customers behind it</p>
     </div>
   );
 }
+
 
 const anyOutcome = (c: ReportCtx) => c.outcomes.inbound ?? c.outcomes.outbound ?? null;
 const pct = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
@@ -504,10 +559,10 @@ export const REPORTS: ReportDef[] = [
           />
           <Card
             title="Lead type and source"
-            sub="Worked → reached → qualified → appointments · click a type to open its sources"
+            sub="Where the leads from each type and source actually got to · click a type to open its sources"
             pad={false}
           >
-            <LeadSourceTable types={types} total={total} />
+            <LeadStageExplorer types={types} total={total} ctx={c} />
           </Card>
           <Note>
             Counts leads with at least one conversation in this period, not leads created in it — a lead
@@ -1920,3 +1975,110 @@ export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
 /** Outcome columns, in the canonical rung order, for the flow export. */
 const OUTCOME_KEYS = ["Appointment", "Transfer", "Callback", "Query Resolved", "Qualified Lead", "None"];
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/* THE DRILL-DOWN. Clicking a segment asks the server for the leads behind exactly that cell, then a lead
+ * opens its own conversations — recording and transcript — through the existing lead-scoped conversation
+ * path and the drawer the Calls tab already uses. Nothing here re-implements playback.
+ *
+ * The whole point: a number on a report should be openable. "43 reached but never qualified" is an
+ * argument; the 43 conversations behind it are evidence, and that is where a manager actually coaches. */
+export function LeadStageExplorer({ types, total, ctx }: { types: LeadTypeRow[]; total: number; ctx: ReportCtx }) {
+  const [drill, setDrill] = useState<{ type: string; source?: string; stage: (typeof LEAD_STAGES)[number] } | null>(null);
+  return (
+    <>
+      <LeadSourceTable types={types} total={total} onDrill={setDrill} />
+      {drill && <LeadDrillPanel drill={drill} ctx={ctx} onClose={() => setDrill(null)} />}
+    </>
+  );
+}
+
+function LeadDrillPanel({
+  drill, ctx, onClose,
+}: {
+  drill: { type: string; source?: string; stage: (typeof LEAD_STAGES)[number] };
+  ctx: ReportCtx;
+  onClose: () => void;
+}) {
+  /* Keyed by the request, not reset inside the effect: a synchronous setState in an effect costs an
+   * extra render and defeats the compiler's memoization. A stale payload can never paint because the
+   * reader below only accepts one whose key matches. */
+  const [state, setState] = useState<{ key: string; leads: DrillLead[] | null }>({ key: "", leads: null });
+  const [conv, setConv] = useState<Conversation | null>(null);
+  const [busyLead, setBusyLead] = useState<string | null>(null);
+
+  const key = `${drill.type}|${drill.source ?? ""}|${drill.stage.drill}`;
+  const leads = state.key === key ? state.leads : null;
+  useEffect(() => {
+    let on = true;
+    const qs = new URLSearchParams({
+      team_id: ctx.teamId,
+      bucket_stage: drill.stage.drill,
+      type: drill.type,
+      ...(drill.source ? { source: drill.source } : {}),
+      ...(ctx.dept && ctx.dept !== "all" ? { serviceType: ctx.dept } : {}),
+      ...(ctx.window?.start && ctx.window?.end ? { start: ctx.window.start, end: ctx.window.end } : { bucket: ctx.window?.bucket ?? "last30" }),
+    });
+    fetch(`/api/reports/lead-drill?${qs}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { leads: [] }))
+      .then((j: { leads?: DrillLead[] }) => { if (on) setState({ key, leads: Array.isArray(j.leads) ? j.leads : [] }); })
+      .catch(() => { if (on) setState({ key, leads: [] }); });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  /* One lead's calls, then straight into the drawer. Opening the newest is what a reviewer wants nine
+   * times in ten; the drawer itself carries the recording and transcript. */
+  const openLead = async (l: DrillLead) => {
+    setBusyLead(l.leadId);
+    try {
+      const rows = await fetchConversations(ctx.teamId, { leadId: l.leadId, channel: "both", limit: 20 });
+      if (rows.length) setConv(rows[0]);
+    } finally {
+      setBusyLead(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="border-t border-[#f0f0f0] bg-[#fbfbfc] px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[12.5px] font-bold text-[#111]">
+            <span className="mr-2 inline-block h-2.5 w-2.5 rounded-[3px] align-middle" style={{ background: drill.stage.color }} />
+            {drill.stage.label} · {drill.type.replace(/_/g, " ")}
+            {drill.source ? ` · ${drill.source}` : ""}
+          </p>
+          <button type="button" onClick={onClose} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">Close</button>
+        </div>
+
+        {leads === null ? (
+          <p className="mt-3 text-[12px] text-[#9ca3af]">Finding the customers…</p>
+        ) : !leads.length ? (
+          <p className="mt-3 text-[12px] text-[#6b7280]">No customers to show for this one.</p>
+        ) : (
+          <>
+            <p className="mt-1 text-[11px] text-[#9ca3af]">{fmtInt(leads.length)} customer{leads.length === 1 ? "" : "s"} · click one to open the conversation</p>
+            <div className="mt-2 grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+              {leads.map((l) => (
+                <button
+                  key={l.leadId}
+                  type="button"
+                  onClick={() => openLead(l)}
+                  disabled={busyLead === l.leadId}
+                  className="flex flex-col items-start gap-0.5 rounded-xl border border-[#e5e7eb] bg-white px-3.5 py-2.5 text-left hover:border-[#d6c9f5] hover:shadow-sm disabled:opacity-60"
+                >
+                  <span className="truncate text-[12.5px] font-semibold text-[#111]">{l.customer || "Unknown customer"}</span>
+                  <span className="text-[11px] tabular-nums text-[#6b7280]">{l.phone || "no number"}</span>
+                  <span className="text-[10.5px] text-[#9ca3af]">
+                    {busyLead === l.leadId ? "Opening…" : `${fmtInt(l.calls)} call${l.calls === 1 ? "" : "s"} · ${l.lastCallAt.slice(0, 10)}`}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
+      <ConversationDrawer conv={conv} onClose={() => setConv(null)} />
+    </>
+  );
+}

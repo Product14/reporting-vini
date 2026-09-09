@@ -178,10 +178,11 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
       outcomes: outcomesFeed.data,
       insights,
       dept: dept === "all" ? "all" : dept,
+      window: custom ? { start: custom.start, end: addDay(custom.end) } : { bucket },
       warmLeads: (feed?.warmLeads ?? []).filter((w) => dept === "all" || w.serviceType === dept),
       namedAppts: (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept),
     }),
-    [teamId, enterpriseId, periodLabel, feed, fleet, scoped, metrics, actionStats, actionItems, outcomesFeed.data, dept, insights],
+    [teamId, enterpriseId, periodLabel, feed, fleet, scoped, metrics, actionStats, actionItems, outcomesFeed.data, dept, insights, bucket, custom],
   );
 
   const ready = feed !== null;

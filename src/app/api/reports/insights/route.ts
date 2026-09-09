@@ -48,7 +48,10 @@ export interface InsightsPayload {
   serviceTools: { tool: string; ok: number; failed: number }[] | null;
   /* Lead type → source, with the whole funnel behind each: the CRM's own lead classification, not the
    * channel label the aggregate carries. */
-  leadSources: { type: string; source: string; contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number }[] | null;
+  /* Lead type → source. `contact/reached/...` are the funnel columns; `appt/qualifiedOnly/reachedOnly/
+   * notReached` are the SAME leads split into mutually-exclusive furthest-stage buckets, which is what a
+   * stacked bar needs (the funnel columns nest, so they cannot be stacked). */
+  leadSources: { type: string; source: string; contact: number; reached: number; evaluated: number; qualified: number; appts: number; actionItems: number; appt: number; qualifiedOnly: number; reachedOnly: number; notReached: number }[] | null;
 }
 
 /* CRM status → the bucket a dealer thinks in. Statuses are free-form per CRM, so this matches on the
@@ -265,7 +268,9 @@ export async function GET(request: Request): Promise<Response> {
     WITH
     conv AS (
       SELECT leadId AS lid,
-             maxIf(1, callDetails_endedReason NOT IN ('voicemail','voicemail_full','no_answer','customer_declined','number_not_found','busy','machine_ivr')) AS reached
+             -- NULL-safe: maxIf returns NULL when no call matched, and a NULL here silently voids every
+             -- bucket test downstream (NULL = 0 is NULL, not false).
+             toUInt8(ifNull(maxIf(1, callDetails_endedReason NOT IN ('voicemail','voicemail_full','no_answer','customer_declined','number_not_found','busy','machine_ivr')), 0)) AS reached
       FROM dealer_leads.endcallreports FINAL
       WHERE teamId='${T}' AND isTestCall=0 AND ifNull(leadId,'') != ''${deptCall} AND ${win("createdAt")}
       GROUP BY leadId
@@ -282,8 +287,14 @@ export async function GET(request: Request): Promise<Response> {
     ai AS (SELECT DISTINCT lead_id AS lid FROM dealer_leads.actionItems FINAL WHERE team_id='${T}' AND ifNull(is_active,0)=1)
     SELECT ld.type AS type, ld.source AS source,
            count() AS contact, sum(conv.reached) AS reached,
-           countIf(ev.lid != '') AS evaluated, countIf(lq.q = 1) AS qualified,
-           countIf(ap.lid != '') AS appts, countIf(ai.lid != '') AS actionItems
+           countIf(isNotNull(ev.lid)) AS evaluated, countIf(lq.q = 1) AS qualified,
+           countIf(isNotNull(ap.lid)) AS appts, countIf(isNotNull(ai.lid)) AS actionItems,
+           -- Mutually exclusive, best stage first. lead_id on the joined tables is Nullable, so an
+           -- unmatched row arrives as NULL rather than empty string: hence isNull/isNotNull.
+           countIf(isNotNull(ap.lid)) AS appt,
+           countIf(isNull(ap.lid) AND lq.q = 1) AS qualifiedOnly,
+           countIf(isNull(ap.lid) AND lq.q != 1 AND conv.reached = 1) AS reachedOnly,
+           countIf(isNull(ap.lid) AND lq.q != 1 AND conv.reached = 0) AS notReached
     FROM conv
     INNER JOIN ld ON ld.lid = conv.lid
     LEFT JOIN ev ON ev.lid = conv.lid
@@ -320,7 +331,7 @@ export async function GET(request: Request): Promise<Response> {
     safe<{ mk: string; modelName: string; modelKeyOut: string; units: string | number }>(stockSql),
     safe<{ attempts: string | number; leads: string | number }>(effortSql),
     safe<{ tool: string; ok: string | number; failed: string | number }>(serviceToolsSql),
-    safe<{ type: string; source: string; contact: string | number; reached: string | number; evaluated: string | number; qualified: string | number; appts: string | number; actionItems: string | number }>(leadSourcesSql),
+    safe<Record<string, string | number>>(leadSourcesSql),
   ]);
 
   const n = (v: string | number | undefined) => Number(v ?? 0) || 0;
@@ -371,8 +382,9 @@ export async function GET(request: Request): Promise<Response> {
     serviceTools: serviceToolRows ? serviceToolRows.map((r) => ({ tool: r.tool, ok: n(r.ok), failed: n(r.failed) })) : null,
     leadSources: leadSourceRows
       ? leadSourceRows.map((r) => ({
-          type: r.type, source: r.source, contact: n(r.contact), reached: n(r.reached),
+          type: String(r.type), source: String(r.source), contact: n(r.contact), reached: n(r.reached),
           evaluated: n(r.evaluated), qualified: n(r.qualified), appts: n(r.appts), actionItems: n(r.actionItems),
+          appt: n(r.appt), qualifiedOnly: n(r.qualifiedOnly), reachedOnly: n(r.reachedOnly), notReached: n(r.notReached),
         }))
       : null,
   };

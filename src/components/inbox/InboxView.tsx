@@ -418,9 +418,9 @@ function Inbox() {
   const [dateBasis, setDateBasis] = useState<"lead" | "conversation">("conversation");
   const [filtersOpen, setFiltersOpen] = useState(false);   // desktop popover
   const [sheetOpen, setSheetOpen] = useState(false);        // mobile all-in-one sheet
-  // Desktop hover preview for a customer row (lead type / source / vehicle). Holds the customer + the row's
-  // viewport rect so the floating card can anchor to it.
-  const [hoverCard, setHoverCard] = useState<{ c: InboxCustomer; rect: DOMRect } | null>(null);
+  // Desktop hover preview for a customer row (lead type / source / vehicle + contact + stats). Holds the
+  // customer, the row's viewport rect (to anchor the card) and the row's enriched meta (appt/action counts).
+  const [hoverCard, setHoverCard] = useState<{ c: InboxCustomer; rect: DOMRect; meta?: { appt: number; actions: number; preview?: string } } | null>(null);
   const activeFilterCount = leadFilterCount(leadFilters) + (dateRange !== "all" ? 1 : 0);
   // The mobile button stands in for four controls, so its badge counts every non-default among them.
   const mobileFilterCount = activeFilterCount + (groupBy !== "customer" ? 1 : 0) + (channel !== "all" ? 1 : 0);
@@ -1048,7 +1048,7 @@ function Inbox() {
                     read={readIds.has(c.customer_id)}
                     onClick={() => { setFocusConvId(null); openCustomer(c); }}
                     onVisible={requestEnrich}
-                    onHover={(cust, rect) => setHoverCard({ c: cust, rect })}
+                    onHover={(cust, rect) => setHoverCard({ c: cust, rect, meta: rowMeta[cust.customer_id] })}
                     onHoverEnd={() => setHoverCard(null)}
                   />
                 ))}
@@ -1123,7 +1123,7 @@ function Inbox() {
           />
         )}
         {/* Desktop hover preview — floats over the thread, anchored to the hovered row. */}
-        {hoverCard && <CustomerHoverCard c={hoverCard.c} rect={hoverCard.rect} />}
+        {hoverCard && <CustomerHoverCard c={hoverCard.c} rect={hoverCard.rect} meta={hoverCard.meta} />}
       </div>
     </div>
   );
@@ -1210,7 +1210,13 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
   const unread = read ? 0 : c.unreadCounts?.totalUnread ?? 0;
   const callUnread = c.unreadCounts?.callUnread ?? 0;
   const name = c.customer_name || c.mobile_number || "Unknown";
-  const vehicle = vehicleLabel(primaryLead(c)?.leadVehicleInterest);
+  // Lead facts surfaced inline in the row (at all times when available): temperature, vehicle of interest,
+  // lead type + source. The full picture is on hover (CustomerHoverCard).
+  const lead = primaryLead(c);
+  const vehicle = vehicleLabel(lead?.leadVehicleInterest);
+  const ltype = lead?.external_type || "";
+  const source = lead?.source || "";
+  const temp = (lead?.temperature || c.temperature || "").toLowerCase();
   // Report visibility ONCE (then disconnect) so the parent enriches this row's appt/action icons only
   // when it's actually scrolled into view — not for the whole list up front.
   const rowRef = useRef<HTMLButtonElement | null>(null);
@@ -1253,6 +1259,8 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
               {initials(name)}
             </span>
             <span className="truncate text-[14px] font-semibold" style={{ color: C.dark }}>{name}</span>
+            {/* temperature at a glance — a colour dot (the full word is in the hover card / right panel). */}
+            {temp && TEMP_COLORS[temp] && <span title={temp} className="size-2 shrink-0 rounded-full" style={{ background: TEMP_COLORS[temp].fg }} />}
           </div>
           {callUnread > 0 && <IconPhone size={12} className="shrink-0 text-[#626f81]" />}
           {/* appointment indicator (green calendar) + open action-item count (orange badge) */}
@@ -1273,12 +1281,18 @@ function ConversationRow({ c, meta, active, read, onClick, onVisible, onHover, o
         </p>
         {unread > 0 && <span className="size-2 shrink-0 rounded-full" style={{ background: C.green }} />}
       </div>
-      {/* Vehicle of interest — the single most glanceable lead fact for a dealer scanning the list. Type /
-          source / the full picture are on hover (CustomerHoverCard). Only shown when present. */}
+      {/* Lead facts — vehicle of interest + type · source, shown whenever available (the full picture is on
+          hover). A customer with no lead detail keeps its compact two-line height. */}
       {vehicle && (
-        <div className="flex min-w-0 items-center gap-1 text-[11px]" style={{ color: C.sub }}>
-          <IconCar size={12} className="shrink-0" />
+        <div className="flex min-w-0 items-center gap-1 text-[11px]" style={{ color: C.dark }}>
+          <IconCar size={12} className="shrink-0" style={{ color: C.sub }} />
           <span className="truncate font-medium">{vehicle}</span>
+        </div>
+      )}
+      {(ltype || source) && (
+        <div className="flex min-w-0 items-center gap-1.5 text-[11px]" style={{ color: C.sub }}>
+          {ltype && <span className="shrink-0 rounded px-1.5 py-0.5 font-medium" style={{ background: "#f1f5f9", color: "#475569" }}>{prettify(ltype)}</span>}
+          {source && <span className="min-w-0 truncate">{source}</span>}
         </div>
       )}
       {/* Which automated journeys reached this customer (0..4) — only rendered when present, so an
@@ -3675,31 +3689,66 @@ function LeadDetailCard({ lead }: { lead: CustomerLead }) {
  * floats over the thread pane and never steals the hover (which would make it flicker). Rendered only when
  * there's actually detail to show, so an untouched customer (and every customer on prod, pre-backend) shows
  * no card. Anchored to the hovered row's viewport rect, flipping left / clamping so it stays on-screen. */
-function CustomerHoverCard({ c, rect }: { c: InboxCustomer; rect: DOMRect }) {
+function CustomerHoverCard({ c, rect, meta }: { c: InboxCustomer; rect: DOMRect; meta?: { appt: number; actions: number; preview?: string } }) {
   const leads = c.leads ?? [];
   const temp = primaryLead(c)?.temperature || c.temperature || "";
-  const hasDetail = (c.engagementJourneys?.length ?? 0) > 0
-    || leads.some((l) => l.external_type || l.source || l.outcome || vehicleLabel(l.leadVehicleInterest));
+  const phone = c.mobile_number || "";
+  const email = c.email_id || "";
+  const journeys = c.engagementJourneys ?? [];
+  const name = c.customer_name || phone || "Unknown";
+  const unread = c.unreadCounts?.totalUnread ?? 0;
+  const appt = meta?.appt ?? 0;
+  const actions = meta?.actions ?? 0;
+  const hasLead = leads.some((l) => l.external_type || l.source || l.outcome || vehicleLabel(l.leadVehicleInterest));
+  const hasDetail = journeys.length > 0 || !!phone || !!email || hasLead;
   if (!hasDetail) return null;
-  const W = 288;
+  const W = 300;
+  // Prefer the right of the row; flip to the left if it would run off-screen. Clamp vertically.
   const spaceRight = window.innerWidth - rect.right;
   const left = spaceRight > W + 24 ? rect.right + 8 : Math.max(8, rect.left - W - 8);
-  const top = Math.min(Math.max(8, rect.top), Math.max(8, window.innerHeight - 360));
+  const top = Math.min(Math.max(8, rect.top), Math.max(8, window.innerHeight - 400));
+  const stats: [string, string | number][] = [["Last activity", fmtListStamp(c.lastInteractionTime || c.createdAt)]];
+  if (appt > 0) stats.push(["Appointments", appt]);
+  if (actions > 0) stats.push(["Open items", actions]);
+  if (unread > 0) stats.push(["Unread", unread]);
   return (
     <div className="pointer-events-none fixed z-[70] hidden lg:block" style={{ top, left, width: W }}>
       <div className="animate-dropdown-in overflow-hidden rounded-2xl border bg-white shadow-lg" style={{ borderColor: C.border }}>
-        <div className="flex items-center gap-1.5 border-b px-3.5 py-2.5" style={{ borderColor: C.border }}>
-          <span className="min-w-0 truncate text-[13px] font-semibold" style={{ color: C.dark }}>{c.customer_name || c.mobile_number || "Unknown"}</span>
+        {/* header — avatar + name + temperature */}
+        <div className="flex items-center gap-2 border-b px-3.5 py-2.5" style={{ borderColor: C.border }}>
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(c.customer_id || name) }}>{initials(name)}</span>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" style={{ color: C.dark }}>{name}</span>
           {temp && <TempBadge temp={temp} />}
         </div>
-        <div className="flex max-h-[320px] flex-col gap-3 overflow-y-auto p-3.5">
-          {(c.engagementJourneys?.length ?? 0) > 0 && (
-            <div>
-              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Reached by</p>
-              <JourneyChips journeys={c.engagementJourneys} size="md" />
+        <div className="flex max-h-[340px] flex-col gap-3 overflow-hidden p-3.5">
+          {/* contact */}
+          {(phone || email) && (
+            <div className="flex flex-col gap-1">
+              {phone && <div className="flex items-center gap-1.5 text-[12px]" style={{ color: C.dark }}><IconPhone size={12} className="shrink-0" style={{ color: C.sub }} /><span className="truncate">{phone}</span></div>}
+              {email && <div className="flex items-center gap-1.5 text-[12px]" style={{ color: C.dark }}><IconMail size={12} className="shrink-0" style={{ color: C.sub }} /><span className="truncate">{email}</span></div>}
             </div>
           )}
-          {leads.map((l) => <LeadDetailCard key={l.lead_id} lead={l} />)}
+          {journeys.length > 0 && (
+            <div>
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>Reached by</p>
+              <JourneyChips journeys={journeys} size="md" />
+            </div>
+          )}
+          {leads.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: C.sub }}>{leads.length > 1 ? `Leads (${leads.length})` : "Lead"}</p>
+              {leads.map((l) => <LeadDetailCard key={l.lead_id} lead={l} />)}
+            </div>
+          )}
+        </div>
+        {/* stats footer — last activity + appt / open items / unread when present */}
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t px-3.5 py-2.5" style={{ borderColor: C.border, background: C.bg }}>
+          {stats.map(([k, v]) => (
+            <div key={k} className="flex items-center justify-between gap-2">
+              <span className="text-[10px] uppercase tracking-wide" style={{ color: C.sub }}>{k}</span>
+              <span className="text-[11px] font-semibold" style={{ color: C.dark }}>{v}</span>
+            </div>
+          ))}
         </div>
       </div>
     </div>
