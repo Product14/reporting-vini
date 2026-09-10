@@ -1106,33 +1106,42 @@ function FunnelBars({ f, showLeak }: { f: EvalFunnel; showLeak?: boolean }) {
 export function AppointmentLeakCard({ o, appointments }: { o: EvalOutcomes; appointments?: number | null }) {
   const appt = o.funnels.find((f) => f.key === "Appointment");
   if (!appt || !appt.totalEligible) return null;
-  /* These steps are the REVIEWER's read of each conversation, so the last one can land a row or two off
-     the appointment records themselves — on this rooftop 39 against 37. Left visible rather than
-     reconciled away: the gap is the AI believing it completed a booking that the CRM does not hold, and
-     hiding it would hide exactly the thing this card exists to surface. Said out loud so nobody has to
-     wonder why two appointment numbers sit on one screen. */
-  const terminal = appt.steps[appt.steps.length - 1]?.count ?? 0;
   const recorded = typeof appointments === "number" ? appointments : null;
-  const drift = recorded !== null && recorded !== terminal ? Math.abs(terminal - recorded) : 0;
+  const reviewed = appt.steps[appt.steps.length - 1]?.count ?? 0;
+
+  /* THE LAST STEP SHOWS THE BOOKING RECORDS, NOT THE REVIEW'S GUESS AT THEM.
+   *
+   * Every step here is the reviewer's reading of a conversation — except the last, which claims a fact
+   * about your CRM, and that fact is something we hold. Letting the review answer it put a second
+   * appointment number on the page (44 against 51 booking records on Dream Nissan Midwest, 39 against
+   * 37 on Heiser) under a card whose whole subject is appointments. The step is now the record count,
+   * so the funnel ends on the same number the tile, the chart and the drill-down show.
+   *
+   * The review's own figure is not discarded — it is stated underneath, because the gap between what
+   * the AI thinks it booked and what the calendar holds is a real operational signal in both
+   * directions: bookings claimed that never landed, and bookings that landed from conversations the
+   * review never tied together. */
+  const withRecords: EvalFunnel = recorded === null
+    ? appt
+    : { ...appt, steps: appt.steps.map((st, i) => (i === appt.steps.length - 1 ? { ...st, count: recorded } : st)) };
+  const drift = recorded !== null && recorded !== reviewed ? Math.abs(reviewed - recorded) : 0;
+
   return (
     <Card
       title="Where appointments are won and lost"
-      /* SAYS WHICH CONVERSATIONS. This funnel covers every channel and does not follow the flow card's
-         Calls / Texts toggle above it — funnelEval carries no channel of its own, it is scoped by joining
-         to the conversation. So one screen can show 232 (calls reviewed), 533 (calls + texts) and 517
-         (funnel-eligible) with nothing distinguishing them, which reads as three answers to one question.
-         Each now states its own population. */
+      /* This funnel covers every channel and does not follow the flow card's Calls / Texts toggle above
+         it — funnelEval carries no channel of its own, it is scoped by joining to the conversation. */
       sub={`${fmtInt(o.funnelBase)} conversations with sales intent, across calls and texts · each step as a share of the one before`}
     >
-      <FunnelBars f={appt} showLeak />
+      <FunnelBars f={withRecords} showLeak />
       {drift > 0 && (
         <p className="mt-3 border-t border-[#f2f2f4] pt-2.5 text-[10.5px] leading-snug text-[#9ca3af]">
-          These steps are how the review read each conversation, not a count of bookings. It read
-          {" "}{fmtInt(terminal)} as completed against the {fmtInt(recorded as number)} appointment
-          record{recorded === 1 ? "" : "s"} on your books — the number this page uses for appointments.
-          {terminal > (recorded as number)
-            ? ` The ${fmtInt(drift)} ${drift === 1 ? "extra is a booking the AI believes it completed" : "extra are bookings the AI believes it completed"} that your calendar does not hold.`
-            : ` The other ${fmtInt(drift)} ${drift === 1 ? "booking was" : "bookings were"} made without the review recognising the conversation that produced ${drift === 1 ? "it" : "them"}.`}
+          The last step is the {fmtInt(recorded as number)} appointment record{recorded === 1 ? "" : "s"} on
+          your books. The steps before it are how the review read each conversation, and it recognised
+          {" "}{fmtInt(reviewed)}
+          {reviewed > (recorded as number)
+            ? ` — ${fmtInt(drift)} more than your calendar holds, so ${drift === 1 ? "that booking is one the AI believes it completed and did not" : "those are bookings the AI believes it completed and did not"}.`
+            : ` — ${fmtInt(drift)} fewer, so ${drift === 1 ? "one booking landed" : `${fmtInt(drift)} bookings landed`} from ${drift === 1 ? "a conversation" : "conversations"} the review did not tie together.`}
         </p>
       )}
       <ScopeNote o={o} />
