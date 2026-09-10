@@ -648,6 +648,7 @@ export const REPORTS: ReportDef[] = [
               key={d}
               o={o}
               calls={agent?.metrics.calls}
+              appointments={agent?.metrics.appointments}
               title={`${d === "inbound" ? "Inbound" : "Outbound"} calls`}
               drill={{
                 teamId: c.teamId,
@@ -675,9 +676,13 @@ export const REPORTS: ReportDef[] = [
     available: (c) => !!anyOutcome(c)?.funnels.some((f) => f.key === "Appointment" && f.totalEligible > 0),
     render: (c) => {
       const o = (["inbound", "outbound"] as EvalDirection[]).map((d) => c.outcomes[d]).filter(Boolean).sort((a, b) => b!.funnelBase - a!.funnelBase)[0]!;
+      /* The SAME appointment count the agent page shows, matched to the direction this funnel is for —
+         without it the library's copy of this card ended on the review's figure while the By-agent copy
+         ended on the booking records, which is the same card disagreeing with itself across two tabs. */
+      const apptAgent = scopedAgents(c).find((a) => a.dir.toLowerCase() === o.dir);
       return (
         <div className="flex flex-col gap-4">
-          <AppointmentLeakCard o={o} />
+          <AppointmentLeakCard o={o} appointments={apptAgent?.metrics.appointments} />
           <ConversationQualityCard o={o} />
         </div>
       );

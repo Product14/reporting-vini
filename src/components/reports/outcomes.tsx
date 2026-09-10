@@ -1131,7 +1131,10 @@ export function AppointmentLeakCard({ o, appointments }: { o: EvalOutcomes; appo
       title="Where appointments are won and lost"
       /* This funnel covers every channel and does not follow the flow card's Calls / Texts toggle above
          it — funnelEval carries no channel of its own, it is scoped by joining to the conversation. */
-      sub={`${fmtInt(o.funnelBase)} conversations with sales intent, across calls and texts · each step as a share of the one before`}
+      /* NAMES THE DIRECTION. This funnel is built for ONE agent direction, and in the report library it
+         sits under a department-wide appointment total: outbound's funnel ending on 24 beneath a card
+         reading 73 looks like a contradiction until you know it is only half the rooftop. */
+      sub={`${o.dir === "inbound" ? "Inbound" : "Outbound"} · ${fmtInt(o.funnelBase)} conversations with sales intent, across calls and texts · each step as a share of the one before`}
     >
       <FunnelBars f={withRecords} showLeak />
       {drift > 0 && (
