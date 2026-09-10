@@ -827,6 +827,7 @@ export function CallFlowCard({
   title,
   sub,
   drill,
+  appointments,
 }: {
   o: EvalOutcomes;
   calls?: number | null;
@@ -834,6 +835,11 @@ export function CallFlowCard({
   sub?: string;
   /** Supplied = the segments open the conversations behind them. Omit and the chart stays read-only. */
   drill?: FlowDrillCtx;
+  /* The page's authoritative appointment count (booking records). Only used to explain why this chart's
+   * Appointment segment differs from it — the chart counts CONVERSATIONS by the outcome the review gave
+   * them, which is a third measurement alongside the records and the funnel's booking step. Dream Nissan
+   * Midwest showed 42 here, 44 on the funnel and 51 records, and nothing said they were different things. */
+  appointments?: number | null;
 }) {
   const dirLabel = o.dir === "inbound" ? "Inbound" : "Outbound";
   const [view, setView] = useState<FlowView>("sankey");
@@ -935,6 +941,16 @@ export function CallFlowCard({
 
         {target && drill && (
           <ConversationDrillPanel target={target} ctx={drill} dir={o.dir} channel={ch} onClose={() => setTarget(null)} />
+        )}
+
+        {/* Says what a segment IS, when it could be read as an appointment count and disagree with one. */}
+        {typeof appointments === "number" && (f.outcomes["Appointment"] ?? 0) !== appointments && (
+          <p className="text-[10.5px] leading-snug text-[#9ca3af]">
+            Segments count {noun}s by what came of them. {fmtInt(f.outcomes["Appointment"] ?? 0)} ended in
+            an appointment being agreed; {fmtInt(appointments)} appointment record
+            {appointments === 1 ? "" : "s"} sit on your books for this period — that is the number used for
+            appointments elsewhere on this page.
+          </p>
         )}
 
         <GhostNote o={f} noun={noun} />

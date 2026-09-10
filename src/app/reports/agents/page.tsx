@@ -1046,6 +1046,7 @@ function AgentReportsView() {
                 calls={m.calls}
                 title={`What your ${inbound ? "callers" : "customers"} wanted`}
                 sub={`Every conversation ${r.summary.person || a.name} had, and what came of it · click a row to drill in`}
+                appointments={scale(m.appointments)}
                 /* Segments open the calls behind them. Same store-local window the rest of the page is
                    showing, and the same department the URL scoped it to. */
                 drill={{ teamId, serviceType: agentSvc, ...meetingWindow, spyneToken, spyneEnv }}
