@@ -27,7 +27,11 @@ import type { EvalOutcomes, EvalFunnel, EvalDirection, EvalCallTypeGroup } from 
 /* Fixed rung order + hue. Order is the backend's OutcomeLevel ranking (best outcome first), so a stacked
  * bar reads left-to-right as "best → no next step". */
 export const OUTCOME_RUNGS: { key: string; label: string; color: string }[] = [
-  { key: "Appointment", label: "Appointment", color: "#15803d" },
+  /* NAMED "Booking agreed", not "Appointment". It counts CONVERSATIONS the review judged to have ended
+     with the customer agreeing to come in — not appointment records. Sharing the word put 42 in this
+     legend under a tile reading 51 and invited the reader to treat one as wrong. Only the booking-record
+     count is called an appointment on this page now. */
+  { key: "Appointment", label: "Booking agreed", color: "#15803d" },
   { key: "Transfer", label: "Transferred", color: "#2563eb" },
   { key: "Callback", label: "Callback", color: "#d97706" },
   { key: "Query Resolved", label: "Query resolved", color: "#7c3aed" },
@@ -1123,11 +1127,12 @@ export function AppointmentLeakCard({ o, appointments }: { o: EvalOutcomes; appo
       <FunnelBars f={appt} showLeak />
       {drift > 0 && (
         <p className="mt-3 border-t border-[#f2f2f4] pt-2.5 text-[10.5px] leading-snug text-[#9ca3af]">
-          These steps are how the review read each conversation. It counted {fmtInt(terminal)} bookings
-          completed; {fmtInt(recorded as number)} appointment record{recorded === 1 ? "" : "s"} actually
-          sit{recorded === 1 ? "s" : ""} on your books for this period — the figure used everywhere else
-          on this page. The {fmtInt(drift)} in between {drift === 1 ? "is a booking" : "are bookings"} the
-          AI believes it completed that your calendar does not hold.
+          These steps are how the review read each conversation, not a count of bookings. It read
+          {" "}{fmtInt(terminal)} as completed against the {fmtInt(recorded as number)} appointment
+          record{recorded === 1 ? "" : "s"} on your books — the number this page uses for appointments.
+          {terminal > (recorded as number)
+            ? ` The ${fmtInt(drift)} ${drift === 1 ? "extra is a booking the AI believes it completed" : "extra are bookings the AI believes it completed"} that your calendar does not hold.`
+            : ` The other ${fmtInt(drift)} ${drift === 1 ? "booking was" : "bookings were"} made without the review recognising the conversation that produced ${drift === 1 ? "it" : "them"}.`}
         </p>
       )}
       <ScopeNote o={o} />
@@ -1147,7 +1152,7 @@ function transferCounts(o: EvalOutcomes): { called: number; connected: number } 
 }
 
 /* The at-a-glance row above the panels, in the dealer's terms: how many real conversations happened and
- * what came out of them. "Appointments booked" is the funnel's terminal step — a CRM record actually
+ * what came out of them. "Appointments booked" is the booking-record count — the one figure on the page
  * written, not a claim that one was agreed. */
 /* Deliberately takes no total-call count. Every figure here comes from the REVIEWED calls, so pairing
  * them with the period's full call total ("21 real conversations from 1,358 calls") would read as a

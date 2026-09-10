@@ -788,11 +788,20 @@ export function DayTrend({
         ` L ${x(n - 1).toFixed(1)} ${y(0).toFixed(1)} L ${x(0).toFixed(1)} ${y(0).toFixed(1)} Z`
       : "";
   const gridVals = [0, niceMax / 2, niceMax];
-  // legend + tooltip reflect the hovered day, falling back to the latest day
-  const active = hover ?? n - 1;
-  const ap = points[active];
+  /* Hovering reads that DAY; not hovering reads the PERIOD.
+   *
+   * It used to fall back to the latest day while the label beside it still said "last 30 days", so a
+   * rooftop with a quiet today showed "Touched 0 · Qualified 0 · Appointments 0 · last 30 days" over a
+   * month of real activity — and on another it showed 3 appointments beside a funnel reading 37. The
+   * numbers were a single day's; only the label was wrong, which is the hardest kind of wrong to spot. */
+  const active = hover;
+  const totals = points.reduce(
+    (acc, p) => ({ day: "", touched: acc.touched + (p.touched || 0), qualified: acc.qualified + (p.qualified || 0), appts: acc.appts + (p.appts || 0) }),
+    { day: "", touched: 0, qualified: 0, appts: 0 },
+  );
+  const ap = active === null ? totals : points[active];
   // keep the floating tooltip inside the card (which clips overflow): clamp its centre
-  const tipX = Math.min(Math.max(x(active), 80), Math.max(80, w - 80));
+  const tipX = Math.min(Math.max(x(active ?? n - 1), 80), Math.max(80, w - 80));
 
   return (
     <div ref={ref} className="relative w-full">
@@ -826,7 +835,7 @@ export function DayTrend({
             {area && <path d={area} fill="url(#dt-area)" />}
             {/* crosshair for the hovered day */}
             {hover !== null && (
-              <line x1={x(active)} x2={x(active)} y1={padT} y2={H - padB} stroke="#d8caff" strokeWidth={1.5} strokeDasharray="3 3" />
+              <line x1={x(hover)} x2={x(hover)} y1={padT} y2={H - padB} stroke="#d8caff" strokeWidth={1.5} strokeDasharray="3 3" />
             )}
             {series.map((s) => (
               <g key={s.key}>

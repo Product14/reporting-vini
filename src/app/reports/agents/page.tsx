@@ -1086,7 +1086,11 @@ function AgentReportsView() {
                       <div className="grid grid-cols-2 gap-3">
                         <SummaryStat label="Leads touched instantly" value={fmtInt(scale(r.speedToLead.instantlyTouched))} accent="#10b981" />
                         <SummaryStat label="After-hours touched instantly" value={fmtInt(scale(r.speedToLead.afterHoursInstant))} />
-                        <SummaryStat label="Appointments booked" value={fmtInt(scale(r.speedToLead.instantAppts))} accent="#813fed" />
+                        {/* A SUBSET, so it must not borrow the page's appointment label. This counts
+                            bookings that came from a lead touched within five minutes; the page-wide
+                            appointment figure is the booking-record count on the card above. Labelled
+                            identically it read "APPOINTMENTS BOOKED 15" under one reading 49. */}
+                        <SummaryStat label="Booked from an instant touch" value={fmtInt(scale(r.speedToLead.instantAppts))} accent="#813fed" />
                         <SummaryStat label="Instant → appointment" value={`${r.speedToLead.instantApptRate}%`} />
                       </div>
                       <StlOpenFunnel data={r.speedToLead.openFunnel} />
