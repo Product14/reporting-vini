@@ -51,7 +51,7 @@ export interface RawRow {
   opted_out_sms: number;
   opted_out_call: number;
   after_hours: number;
-  is_speed_to_lead: number; // 1 = speed-to-lead SMS (smsFlowJourneySource = speed_to_lead)
+  is_speed_to_lead: number; // 1 = a touch on a lead the CRM created within 30d (any channel) — see agentBaseFact.sql
   speed_to_lead_response_time: number | null; // seconds: lead.external_created_at → conversation.createdAt
   [k: string]: unknown;
 }

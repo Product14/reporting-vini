@@ -957,22 +957,54 @@ SELECT
     ifNull(lo.opt_out_call, 0)              AS opted_out_call,
     ch.after_hours                          AS after_hours,
 
-    -- ★ STL: speed-to-lead flag (0/1)
+    /* ★ STL: speed-to-lead — A NEW CRM LEAD AND THE FIRST TOUCH ON IT (rewritten 2026-09-10).
+     *
+     * WAS: an SMS carrying metadata.smsFlowJourneySource='speed_to_lead' with no outbound_task_id and
+     * no followup_id. Every part of that turned out to be wrong:
+     *   • The journey tag is NOT a speed-to-lead marker. Outbound campaign sends carry it too — every
+     *     one of the 150,721 tagged SMS in 30 days says 'speed_to_lead', and the untagged ones say
+     *     nothing, so it separates SMS-with-a-journey from SMS-without, not fast from slow.
+     *   • The two exclusions then removed almost everything: 118,852 of those carry an outbound_task_id
+     *     and 31,839 a followup_id, leaving 30 rows fleet-wide. 0.02%. The card could only ever appear
+     *     on 2 of the 60 rooftops that produce this traffic.
+     *   • Relaxing the exclusions is NOT the fix, and looks like it is: 90% of leads' first tagged SMS
+     *     carries a task id, so keeping those seems obvious — until you measure them. Their median gap
+     *     from the CRM lead date is 67 DAYS. They are aged-lead campaigns wearing the tag, and counting
+     *     them would print "67 days" under a card called Speed to lead.
+     *
+     * NOW: no tag, no channel restriction. A conversation is a speed-to-lead touch when its lead has a
+     * CRM lead date (external_created_at) and the touch lands within STL_NEW_LEAD_DAYS of it. stl.ts
+     * keeps only the EARLIEST such conversation per lead, so this reads as "the first time we reached a
+     * lead the CRM had just given us" whether that first touch was a text, a call or a chat.
+     *
+     * The recency bound is what makes "new" mean new: without it an aged-lead campaign touching a
+     * six-month-old lead would enter the denominator as a new CRM lead. It is deliberately NOT a
+     * speed bound — a lead that waited two days SHOULD count against the within-5-minutes share, which
+     * is the number the card is actually about. The average is protected separately by stl.ts's 600s
+     * per-lead cap, so one slow outlier cannot swamp it.
+     *
+     * Dream Nissan Midwest (3d3deabc98), sales, 30d: 484 new CRM leads, 477 touched, 464 within five
+     * minutes, median first response 4 seconds — a card that until now rendered blank. */
     if(
-        cs.conv_type = 'sms'
-        AND JSONExtractString(ifNull(cs.metadata, '{}'), 'smsFlowJourneySource') = 'speed_to_lead'
-        AND nullIf(cs.outbound_task_id, '') IS NULL
-        AND nullIf(cs.followup_id, '') IS NULL,
+        cs.lead_external_created_at IS NOT NULL
+        AND dateDiff('second',
+            parseDateTimeBestEffortOrNull(toString(cs.lead_external_created_at)),
+            parseDateTimeBestEffortOrNull(toString(cs.activity_ts))) >= 0
+        AND dateDiff('day',
+            parseDateTimeBestEffortOrNull(toString(cs.lead_external_created_at)),
+            parseDateTimeBestEffortOrNull(toString(cs.activity_ts))) <= 30,
         1, 0
     ) AS is_speed_to_lead,
 
-    -- ★ STL: seconds from lead.external_created_at -> conversation.createdAt
+    -- ★ STL: seconds from lead.external_created_at -> conversation.createdAt, on the same population.
     if(
-        cs.conv_type = 'sms'
-        AND JSONExtractString(ifNull(cs.metadata, '{}'), 'smsFlowJourneySource') = 'speed_to_lead'
-        AND nullIf(cs.outbound_task_id, '') IS NULL
-        AND nullIf(cs.followup_id, '') IS NULL
-        AND cs.lead_external_created_at IS NOT NULL,
+        cs.lead_external_created_at IS NOT NULL
+        AND dateDiff('second',
+            parseDateTimeBestEffortOrNull(toString(cs.lead_external_created_at)),
+            parseDateTimeBestEffortOrNull(toString(cs.activity_ts))) >= 0
+        AND dateDiff('day',
+            parseDateTimeBestEffortOrNull(toString(cs.lead_external_created_at)),
+            parseDateTimeBestEffortOrNull(toString(cs.activity_ts))) <= 30,
         greatest(0, dateDiff(
             'second',
             parseDateTimeBestEffortOrNull(toString(cs.lead_external_created_at)),
