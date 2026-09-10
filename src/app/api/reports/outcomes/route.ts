@@ -20,6 +20,7 @@ import { spyneConfigured, cached } from "@/lib/spyne/client";
 import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
 import { resolveTeams } from "@/lib/spyne/enterpriseTeams";
 import { fetchSalesOutcomes, type EvalDirection } from "@/lib/spyne/evalPipeline";
+import { fetchOutcomesFromClickhouse } from "@/lib/spyne/evalClickhouse";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 
@@ -104,14 +105,27 @@ export async function GET(request: Request): Promise<Response> {
     end = r.end;
   }
 
+  const startISO = `${start}T00:00:00.000Z`;
+  const endISO = `${end}T00:00:00.000Z`;
+
   try {
+    /* CLICKHOUSE FIRST. The eval API's dashboard endpoints take no agentType or agentCallType, so its
+     * funnel and tool cohorts are call-type-matched rather than scoped, and the card had to admit its
+     * steps covered both directions. Reading the three eval tables directly scopes every panel to this
+     * team, agent type AND direction — see evalClickhouse.ts for the numbers that motivated it.
+     *
+     * The API stays as the fallback: it is the only source for TOOL metrics (no ClickHouse table), which
+     * the Service-drive reports read and which self-hide when absent. */
+    const fromCh = await fetchOutcomesFromClickhouse({ teamId, dir, agentType, startISO, endISO });
+    if (fromCh) return Response.json({ outcomes: fromCh, window: { start, end }, degraded: false, source: "clickhouse" });
+
     const outcomes = await fetchSalesOutcomes(
-      { enterpriseId, teamId, dir, agentType, startISO: `${start}T00:00:00.000Z`, endISO: `${end}T00:00:00.000Z` },
+      { enterpriseId, teamId, dir, agentType, startISO, endISO },
       token,
       env,
     );
     if (!outcomes) return Response.json({ outcomes: null, degraded: true, note: "eval api unavailable" });
-    return Response.json({ outcomes, window: { start, end }, degraded: false });
+    return Response.json({ outcomes, window: { start, end }, degraded: false, source: "eval-api" });
   } catch (e) {
     console.error(`[outcomes] ${teamId}/${dir} failed: ${e instanceof Error ? e.message : String(e)}`);
     return Response.json({ outcomes: null, degraded: true, note: "eval fetch failed" });

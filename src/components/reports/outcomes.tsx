@@ -155,6 +155,11 @@ function Legend({ tally }: { tally: Record<string, number> }) {
  * denominator. Plain string so it can go straight into Card's `sub`. */
 function coverageText(scored: number, calls?: number | null): string {
   if (!calls || calls <= 0) return `${fmtInt(scored)} calls reviewed in detail`;
+  /* A denominator BELOW the numerator is not a denominator. `calls` comes from the reporting aggregate
+     and `scored` now comes straight from ClickHouse, so on a rooftop whose aggregate is behind, the
+     honest-looking "Based on N of M" rendered as "222 of 200". State the count alone rather than a
+     ratio that reads as a mistake — which it would be, just not the reader's. */
+  if (scored > calls) return `${fmtInt(scored)} calls reviewed in detail`;
   const covered = Math.min(100, pct(scored, calls));
   // Kept deliberately, in plain words. Without a denominator a dealer reads "155" as their whole month
   // when the real figure is 1,358 — the percentages on this page are sound either way, but the counts
@@ -1116,8 +1121,12 @@ export function OutcomeKpis({ o }: { o: EvalOutcomes }) {
   const { called, connected } = transferCounts(o);
 
   const cards: { label: string; value: string; sub: string; color?: string }[] = [
-    { label: "Real conversations", value: fmtInt(o.engaged), sub: `of ${fmtInt(o.scored)} calls reviewed`, color: "#111" },
-    { label: "Buying intent", value: fmtInt(o.qualified), sub: `${pct(o.qualified, o.engaged)}% of conversations`, color: "#0891b2" },
+    /* "Calls reviewed", NOT "Real conversations". The funnel card at the top of this page counts LEADS
+       and labels its second step "Real conversations" too — two different populations under identical
+       words, a few hundred pixels apart, differing by a hundred on the rooftop this was reported from
+       (311 leads vs 201 reviewed calls). These tiles count reviewed CALLS; the wording now says so. */
+    { label: "Calls reviewed", value: fmtInt(o.engaged), sub: `${fmtInt(o.engaged)} of ${fmtInt(o.scored)} reached a conversation`, color: "#111" },
+    { label: "Buying intent", value: fmtInt(o.qualified), sub: `${pct(o.qualified, o.engaged)}% of reviewed calls`, color: "#0891b2" },
     { label: "Appointments booked", value: fmtInt(booked), sub: "confirmed in your CRM", color: "#15803d" },
     { label: "Sent to your team", value: fmtInt(connected), sub: called ? `${fmtInt(connected)} of ${fmtInt(called)} connected` : "no transfers needed", color: "#2563eb" },
     { label: "Callbacks requested", value: fmtInt(o.outcomes["Callback"] ?? 0), sub: "customer asked for a call back", color: "#d97706" },

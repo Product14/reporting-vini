@@ -642,3 +642,101 @@ export async function fetchSalesOutcomes(
     };
   });
 }
+
+// ───────────────────── shared with the ClickHouse source ─────────────────────
+
+/** Pre-grouped counts from ClickHouse — one row per (channel, callType, primaryIntent, outcome). */
+export interface FlowRow {
+  channel: string;
+  callType: string;
+  primaryIntent: string;
+  outcome: string;
+  interest: string;
+  n: number;
+  gaps: number;
+  scoreSum: number;
+  scoreN: number;
+}
+
+export const funnelLabel = (k: string) => pretty(k, FUNNEL_LABELS);
+export const stepLabel = (k: string) => pretty(k, STEP_LABELS);
+
+/* Build the panel payload from grouped rows.
+ *
+ * The rows are expanded back into RawEval and pushed through the SAME groupFlow / topSecondary the API
+ * path uses, rather than re-implementing the tree. That is the point: the chart's lanes, its labels and
+ * its rung order come from one implementation, so the two sources cannot drift into two shapes. Group
+ * counts are conversation counts on a single rooftop and window — a few thousand at most — so expanding
+ * them costs nothing worth optimising away.
+ *
+ * GHOST rows (no signal captured) are split off before grouping, exactly as the API path does, so they
+ * never become a lane; they are reported as their own line under the chart. */
+export function buildFlowFromRows(args: { dir: EvalDirection; rows: FlowRow[]; funnels: EvalFunnel[] }): EvalOutcomes {
+  const { dir, rows, funnels } = args;
+  const expand = (rs: FlowRow[]): RawEval[] => {
+    const out: RawEval[] = [];
+    for (const r of rs) {
+      for (let i = 0; i < r.n; i++) {
+        out.push({ callType: r.callType, primaryIntent: r.primaryIntent, outcomeAchieved: r.outcome, interest: r.interest, channel: r.channel });
+      }
+    }
+    return out;
+  };
+  const tally = (rs: FlowRow[]) => {
+    const t: OutcomeTally = {};
+    for (const r of rs) t[r.outcome] = (t[r.outcome] ?? 0) + r.n;
+    return t;
+  };
+  const isGhost = (r: FlowRow) => GHOST_CALL_TYPES.has((r.callType || "").trim());
+  const flowOf = (rs: FlowRow[]): EvalChannelFlow => {
+    const engaged = rs.filter((r) => !isGhost(r));
+    const rows2 = expand(engaged);
+    return {
+      scored: rs.reduce((s, r) => s + r.n, 0),
+      ghost: rs.filter(isGhost).reduce((s, r) => s + r.n, 0),
+      engaged: engaged.reduce((s, r) => s + r.n, 0),
+      groups: groupFlow(rows2),
+      secondary: topSecondary(rows2),
+      outcomes: tally(engaged),
+    };
+  };
+
+  const callRows = rows.filter((r) => r.channel === "call");
+  const smsRows = rows.filter((r) => r.channel === "sms");
+  const calls = flowOf(callRows);
+  const sms = smsRows.length ? flowOf(smsRows) : null;
+
+  // Rates are of ENGAGED conversations only: folding ghosts in makes every rate look worse than it is.
+  const engagedCalls = callRows.filter((r) => !isGhost(r));
+  const interest: Record<string, number> = {};
+  let gap = 0, scoreSum = 0, scoreN = 0, qualified = 0;
+  for (const r of engagedCalls) {
+    gap += r.gaps;
+    scoreSum += r.scoreSum;
+    scoreN += r.scoreN;
+    if (r.interest) interest[r.interest] = (interest[r.interest] ?? 0) + r.n;
+    // Buying intent = the canonical "Qualified Lead" rung or any rung above it.
+    if (r.outcome === "Qualified Lead" || r.outcome === "Appointment" || r.outcome === "Transfer") qualified += r.n;
+  }
+
+  return {
+    dir,
+    scored: calls.scored,
+    ghost: calls.ghost,
+    engaged: calls.engaged,
+    smsScored: sms ? sms.scored : 0,
+    groups: calls.groups,
+    secondary: calls.secondary,
+    outcomes: calls.outcomes,
+    smsFlow: sms,
+    outcomeGap: gap,
+    qualified,
+    avgScore: scoreN ? Math.round((scoreSum / scoreN) * 10) / 10 : null,
+    interest,
+    funnels,
+    tools: [],
+    // Scoped by team + agentType + agentCallType in SQL, so the cohort IS this agent's — no caveat.
+    derivedScope: "exact",
+    funnelBase: Math.max(0, ...funnels.map((f) => f.totalEligible), 0),
+  };
+}
