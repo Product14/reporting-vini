@@ -1025,7 +1025,8 @@ function AgentReportsView() {
           {isSales && hasOutcomes && outcomes && (
             <>
               <SectionLabel hint={periodLabel}>What came out of the conversations</SectionLabel>
-              <OutcomeKpis o={outcomes} />
+              {/* Same appointment count as the funnel card above and the drill below it. */}
+              <OutcomeKpis o={outcomes} appointments={scale(m.appointments)} transfers={r.callFlow ? scale(r.callFlow.transferred) : null} />
               <CallFlowCard
                 o={outcomes}
                 calls={m.calls}
@@ -1035,7 +1036,7 @@ function AgentReportsView() {
                    showing, and the same department the URL scoped it to. */
                 drill={{ teamId, serviceType: agentSvc, ...meetingWindow, spyneToken, spyneEnv }}
               />
-              <AppointmentLeakCard o={outcomes} />
+              <AppointmentLeakCard o={outcomes} appointments={scale(m.appointments)} />
               <HandoffsCard o={outcomes} />
               <ConversationQualityCard o={outcomes} calls={m.calls} />
             </>

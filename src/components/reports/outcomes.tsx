@@ -1083,15 +1083,32 @@ function FunnelBars({ f, showLeak }: { f: EvalFunnel; showLeak?: boolean }) {
 /* "Where appointments are won and lost" — the path from a sales conversation to a booked appointment,
  * with the biggest drop-off called out. Dealer-facing: no evidence-source badges, and the copy names the
  * step in the showroom's terms rather than the pipeline's. */
-export function AppointmentLeakCard({ o }: { o: EvalOutcomes }) {
+export function AppointmentLeakCard({ o, appointments }: { o: EvalOutcomes; appointments?: number | null }) {
   const appt = o.funnels.find((f) => f.key === "Appointment");
   if (!appt || !appt.totalEligible) return null;
+  /* These steps are the REVIEWER's read of each conversation, so the last one can land a row or two off
+     the appointment records themselves — on this rooftop 39 against 37. Left visible rather than
+     reconciled away: the gap is the AI believing it completed a booking that the CRM does not hold, and
+     hiding it would hide exactly the thing this card exists to surface. Said out loud so nobody has to
+     wonder why two appointment numbers sit on one screen. */
+  const terminal = appt.steps[appt.steps.length - 1]?.count ?? 0;
+  const recorded = typeof appointments === "number" ? appointments : null;
+  const drift = recorded !== null && recorded !== terminal ? Math.abs(terminal - recorded) : 0;
   return (
     <Card
       title="Where appointments are won and lost"
       sub={`${fmtInt(o.funnelBase)} conversations with sales intent · each step as a share of the one before`}
     >
       <FunnelBars f={appt} showLeak />
+      {drift > 0 && (
+        <p className="mt-3 border-t border-[#f2f2f4] pt-2.5 text-[10.5px] leading-snug text-[#9ca3af]">
+          These steps are how the review read each conversation. It counted {fmtInt(terminal)} bookings
+          completed; {fmtInt(recorded as number)} appointment record{recorded === 1 ? "" : "s"} actually
+          sit{recorded === 1 ? "s" : ""} on your books for this period — the figure used everywhere else
+          on this page. The {fmtInt(drift)} in between {drift === 1 ? "is a booking" : "are bookings"} the
+          AI believes it completed that your calendar does not hold.
+        </p>
+      )}
       <ScopeNote o={o} />
     </Card>
   );
@@ -1115,9 +1132,14 @@ function transferCounts(o: EvalOutcomes): { called: number; connected: number } 
  * them with the period's full call total ("21 real conversations from 1,358 calls") would read as a
  * catastrophic connect rate when the true ratio is ~9× better — the sample is stated once, on the flow
  * card directly below, where the two numbers belong to the same population. */
-export function OutcomeKpis({ o }: { o: EvalOutcomes }) {
+export function OutcomeKpis({ o, appointments, transfers }: { o: EvalOutcomes; appointments?: number | null; transfers?: number | null }) {
+  /* ONE APPOINTMENT NUMBER ON THE PAGE. This tile used to read the funnel's last step, which is the
+     REVIEWER's judgement that a booking was written — a different source from the headline card, which
+     counts the actual meeting records. On Dream Nissan Lawrence that put 39 here beside 37 on the card,
+     same words, same period, same agent. The card's count wins because it is the appointment records
+     themselves; the funnel below still shows the review pipeline that led to them. */
   const appt = o.funnels.find((f) => f.key === "Appointment");
-  const booked = appt?.steps[appt.steps.length - 1]?.count ?? 0;
+  const booked = typeof appointments === "number" ? appointments : appt?.steps[appt.steps.length - 1]?.count ?? 0;
   const { called, connected } = transferCounts(o);
 
   const cards: { label: string; value: string; sub: string; color?: string }[] = [
@@ -1128,7 +1150,12 @@ export function OutcomeKpis({ o }: { o: EvalOutcomes }) {
     { label: "Calls reviewed", value: fmtInt(o.engaged), sub: `${fmtInt(o.engaged)} of ${fmtInt(o.scored)} reached a conversation`, color: "#111" },
     { label: "Buying intent", value: fmtInt(o.qualified), sub: `${pct(o.qualified, o.engaged)}% of reviewed calls`, color: "#0891b2" },
     { label: "Appointments booked", value: fmtInt(booked), sub: "confirmed in your CRM", color: "#15803d" },
-    { label: "Sent to your team", value: fmtInt(connected), sub: called ? `${fmtInt(connected)} of ${fmtInt(called)} connected` : "no transfers needed", color: "#2563eb" },
+    /* ONE TRANSFER NUMBER, same as the hand-offs card below. The reviewer's Transfer funnel and the
+       call's own ended-reason are different measurements — this rooftop's page carried 91 here, 108 on
+       the hand-offs card and 151 in the chart legend. canonical says a transfer is a COMPLETED
+       disposition hand-off counted at lead grain, which is what the hand-offs card reports, so that is
+       the number. The funnel's own steps still show the attempt pipeline beneath. */
+    { label: "Sent to your team", value: fmtInt(typeof transfers === "number" ? transfers : connected), sub: called ? `${fmtInt(called)} transfer attempts` : "handed to a person", color: "#2563eb" },
     { label: "Callbacks requested", value: fmtInt(o.outcomes["Callback"] ?? 0), sub: "customer asked for a call back", color: "#d97706" },
     { label: "Didn't connect", value: fmtInt(o.ghost), sub: `${pct(o.ghost, o.scored)}% hung up or no answer` },
   ];
