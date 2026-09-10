@@ -1097,7 +1097,12 @@ export function AppointmentLeakCard({ o, appointments }: { o: EvalOutcomes; appo
   return (
     <Card
       title="Where appointments are won and lost"
-      sub={`${fmtInt(o.funnelBase)} conversations with sales intent · each step as a share of the one before`}
+      /* SAYS WHICH CONVERSATIONS. This funnel covers every channel and does not follow the flow card's
+         Calls / Texts toggle above it — funnelEval carries no channel of its own, it is scoped by joining
+         to the conversation. So one screen can show 232 (calls reviewed), 533 (calls + texts) and 517
+         (funnel-eligible) with nothing distinguishing them, which reads as three answers to one question.
+         Each now states its own population. */
+      sub={`${fmtInt(o.funnelBase)} conversations with sales intent, across calls and texts · each step as a share of the one before`}
     >
       <FunnelBars f={appt} showLeak />
       {drift > 0 && (
@@ -1147,7 +1152,7 @@ export function OutcomeKpis({ o, appointments, transfers }: { o: EvalOutcomes; a
        and labels its second step "Real conversations" too — two different populations under identical
        words, a few hundred pixels apart, differing by a hundred on the rooftop this was reported from
        (311 leads vs 201 reviewed calls). These tiles count reviewed CALLS; the wording now says so. */
-    { label: "Calls reviewed", value: fmtInt(o.engaged), sub: `${fmtInt(o.engaged)} of ${fmtInt(o.scored)} reached a conversation`, color: "#111" },
+    { label: "Calls reviewed", value: fmtInt(o.engaged), sub: `${fmtInt(o.engaged)} of ${fmtInt(o.scored)} calls reached a conversation${o.smsScored ? ` · texts counted separately` : ""}`, color: "#111" },
     { label: "Buying intent", value: fmtInt(o.qualified), sub: `${pct(o.qualified, o.engaged)}% of reviewed calls`, color: "#0891b2" },
     { label: "Appointments booked", value: fmtInt(booked), sub: "confirmed in your CRM", color: "#15803d" },
     /* ONE TRANSFER NUMBER, same as the hand-offs card below. The reviewer's Transfer funnel and the
