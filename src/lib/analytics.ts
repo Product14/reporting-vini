@@ -61,6 +61,9 @@ export interface ReportEvents {
   // ── recovery / monitoring ──
   empty_window_widened: { team_id: string; agent: string }; // "View last 30 days" from an empty window
   report_load_failed: { tab: ReportTab; team_id: string };
+  // The read API denied us: 401 = no credential forwarded, 403 = credential scoped to another rooftop.
+  // Counted separately from a genuine never-live rooftop, which it used to be indistinguishable from.
+  report_access_denied: { tab: ReportTab; team_id: string; status: number };
 }
 
 type Props = Record<string, string | number | boolean | null | undefined>;

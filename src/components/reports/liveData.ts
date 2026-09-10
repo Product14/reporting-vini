@@ -170,7 +170,14 @@ export interface FetchResult {
   degraded?: boolean;
   // The request was rejected 401/403 (missing/invalid or wrong-team credential). TERMINAL — not degraded,
   // so the self-heal re-arm never fires. Locally this just means no ?auth_key= on the URL.
+  // MUST be handled by every caller that gates on `everLive`/`hasData`: a denial carries neither, so an
+  // unhandled 403 renders as "this rooftop has no data yet" over a rooftop that is fully live. That is
+  // exactly what happened to Paragon Honda (2026-09-10) — see ReportAccessDenied.
   unauthorized?: boolean;
+  // WHICH denial: 401 = no credential reached the API (the host forwarded no ?auth_key=), 403 = the
+  // credential names a DIFFERENT rooftop than the one requested (the group rooftop-switch case). The two
+  // need different words in front of the dealer, so the status is carried, not just the boolean.
+  authStatus?: 401 | 403;
   prior: Record<string, Basis>; // per-agent-id totals for the prior window (for fleet deltas)
   // The window the server actually resolved (store-local when a timezone was known) + that timezone.
   // Informational — lets the UI label the period / note the zone. Absent on the mock/error fallback.
@@ -460,7 +467,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
       // Auth failures are TERMINAL — no credential to retry with. Retrying (and the page's self-heal
       // re-arm) would hammer the endpoint forever. Return a non-degraded result so the re-arm never fires.
       if (r.status === 401 || r.status === 403) {
-        return { agents: [], hasData: false, unauthorized: true, fetchedAt: Date.now(), prior: {} };
+        return { agents: [], hasData: false, unauthorized: true, authStatus: r.status, fetchedAt: Date.now(), prior: {} };
       }
       const j = (await r.json().catch(() => null)) as (Partial<FetchResult> & { degraded?: boolean }) | null;
       if (!r.ok || !j || !Array.isArray(j.agents)) throw new Error("bad /api/reports response");
