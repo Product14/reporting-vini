@@ -403,6 +403,21 @@ export async function GET(request: Request): Promise<Response> {
   // rooftops whose selected window AND lifetime are both empty.
   const everLiveResolved = everLive || allDaily.length > 0;
 
+  /* Per-agent, per-store-local-day counts from the same rows, so the day-on-day chart plots the
+   * bookings the funnel counts rather than agent_daily's separate appointment column. */
+  const apptDayCounts: Record<string, Record<string, number>> = {};
+  for (const a of windowedAppointments) {
+    if (a.assisted) continue;
+    const svc = (a.service_type || "").toLowerCase();
+    const dir = (a.direction || "").toLowerCase();
+    if ((svc !== "sales" && svc !== "service") || (dir !== "inbound" && dir !== "outbound")) continue;
+    const type = `${svc === "sales" ? "Sales" : "Service"} ${dir === "inbound" ? "Inbound" : "Outbound"}`;
+    const raw = (a.booked_at ?? "").slice(0, 10);
+    if (!raw) continue;
+    const day = storeLocalDay(a.booked_at ?? "", timezone ?? undefined, raw);
+    (apptDayCounts[type] ??= {})[day] = ((apptDayCounts[type] ??= {})[day] ?? 0) + 1;
+  }
+
   const result = buildResult({
     daily: cur,
     breakdown: (bd.data ?? []) as BreakdownRow[],
@@ -411,6 +426,7 @@ export async function GET(request: Request): Promise<Response> {
     campaigns,
     outcomes,
     namedAppointments: windowedAppointments,
+    apptDayCounts,
     warmLeads,
     onboardedSlots,
     onboardedNames,

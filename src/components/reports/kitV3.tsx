@@ -576,19 +576,18 @@ export function IntentOutcomeTable({ rows, totalConversations }: { rows: IntentO
           </tr>
         </tfoot>
       </table>
-      {/* ONLY THE CONVERSATION COLUMN TIES TO THE FUNNEL. The outcome columns sum the TAGGED intents —
-          we know an outcome only where the call carried an intent tag — so with untagged conversations
-          in the mix the appointment total here sits below the funnel's. That is not a discrepancy to
-          reconcile, it is a smaller population, but the page used to assert "totals tie to the funnel"
-          over the whole block and left a reader comparing 26 against 37 with no explanation. */}
-      {residual > 0 && (
-        <p className="px-4 pb-3 pt-2 text-[10.5px] leading-snug text-[#9ca3af]">
-          Outcome columns cover the {fmtInt(rowSum)} conversation{rowSum === 1 ? "" : "s"} that carried an
-          intent tag. The other {fmtInt(residual)} are counted in the total but have no tagged intent, so
-          their outcomes are not broken out here — which is why these columns read lower than the funnel
-          above.
-        </p>
-      )}
+      {/* ONLY THE CONVERSATION COLUMN TIES TO THE FUNNEL, for two reasons — and it is worth being exact,
+          because the first guess is wrong. This table lists the TOP 8 intents only, so outcomes on the
+          long tail are absent: Heiser Chevrolet reads 31 booked here against a funnel of 37, and the
+          untagged remainder is 3 conversations, nowhere near enough to explain 6 appointments. Second,
+          these columns count CALLS per intent while the tiles above count distinct LEADS, so a column
+          can also run HIGHER — transferred reads 46 here against the hand-offs tile's 41. The page used
+          to assert "totals tie to the funnel" over all of it. */}
+      <p className="px-4 pb-3 pt-2 text-[10.5px] leading-snug text-[#9ca3af]">
+        Conversations tie to the funnel above. The outcome columns do not: they cover the {rows.length}{" "}
+        most common intents{residual > 0 ? ` (${fmtInt(residual)} untagged conversations sit in the total but not in these rows)` : ""}, and
+        they count calls rather than distinct customers — so they can read either side of the figures above.
+      </p>
     </div>
   );
 }

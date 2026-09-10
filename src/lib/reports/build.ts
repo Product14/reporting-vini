@@ -91,6 +91,10 @@ export interface BuildInput {
   // v3 named lists (report_appointments already window-filtered by the route; report_warm_leads is a
   // "now" snapshot). Scoped per agent below AND returned rooftop-wide on the FetchResult.
   namedAppointments?: ReportAppointmentRow[];
+  /* agent_type → store-local day → AI-booked appointments booked that day, counted from the SAME rows
+   * the headline counts. Without it the day-on-day chart plots agent_daily's own appointment column,
+   * which is a different source: Heiser Chevrolet's chart summed to 33 under a funnel reading 37. */
+  apptDayCounts?: Record<string, Record<string, number>>;
   warmLeads?: WarmLeadRow[];
   // Slot ids the dealer has actually onboarded (from the Spyne onboarded-agents API). When provided,
   // the report is GATED to these slots — agents the dealer hasn't paid for are dropped (personas kept
@@ -146,7 +150,7 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, warmLeads, onboardedSlots, onboardedNames, onboardedPhotos, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
+export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, apptDayCounts, warmLeads, onboardedSlots, onboardedNames, onboardedPhotos, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
   const hasData = daily.length > 0;
 
   // Keep service_type so each agent shows only its department's callbacks (sales agents → sales leads,
@@ -381,7 +385,14 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
         lost: Math.max(0, connected - qualified),
         handledByAI: queryResolved,
       },
-      dayOnDay: rows.map((r) => ({ day: shortDay(r.activity_day), touched: r.calls, qualified: r.qualified, appts: r.appointments })),
+      /* appts from the appointment LIST when we have it, so the chart and the funnel above it plot the
+         same bookings. Falls back to agent_daily's column when the map is absent. */
+      dayOnDay: rows.map((r) => ({
+        day: shortDay(r.activity_day),
+        touched: r.calls,
+        qualified: r.qualified,
+        appts: apptDayCounts?.[type]?.[String(r.activity_day)] ?? (apptDayCounts ? 0 : r.appointments),
+      })),
       intent: intents.length
         ? intents.slice(0, 8).map((r, i) => ({ label: r.value, value: r.count, color: COLORS[i % COLORS.length] }))
         : [],
