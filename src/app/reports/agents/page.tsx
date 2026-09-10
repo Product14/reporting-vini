@@ -32,6 +32,7 @@ import {
 } from "@/components/reports/kit";
 import { fmtRate, fmtWhenShort, IntentOutcomeTable, RankedOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
+import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
 import { goCrossPage } from "@/components/reports/parentNav";
@@ -153,7 +154,12 @@ function AgentReportsView() {
   // A degraded fetch (transient outage / cold-start timeout) is NOT "never live" — hold the syncing
   // state and let the re-arm effect retry, rather than flip to the on-its-way gate.
   const degraded = feed?.degraded === true;
-  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData); // rooftop selected, never live yet
+  // A DENIED read (401/403) is not a rooftop without data — it is a session that can't read this rooftop.
+  // It carries neither everLive nor hasData, so without this it fell through to the coming-soon gate and
+  // told a live dealer their agents hadn't started. Handled first, and never as "no data" (see
+  // ReportAccessDenied for the Paragon Honda case).
+  const unauthorized = feed?.unauthorized === true;
+  const comingSoon = hasTeam && feed !== null && !degraded && !unauthorized && !(feed.everLive ?? feed.hasData); // rooftop selected, never live yet
   const skeleton = useMemo(() => agentsForAccount(MOCK_AGENTS, account), [account]);
   // A live rooftop whose feed has RESOLVED but carries no agents for the selected window. We must NOT
   // fall back to the mock skeleton's numbers here (that rendered a fake "168 leads attempted" report for
@@ -806,15 +812,21 @@ function AgentReportsView() {
 
           {scenario !== "first_time" && live && hasTeam && (feed === null || degraded) && <ReportSkeleton />}
 
+          {/* Denied, not empty. Sits above the coming-soon / no-activity gates because a denial produces the
+              same shape as both (no agents, no everLive) and would otherwise be read as "no data yet". */}
+          {scenario !== "first_time" && live && hasTeam && unauthorized && (
+            <ReportAccessDenied tab="agents" teamId={teamId} name={account.name} status={feed?.authStatus} />
+          )}
+
           {scenario !== "first_time" && live && hasTeam && comingSoon && <RooftopComingSoon name={account.name} />}
 
           {/* Live, resolved rooftop whose feed carries no agents/activity for the window — show the empty
               state, NOT the mock skeleton's switcher pills + fake report (the P1-3 bug). */}
-          {scenario !== "first_time" && live && hasTeam && feed !== null && !degraded && !comingSoon && feedEmpty && (
+          {scenario !== "first_time" && live && hasTeam && feed !== null && !degraded && !unauthorized && !comingSoon && feedEmpty && (
             <NoActivity name={account.name || "this rooftop"} onWiden={() => { setPreset("last30"); track("empty_window_widened", { team_id: teamId, agent: activeId }); }} />
           )}
 
-          {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !comingSoon && !feedEmpty)) && (
+          {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !unauthorized && !comingSoon && !feedEmpty)) && (
           <>
           {/* Agent report ⇄ report library, at the same URL. */}
           <div className="no-print flex items-center gap-1 self-start rounded-xl bg-[#f1f2f5] p-1">
@@ -1003,7 +1015,9 @@ function AgentReportsView() {
               those rooftops would otherwise lose the section entirely. */}
           {inbound && (r.intentOutcomes?.length ?? 0) > 0 && !hasOutcomes && (
             <>
-              <SectionLabel hint="call conversations · totals tie to the funnel">Conversations &amp; outcomes</SectionLabel>
+              {/* The CONVERSATION total ties to the funnel; the outcome columns cover tagged intents only,
+                  which the table now states under itself. The old hint claimed the whole block tied. */}
+              <SectionLabel hint="call conversations · conversation total ties to the funnel">Conversations &amp; outcomes</SectionLabel>
               <Card
                 title="What customers wanted & how it was handled"
                 sub="Per intent, across real conversations (distinct leads who engaged — lower than total calls, which counts every dial): resolved by the agent, and the hand-offs"

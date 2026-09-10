@@ -35,6 +35,7 @@ import {
   WarmLeadsModal,
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
+import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
 import { useDateRange, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
@@ -226,6 +227,10 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // A degraded fetch (transient outage / cold-start timeout) is NOT "never live" — keep the UI in the
   // syncing state and let the re-arm effect below retry, rather than flip to the "coming soon" gate.
   const degraded = feed?.degraded === true;
+  // A DENIED read (401/403) is a session problem, not a rooftop without data — and it looks identical to
+  // "never live" (no agents, no everLive, not degraded). Excluded from every gate below so it can't be
+  // reported as coming-soon, retried forever as a stale-empty blip, or rendered as a report of zeros.
+  const unauthorized = feed?.unauthorized === true;
   // "Ever live" sticky: once a rooftop has returned real data in THIS browser, it can never legitimately
   // become "never live" again. A later clean-but-empty read is therefore a transient blip, not a genuine
   // coming-soon — so we suppress the gate and self-heal (below) instead of making the dealer reload.
@@ -244,8 +249,8 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     setWasLive(true);
   }, [teamId, feedIsLive]);
   // A clean-but-empty read for a rooftop we KNOW was live → treat it like a transient blip, not the gate.
-  const staleEmpty = hasTeam && wasLive && feed !== null && !degraded && !feedIsLive;
-  const comingSoon = hasTeam && feed !== null && !degraded && !(feed.everLive ?? feed.hasData) && !staleEmpty;
+  const staleEmpty = hasTeam && wasLive && feed !== null && !degraded && !unauthorized && !feedIsLive;
+  const comingSoon = hasTeam && feed !== null && !degraded && !unauthorized && !(feed.everLive ?? feed.hasData) && !staleEmpty;
   // Self-heal a stale-empty read: quietly re-fetch (bounded, ~5 tries) until real data lands, so the
   // report fills in on its own instead of stranding a known-live rooftop on the syncing state. Depends on
   // `feed` so each re-fetch re-arms; the counter caps it so it can never poll forever.
@@ -274,7 +279,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // production audience — they now get the new stepper/Live experience by default. ?classic=1 is the
   // safe rollback: it forces the legacy overview for this session without a redeploy.
   const classic = previewParams.get("classic") != null;
-  const liveTeam = showReport && hasTeam && feed !== null && !degraded && !comingSoon && !staleEmpty;
+  const liveTeam = showReport && hasTeam && feed !== null && !degraded && !unauthorized && !comingSoon && !staleEmpty;
   // The new experience (Onboarding → Training → Live) drives previews (comingSoon / ?state= / ?sample=)
   // AND real live rooftops. ?classic=1 opts a real live team back to the old MetricTile overview — it
   // never disables an explicit preview/sample, only the live-team auto-enable.
@@ -373,7 +378,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
       { id: "tile.appts", label: "Appointments — AI-booked" },
       { id: "tile.handoffs", label: "Hand-offs to team" },
       { id: "tile.response", label: "Response time" },
-      { id: "tile.actions", label: "Action items created" },
+      { id: "tile.actions", label: "Customers with follow-ups" },
       { id: "tile.callstexts", label: "Calls & texts" },
       { id: "tile.talk", label: "Talk time" },
       { id: "tile.afterhours", label: "After-hours captured" },
@@ -406,7 +411,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
             {fleet.responseTimeSec != null && (
               <Hideable id="tile.response" ctrl={ctrl}><MetricTile label="Response time" value={fmtSecs(fleet.responseTimeSec)} accent="#0ea5e9" sub={<>avg first response · speed-to-lead</>} title="Average time from a new lead arriving to the AI's first touch (speed-to-lead, Sales Inbound)." /></Hideable>
             )}
-            <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Action items created" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} closed · {fmtInt(aiStats.stats.open)} open</> : <>syncing…</>} onClick={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)} title="Follow-up tasks the AI logged for the team this period. Click for the full list." /></Hideable>
+            <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Customers with follow-ups" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} cleared · {fmtInt(aiStats.stats.open)} still waiting</> : <>syncing…</>} onClick={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)} title="Customers the AI logged a follow-up for this period — someone with several counts once. Click for the full list." /></Hideable>
             {/* Web chat is folded in as a third channel, but only shown on rooftops that run it — so the
                 label and sub-line stay "Calls & texts" everywhere else (migration 0021). */}
             <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label={(fleet.chats ?? 0) > 0 ? "Calls, texts & chats" : "Calls & texts"} value={fmtInt(fleet.calls + fleet.smsThreads + (fleet.chats ?? 0))} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts{(fleet.chats ?? 0) > 0 ? <> · {fmtInt(fleet.chats)} web chats</> : null}</>} title="AI conversations handled across voice, SMS and web chat — voice calls + SMS threads + chat sessions (conversations, not individual messages)." /></Hideable>
@@ -591,8 +596,13 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           {scenario === "onboarding" && <OnboardingOverview view={view} />}
 
           {showReport && !hasTeam && <NoRooftop />}
-          {showReport && hasTeam && (feed === null || degraded || staleEmpty) && <OverviewSkeleton />}
-          {showReport && hasTeam && feed !== null && !degraded && showPreview && (
+          {/* Denied read — above the skeleton/preview gates, since a denial resolves the feed but leaves it
+              empty, and every gate below would read that as "nothing to show yet". */}
+          {showReport && hasTeam && unauthorized && (
+            <ReportAccessDenied tab="overview" teamId={teamId} name={account.name} status={feed?.authStatus} />
+          )}
+          {showReport && hasTeam && !unauthorized && (feed === null || degraded || staleEmpty) && <OverviewSkeleton />}
+          {showReport && hasTeam && feed !== null && !degraded && !unauthorized && showPreview && (
             <div className="flex flex-col gap-4">
               {stage === "onboarding" ? (
                 <OnboardingStub onGoLive={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />

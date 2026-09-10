@@ -238,11 +238,16 @@ export function ActionItemsScoreboard({
   periodLabel?: string;
   onOpenAll?: () => void;
 }) {
+  /* THESE ARE CUSTOMERS, NOT TASKS. /api/action-items?scope=stats rolls up to one row per LEAD on
+     purpose: the AI re-raises the same action item on every touch, and one Bridgeton lead alone carried
+     115 'AskStaffMember' plus 95 'RequestCallback' rows, so counting tasks read 4,141 where the real
+     backlog was ~1,730 people. The numbers were right and the words were not — "Open now 257" sat next
+     to a task list of 306 with nothing saying they count different things. */
   const cells: { label: string; value: number; accent: string; hint?: string }[] = [
-    { label: "Created", value: stats.created, accent: "#813fed", hint: periodLabel ? `in ${periodLabel}` : "in period" },
-    { label: "Closed", value: stats.completed, accent: "#059669", hint: periodLabel ? `in ${periodLabel}` : "in period" },
-    { label: "Open now", value: stats.open, accent: "#2563eb" },
-    { label: "Overdue", value: stats.overdue, accent: "#dc2626" },
+    { label: "Customers", value: stats.created, accent: "#813fed", hint: periodLabel ? `given follow-ups in ${periodLabel}` : "given follow-ups" },
+    { label: "Cleared", value: stats.completed, accent: "#059669", hint: periodLabel ? `in ${periodLabel}` : "in period" },
+    { label: "Still waiting", value: stats.open, accent: "#2563eb", hint: "have open follow-ups" },
+    { label: "Overdue", value: stats.overdue, accent: "#dc2626", hint: "past their due date" },
     { label: "Due today", value: stats.dueToday, accent: "#ea760c" },
   ];
   return (
@@ -256,6 +261,10 @@ export function ActionItemsScoreboard({
           </div>
         ))}
       </div>
+      <p className="text-[10.5px] leading-snug text-[#9ca3af]">
+        Counted by customer — someone with several follow-ups counts once here. The list below shows the
+        individual follow-ups, so it runs longer than these figures.
+      </p>
       {onOpenAll && (
         <button onClick={onOpenAll} className="self-start text-[11.5px] font-semibold text-[#813fed] hover:underline">
           View all action items →
@@ -567,6 +576,19 @@ export function IntentOutcomeTable({ rows, totalConversations }: { rows: IntentO
           </tr>
         </tfoot>
       </table>
+      {/* ONLY THE CONVERSATION COLUMN TIES TO THE FUNNEL. The outcome columns sum the TAGGED intents —
+          we know an outcome only where the call carried an intent tag — so with untagged conversations
+          in the mix the appointment total here sits below the funnel's. That is not a discrepancy to
+          reconcile, it is a smaller population, but the page used to assert "totals tie to the funnel"
+          over the whole block and left a reader comparing 26 against 37 with no explanation. */}
+      {residual > 0 && (
+        <p className="px-4 pb-3 pt-2 text-[10.5px] leading-snug text-[#9ca3af]">
+          Outcome columns cover the {fmtInt(rowSum)} conversation{rowSum === 1 ? "" : "s"} that carried an
+          intent tag. The other {fmtInt(residual)} are counted in the total but have no tagged intent, so
+          their outcomes are not broken out here — which is why these columns read lower than the funnel
+          above.
+        </p>
+      )}
     </div>
   );
 }
