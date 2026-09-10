@@ -19,11 +19,33 @@ const CHUNK = 500;
 const STL_COLS =
   "activity_day, team_id, agent_type, new_leads, stl_within5, stl_within1, stl_seconds_sum, stl_count, stl_afterhours_within5, stl_within5_appts";
 
+/* PAGED. This read used to be a bare select("*"), which PostgREST silently caps at 1,000 rows. That was
+ * invisible while stl_lead_first held ~30 rows fleet-wide — the speed-to-lead flag matched almost
+ * nothing — but the rewritten flag puts ~56,000 lead-rows in this table, and an unpaged read would then
+ * return the first 1,000 and drop the persisted earliest-touch state for everyone else. Each run would
+ * re-derive those leads from its own chunk, moving a lead's STL day around and counting it as new more
+ * than once. Ordered explicitly because range() without a stable sort can repeat and skip rows. */
+const PAGE = 1000;
+
 async function loadPriorStl(sb: SupabaseClient, teamIds: string[]): Promise<Map<string, StlLeadEntry>> {
   if (!teamIds.length) return new Map();
-  const { data, error } = await sb.from(STL_LEAD_FIRST).select("*").in("team_id", teamIds);
-  if (error || !data?.length) return new Map();
-  return stlRowsToMap(data as Parameters<typeof stlRowsToMap>[0]);
+  const all: unknown[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await sb
+      .from(STL_LEAD_FIRST)
+      .select("*")
+      .in("team_id", teamIds)
+      .order("team_id", { ascending: true })
+      .order("agent_type", { ascending: true })
+      .order("lead_id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) return all.length ? stlRowsToMap(all as Parameters<typeof stlRowsToMap>[0]) : new Map();
+    if (!data?.length) break;
+    all.push(...data);
+    if (data.length < PAGE) break;
+  }
+  if (!all.length) return new Map();
+  return stlRowsToMap(all as Parameters<typeof stlRowsToMap>[0]);
 }
 
 async function chunkedUpsert(sb: SupabaseClient, rows: ReturnType<typeof stlEntryToRow>[]): Promise<string | null> {
