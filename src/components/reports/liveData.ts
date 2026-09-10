@@ -187,8 +187,11 @@ export interface FetchResult {
   // v3 named lists (rooftop-wide; the per-agent scoped copies live on agent.report). Absent on the
   // mock/degraded path — sections omit. LIVE-ONLY, never fabricated.
   namedAppointments?: NamedAppt[];
-  /** AI-booked bookings that belong to no agent (no direction resolvable) — see aggregateFleet. */
+  /** AI-booked bookings that belong to no agent (no direction resolvable), rooftop-wide — see aggregateFleet. */
   appointmentsUnattributed?: number;
+  /** The same bookings split by the department that DOES own them; `unknown` belongs to neither.
+   *  Read it through unattributedApptsFor() — never add the rooftop total into a department's tile. */
+  appointmentsUnattributedBy?: { sales: number; service: number; unknown: number };
   /* When the AGGREGATE was last rebuilt (sync_state.last_run_at), NOT when this client fetched. The
    * header's "Synced …" line reads this: fetchedAt says how fresh the REQUEST is, which is always
    * "just now" and told dealers the numbers were current when the ETL was hours behind. */
@@ -264,6 +267,29 @@ export interface FleetLive {
   bySplit: { inbound: FleetSplit; outbound: FleetSplit };
 }
 
+/* Server shape, tolerant of an older cached payload that only carried the rooftop scalar. Such a payload
+ * cannot say WHICH department a booking belonged to, so all of it goes to `unknown`: "All" still counts
+ * it and a department tile does not, which is the direction that cannot put a tile over its own list. */
+function normalizeUnattributed(raw: unknown, total: unknown): { sales: number; service: number; unknown: number } {
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  if (raw && typeof raw === "object") {
+    const r = raw as Record<string, unknown>;
+    return { sales: n(r.sales), service: n(r.service), unknown: n(r.unknown) };
+  }
+  return { sales: 0, service: 0, unknown: n(total) };
+}
+
+/* The unattributed bookings THIS scope owns. A department tile takes only its own department's; only
+ * the rooftop view ("All") adds the ones whose department could not be resolved at all. Passing the
+ * rooftop total into a department scope is the bug this exists to prevent — see route.ts. */
+export function unattributedApptsFor(feed: { appointmentsUnattributedBy?: { sales: number; service: number; unknown: number }; appointmentsUnattributed?: number } | null | undefined, dept: string): number {
+  if (!feed) return 0;
+  const by = normalizeUnattributed(feed.appointmentsUnattributedBy, feed.appointmentsUnattributed);
+  if (dept === "sales") return by.sales;
+  if (dept === "service") return by.service;
+  return by.sales + by.service + by.unknown;
+}
+
 export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>, unattributedAppointments = 0): FleetLive {
   const sum = (f: (a: AgentData) => number) => agents.reduce((s, a) => s + f(a), 0);
   const calls = sum((a) => a.metrics.calls);
@@ -295,7 +321,11 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   /* Rooftop AI-booked = every agent's, PLUS the bookings no agent owns. A meeting with no call, chat or
    * conversation behind it cannot be attributed to a direction, so it appears on no agent card — but it
    * is a real appointment and it IS in the rooftop list, so leaving it out of the rooftop number would
-   * put that tile under its own list. Zero on nearly every rooftop; 2 of 103 on team 9923577d07. */
+   * put that tile under its own list. Zero on nearly every rooftop; 2 of 103 on team 9923577d07.
+   *
+   * ★ `unattributedAppointments` must be SCOPED THE SAME WAY as `agents` — call unattributedApptsFor()
+   * with the same dept. Handing a department-scoped tile the rooftop-wide number counts another
+   * department's booking on this one (Principle BMW MINI: service read 46 over a list of 45). */
   const appointments = sum((a) => a.metrics.appointments) + unattributedAppointments;
   const appointmentsAssisted = sum((a) => a.metrics.appointmentsAssisted ?? 0);
   // Hand-offs: transfers are lead-level (build prefers report_lead_counts), callbacks call-level daily
@@ -485,6 +515,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
         namedAppointments: Array.isArray(j.namedAppointments) ? (j.namedAppointments as NamedAppt[]) : undefined,
         syncedAt: typeof j.syncedAt === "string" ? j.syncedAt : null,
         appointmentsUnattributed: typeof j.appointmentsUnattributed === "number" ? j.appointmentsUnattributed : 0,
+        appointmentsUnattributedBy: normalizeUnattributed(j.appointmentsUnattributedBy, j.appointmentsUnattributed),
         warmLeads: Array.isArray(j.warmLeads) ? (j.warmLeads as WarmLeadItem[]) : undefined,
       };
       CACHE.set(cacheKey, result); // cache ONLY a clean response

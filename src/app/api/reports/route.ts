@@ -359,13 +359,30 @@ export async function GET(request: Request): Promise<Response> {
   const appointmentsLive = !!liveAppts;
   if (liveAppts) {
     const snapshotByMeeting = new Map(windowedAppointments.filter((a) => a.meeting_id).map((a) => [a.meeting_id as string, a]));
+    /* ★ THE FEED'S `id` IS NOT ONE ID. It is meetings.meeting_id on some rows and the Mongo _id on
+     * others — the same mixture meetings.ts:88 already keys both ways for the warm-transfer screen. The
+     * snapshot only stores meeting_id, so a row arriving under its _id missed this lookup entirely and
+     * lost the direction, the channel label and the vehicle the aggregate already knew. LEAD ID is the
+     * one key both sides always carry, so it backs the meeting-id lookup up.
+     *
+     * Deliberately narrow: the lead-keyed row supplies DEPARTMENT and DIRECTION only, which are
+     * properties of how the AI worked that lead. booked_via and vehicle stay keyed on the meeting,
+     * because a lead with two bookings can have made one by call and one by text and guessing between
+     * them would put a wrong channel on a named row. */
+    const snapshotByLead = new Map<string, ReportAppointmentRow>();
+    for (const a of windowedAppointments) {
+      if (!a.assisted && a.lead_id && !snapshotByLead.has(a.lead_id)) snapshotByLead.set(a.lead_id, a);
+    }
+    const snapFor = (m: { id: string; leadId?: string | null }) =>
+      (m.id ? snapshotByMeeting.get(m.id) : undefined) ?? (m.leadId ? snapshotByLead.get(m.leadId) : undefined);
+
     /* The API states the booking agent on ~99% of rows (agentData). For the rest, take the department
      * and direction the aggregate already resolved for that meeting. Without this the row still lists —
      * it is a real appointment — but belongs to no agent, so the tiles sum to one less than the list
      * beneath them. Anything still unresolved stays listed and uncounted rather than being guessed at. */
     liveAppts = liveAppts.map((m) => {
       if (m.agentType && m.direction) return m;
-      const prev = m.id ? snapshotByMeeting.get(m.id) : undefined;
+      const prev = snapFor(m);
       if (!prev) return m;
       return {
         ...m,
@@ -456,20 +473,32 @@ export async function GET(request: Request): Promise<Response> {
    * The prior window uses live rows when we have them and otherwise leaves the aggregate's basis alone —
    * the snapshot only covers the current window, so recomputing it from these rows would read zero. */
   const curByAgent: Record<string, number> = {};
-  let appointmentsUnattributed = 0;
+  /* ★ SPLIT BY DEPARTMENT, NOT ONE ROOFTOP-WIDE NUMBER (fixed 2026-09-11). A booking no agent owns is
+   * still added to the total the tile shows — but that tile is department-scoped whenever the header's
+   * switcher is on Sales or Service, and this used to hand every scope the SAME rooftop-wide scalar.
+   * Principle BMW MINI of San Antonio, service tab, 30d: Service Inbound 44 + Service Outbound 1 = 45
+   * under a department total of 46, because one SALES booking with no resolvable direction was being
+   * counted on the service tab (and on the sales tab, and on All — the same row three times over).
+   * A row whose own department is unknown belongs to the rooftop and to neither department, so it is
+   * kept apart in `unknown` and only "All" picks it up — which is exactly how the LIST beneath these
+   * tiles already filters (`a.serviceType === dept`). Tile and list now scope identically. */
+  const unattributedBy = { sales: 0, service: 0, unknown: 0 };
   for (const a of windowedAppointments) {
     if (a.assisted) continue;
     const svc = (a.service_type || "").toLowerCase();
     const dir = (a.direction || "").toLowerCase();
-    if ((svc !== "sales" && svc !== "service") || (dir !== "inbound" && dir !== "outbound")) {
+    const dept = svc === "sales" || svc === "service" ? svc : null;
+    if (!dept || (dir !== "inbound" && dir !== "outbound")) {
       // Real bookings with no call, chat or conversation behind them — no agent owns them. Counted at
-      // rooftop level (see appointmentsUnattributed) and listed there, never guessed onto an agent.
-      appointmentsUnattributed++;
+      // the scope that DOES own them (their department, or the rooftop when even that is unknown) and
+      // listed there, never guessed onto an agent.
+      unattributedBy[dept ?? "unknown"]++;
       continue;
     }
     const type = `${svc === "sales" ? "Sales" : "Service"} ${dir === "inbound" ? "Inbound" : "Outbound"}`;
     curByAgent[type] = (curByAgent[type] ?? 0) + 1;
   }
+  const appointmentsUnattributed = unattributedBy.sales + unattributedBy.service + unattributedBy.unknown;
   const priByAgent = liveAppts ? countByAgent(liveAppts, prior.start, prior.end).byAgent : null;
   for (const agent of result.agents) {
     const type = AGENT_TYPE_BY_ID[agent.id];
@@ -479,7 +508,7 @@ export async function GET(request: Request): Promise<Response> {
     if (priByAgent && basis && typeof basis.appointments === "number") basis.appointments = priByAgent[type] ?? 0;
   }
 
-  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, everLive: everLiveResolved }, {
+  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, everLive: everLiveResolved }, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

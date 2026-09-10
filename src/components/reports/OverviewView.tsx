@@ -36,7 +36,7 @@ import {
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
-import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
+import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
 import { useDateRange, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { useOutcomes, OutcomesSection } from "@/components/reports/outcomes";
@@ -208,7 +208,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, feed?.appointmentsUnattributed), [agents, feed]);
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept)), [agents, feed, dept]);
 
   const hasTeam = teamId !== "" || sampleMode;
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the

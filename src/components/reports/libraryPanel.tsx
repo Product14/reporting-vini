@@ -28,6 +28,7 @@ import {
   fetchActionItemStats,
   agentsForAccount,
   aggregateFleet,
+  unattributedApptsFor,
   addDay,
   peekAgents,
   tzShortLabel,
@@ -160,7 +161,7 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
 
   const agents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const scoped = useMemo(() => (dept === "all" ? agents : agents.filter((a) => a.dept.toLowerCase() === dept)), [agents, dept]);
-  const fleet = useMemo(() => aggregateFleet(scoped, feed?.prior, feed?.appointmentsUnattributed), [scoped, feed]);
+  const fleet = useMemo(() => aggregateFleet(scoped, feed?.prior, unattributedApptsFor(feed, dept)), [scoped, feed, dept]);
   const periodLabel = custom ? `${custom.start} → ${custom.end}` : BUCKET_TEXT[bucket] ?? "Last 30 days";
 
   const ctx: ReportCtx = useMemo(

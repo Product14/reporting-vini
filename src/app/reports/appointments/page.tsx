@@ -15,7 +15,7 @@ import {
 import { NamedApptsTable } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
 import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
-import { fetchAgents, agentsForAccount, aggregateFleet, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, agentsForAccount, aggregateFleet, unattributedApptsFor, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
 import type { NamedAppt } from "@/components/reports/data";
 import { track } from "@/lib/analytics";
 
@@ -55,7 +55,7 @@ function AppointmentsView() {
     const all = agentsForAccount(feed?.agents ?? [], account);
     return dept === "all" ? all : all.filter((a) => a.dept.toLowerCase() === dept);
   }, [feed, account, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, feed?.appointmentsUnattributed), [agents, feed]);
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept)), [agents, feed, dept]);
   const appts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
   const filtered = useMemo<NamedAppt[]>(
     () => appts.filter((a) => (filter === "all" ? true : filter === "assisted" ? a.assisted : !a.assisted)),
