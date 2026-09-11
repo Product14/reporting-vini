@@ -238,7 +238,9 @@ export interface SmsMessage {
   content: string;
   toolCallId?: string | null;
   toolCalls?: ToolCall[] | null;
-  _ts?: number;
+  _ts?: number; // epoch-ms, present on only SOME turns
+  createdAt?: string | null; // ISO — the API sorts smsMessages on this (createdAt: -1) and projects it on
+  // every turn; the reliable ordering key when _ts is absent.
   // Human-handover (RETCONVAI-2997, UAT-only): a rep's manual turn during an ACTIVE handover carries
   // authorUserId + authorName (resolved server-side). On v2 there's NO authorType/direction — detect a rep
   // turn by role "assistant" + a present authorUserId. authorType is the v1 shape. All read defensively.

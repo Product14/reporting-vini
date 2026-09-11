@@ -307,20 +307,27 @@ function lastMessagePreview(convs: ConvRecord[] | undefined): string {
       if (body) return body;
       continue;
     }
-    // sms / chat — smsMessages are NEWEST-FIRST (same as the team endpoint; verified on conversations/v2,
-    // where `_ts` is present on only a few turns so array order is the source of truth). So the FIRST real
-    // (non-system/tool) turn is the LATEST message. (Reading from the END returned the OLDEST turn — the
-    // initial greeting — so the list preview didn't match the thread's last message.) A rep's own reply is
-    // prefixed with their name, the AI's with the agent name, the customer's bare.
+    // sms / chat — pick the LATEST real (non-system/tool) turn by its OWN time (`createdAt`, which the API
+    // sorts on and puts on every turn; `_ts` where present), NOT array position — so the row preview matches
+    // the thread's last message even where the array order varies. Falls back to the first real turn (the API
+    // returns smsMessages newest-first) only when no turn carries a time. Rep replies are prefixed with their
+    // name, the AI's with the agent name, the customer's bare.
     const arr = c.smsMessages ?? [];
-    for (let k = 0; k < arr.length; k++) {
-      const mm = arr[k];
+    let firstReal: string | null = null;
+    let latest: { t: number; text: string } | null = null;
+    for (const mm of arr) {
       const r = (mm.role || "").toLowerCase();
       if (r === "system" || r === "tool") continue;
       const parsed = parseSmsText(mm.content);
       const text = parsed.text || parsed.summary || "";
-      if (text) return clip((r === "user" ? "" : (mm.authorUserId ? (mm.authorName || "Team") : currentAgentName()) + ": ") + text);
+      if (!text) continue;
+      const built = clip((r === "user" ? "" : (mm.authorUserId ? (mm.authorName || "Team") : currentAgentName()) + ": ") + text);
+      if (firstReal === null) firstReal = built;
+      const t = mm._ts ?? (mm.createdAt ? +new Date(mm.createdAt) : NaN);
+      if (!isNaN(t) && (latest === null || t > latest.t)) latest = { t, text: built };
     }
+    if (latest) return latest.text;
+    if (firstReal) return firstReal;
   }
   return "";
 }
@@ -1781,7 +1788,12 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
           if ((m.role || "").toLowerCase() === "tool" && m.toolCallId) resultByCallId[m.toolCallId] = summarizeToolResult(m.content);
         }
         msgs.forEach((m, i) => {
-          const t = m._ts || base - (msgs.length - i);
+          // Order by the message's own time: `_ts` (epoch ms, present on only some turns), else `createdAt`
+          // (an ISO date the API sorts on and projects on EVERY turn). Only if BOTH are missing fall back to
+          // array position — and the array is NEWEST-FIRST (the API sorts smsMessages createdAt: -1), so
+          // index 0 is the newest → `base - i` (NOT `base - (len - i)`, which assumed oldest-first and
+          // silently reversed any turn without a `_ts`, so the thread order didn't match the API).
+          const t = m._ts ?? (m.createdAt ? +new Date(m.createdAt) : base - i);
           const role = (m.role || "").toLowerCase();
           if (role === "tool") return; // folded into its tool step (emitted from the call message)
           if (role === "system") {
