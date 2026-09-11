@@ -118,6 +118,16 @@ function HeroTile({ icon, value, label, sub, missing, onClick }: { icon: string;
     : <div className={base}>{inner}</div>;
 }
 
+/* Sub-line under an appointment headline. Both tiles sit on a screen that ALSO breaks the same number
+   down per agent, so a total carrying bookings no agent owns has to say so here — otherwise the reader
+   adds the agent cards up, comes up short, and reasonably concludes the report is wrong. */
+function apptSub(fleet: FleetLive): string {
+  const parts: string[] = [];
+  if (fleet.appointmentsAssisted > 0) parts.push(`+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)`);
+  if (fleet.appointmentsNoAgent > 0) parts.push(`${fmtInt(fleet.appointmentsNoAgent)} with no agent`);
+  return parts.length ? parts.join(" · ") : "AI-booked meetings";
+}
+
 // Service hero: 4 metric tiles in ONE divided container, each an icon-chip + "N Noun" headline + sub
 // (matches the Figma service overview — not the sales tile grid).
 function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; hotLeads: number; nav?: HeroNav }) {
@@ -125,7 +135,7 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
     { icon: "/live-overview/icon-afterhours.svg", chipBg: "#ede9fe", headline: <><CountUp value={fleet.afterHours} /> Leads</>, sub: "Captured after-hours", onClick: nav?.onConversations },
     { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <>{actionStats ? <CountUp value={actionStats.created} /> : "—"} Action Items</>, sub: actionStats ? `${fmtInt(actionStats.open)} items are still open` : "syncing…", onClick: nav?.onActionItems },
     { icon: "🔥", chipBg: "#fde9ec", headline: <><CountUp value={hotLeads} /> Hot Leads</>, sub: "warmed & in-market now", onClick: nav?.onHotLeads },
-    { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={fleet.appointments} /> Appointments</>, sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings", onClick: nav?.onAppointments },
+    { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={fleet.appointments} /> Appointments</>, sub: apptSub(fleet), onClick: nav?.onAppointments },
   ];
   return (
     <div className="flex w-full flex-wrap items-stretch overflow-hidden rounded-xl border border-[#e5e7eb] bg-white">
@@ -154,7 +164,7 @@ export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads =
   const tiles = [
     { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled },
     { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…", onClick: nav?.onActionItems },
-    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: fleet.appointmentsAssisted > 0 ? `+${fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)` : "AI-booked meetings", onClick: nav?.onAppointments },
+    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSub(fleet), onClick: nav?.onAppointments },
     { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed", onClick: nav?.onConversations },
   ];
   return (
@@ -335,7 +345,7 @@ function AgentUpsellCard({ dept, dir, teamId, accountName }: { dept: "Sales" | "
 }
 
 /* ══════════════════════════ 3. Lead-to-sale funnel ══════════════════════════ */
-function FunnelCell({ label, value, delta, last }: { label: string; value: number; delta: number | null; last?: boolean }) {
+function FunnelCell({ label, value, delta, last, note }: { label: string; value: number; delta: number | null; last?: boolean; note?: string }) {
   const up = (delta ?? 0) >= 0;
   return (
     <div className={`flex flex-1 basis-0 flex-col items-start gap-2.5 px-4 py-2 ${last ? "" : "border-r border-[#e5e7eb]"}`}>
@@ -351,6 +361,7 @@ function FunnelCell({ label, value, delta, last }: { label: string; value: numbe
           </span>
         )}
       </div>
+      {note && <p className="text-[11px] leading-tight text-[#9199a6]">{note}</p>}
     </div>
   );
 }
@@ -367,7 +378,10 @@ export function LiveFunnelCard({ fleet, serviceMode }: { fleet: FleetLive; servi
           <FunnelCell label="Leads touched" value={leads.value} delta={fleet.deltas.leads} />
           <FunnelCell label="Real Conversations" value={conv.value} delta={fleet.deltas.conversations} />
           <FunnelCell label="Qualified Leads" value={qual.value} delta={fleet.deltas.qualified} />
-          <FunnelCell label="Appointments - AI Booked" value={appt.value} delta={fleet.deltas.appointments} last />
+          {/* The three stages to the left are exact sums of the agent cards below this card, so this one
+              has to account for itself too when it carries bookings no agent owns. */}
+          <FunnelCell label="Appointments - AI Booked" value={appt.value} delta={fleet.deltas.appointments} last
+            note={fleet.appointmentsNoAgent > 0 ? `${fmtInt(fleet.appointmentsNoAgent)} not assigned to an agent` : undefined} />
         </div>
       </div>
       {/* stepped funnel — distinct descending bars per stage (NOT a continuous curve); each bar's height

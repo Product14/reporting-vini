@@ -224,6 +224,13 @@ export interface FleetLive {
   conversations: number;
   qualified: number;
   appointments: number;
+  /* The part of `appointments` that belongs to NO agent, so anywhere the total is shown beside a
+     per-agent or per-direction breakdown it can be named instead of read as an arithmetic error.
+     Honda of Downtown Los Angeles, service, 30d: the funnel's other three stages equal the two agent
+     cards exactly (810 = 559+251, 633 = 502+131, 247 = 236+11) and appointments read 97 over 88+7.
+     Both of those 2 are one lead whose meeting was created ONE SECOND after the lead itself, with no
+     call and no conversation anywhere — there is no evidence to attribute them to either agent. */
+  appointmentsNoAgent: number;
   appointmentsAssisted: number; // canonical: AI-assisted (CRM) — SECONDARY, never folded into appointments
   transfers: number; // canonical: completed hand-offs (lead-level when RPC available)
   transfersFailed: number; // reported separately, never folded in
@@ -404,6 +411,9 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     conversations,
     qualified,
     appointments,
+    // Derived from the two direction splits rather than from unattributedAppointments directly, so it is
+    // whatever the breakdown ACTUALLY leaves over — it cannot drift from the rows beside it.
+    appointmentsNoAgent: Math.max(0, appointments - splitFor("Inbound").appointments - splitFor("Outbound").appointments),
     appointmentsAssisted,
     transfers,
     transfersFailed,
