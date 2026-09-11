@@ -386,13 +386,25 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
         handledByAI: queryResolved,
       },
       /* appts from the appointment LIST when we have it, so the chart and the funnel above it plot the
-         same bookings. Falls back to agent_daily's column when the map is absent. */
-      dayOnDay: rows.map((r) => ({
-        day: shortDay(r.activity_day),
-        touched: r.calls,
-        qualified: r.qualified,
-        appts: apptDayCounts?.[type]?.[String(r.activity_day)] ?? (apptDayCounts ? 0 : r.appointments),
-      })),
+         same bookings. Falls back to agent_daily's column when the map is absent.
+         ★ THE CHART'S DAYS COME FROM THE APPOINTMENTS TOO, NOT ONLY FROM agent_daily (fixed 2026-09-11).
+         These rows are the agent's activity days, so a booking made on a day that agent had no OTHER
+         recorded activity had no bar to land on and silently vanished from the chart while still
+         counting in the tile above it. Paragon Acura, Service Outbound, 30d: tile 4, chart 1 — the
+         bookings on Aug 24, Aug 25 and Sep 10 all fell on days absent from agent_daily. Fleet sweep of
+         all 116 live rooftops found 12 such agents across 11 rooftops, the chart always LOW.
+         Appointment-only days carry zero touched/qualified, which is exactly what happened. */
+      dayOnDay: (() => {
+        const appts = apptDayCounts?.[type];
+        if (!apptDayCounts) return rows.map((r) => ({ day: shortDay(r.activity_day), touched: r.calls, qualified: r.qualified, appts: r.appointments }));
+        const byDay = new Map<string, { touched: number; qualified: number }>();
+        for (const r of rows) byDay.set(String(r.activity_day), { touched: r.calls, qualified: r.qualified });
+        for (const d of Object.keys(appts ?? {})) if (!byDay.has(d)) byDay.set(d, { touched: 0, qualified: 0 });
+        return [...byDay.keys()].sort().map((d) => {
+          const v = byDay.get(d)!;
+          return { day: shortDay(d), touched: v.touched, qualified: v.qualified, appts: appts?.[d] ?? 0 };
+        });
+      })(),
       intent: intents.length
         ? intents.slice(0, 8).map((r, i) => ({ label: r.value, value: r.count, color: COLORS[i % COLORS.length] }))
         : [],

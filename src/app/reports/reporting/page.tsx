@@ -93,7 +93,14 @@ function ReportingView() {
           {
             kind: "rows",
             rows: [
-              ["Appointments — AI-booked", `${fmtInt(fleet.appointments)} (Inbound ${fmtInt(split.inbound.appointments)} · Outbound ${fmtInt(split.outbound.appointments)})`],
+              // The bracketed split must account for the whole headline — a booking that belongs to no
+              // agent has no direction, so it is named rather than left to look like an arithmetic error.
+              ["Appointments — AI-booked", (() => {
+                const noAgent = fleet.appointments - split.inbound.appointments - split.outbound.appointments;
+                const parts = [`Inbound ${fmtInt(split.inbound.appointments)}`, `Outbound ${fmtInt(split.outbound.appointments)}`];
+                if (noAgent > 0) parts.push(`no agent ${fmtInt(noAgent)}`);
+                return `${fmtInt(fleet.appointments)} (${parts.join(" · ")})`;
+              })()],
               ...(fleet.appointmentsAssisted > 0 ? [["  AI-assisted (CRM)", fmtInt(fleet.appointmentsAssisted)]] : []),
               ["Real conversations", `${fmtInt(fleet.conversations)} (Inbound ${fmtInt(split.inbound.conversations)} · Outbound ${fmtInt(split.outbound.conversations)})`],
               ["Qualified leads", `${fmtInt(fleet.qualified)} (Inbound ${fmtInt(split.inbound.qualified)} · Outbound ${fmtInt(split.outbound.qualified)})`],

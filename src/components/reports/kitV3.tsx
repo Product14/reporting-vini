@@ -80,6 +80,7 @@ export function ValueTile({
   total,
   inbound,
   outbound,
+  unassigned,
   delta,
   subtext,
   accent = "purple",
@@ -89,6 +90,10 @@ export function ValueTile({
   total: string;
   inbound?: string;
   outbound?: string;
+  /* Third row, rendered only when there is something to put in it. The Inbound/Outbound rows are a
+     SPLIT OF THE HEADLINE, and a reader adds them up — so anything the headline counts that belongs to
+     neither direction has to appear here or the tile contradicts itself. See OverviewView. */
+  unassigned?: string;
   delta?: number | null; // null = no prior basis ("New"); undefined = don't show a delta at all
   subtext?: React.ReactNode;
   accent?: TileAccent;
@@ -107,7 +112,7 @@ export function ValueTile({
             : <span className="text-[9.5px] font-semibold" style={{ color: delta > 0 ? "#16a34a" : "#dc2626" }}>{delta > 0 ? "▲" : "▼"} {Math.abs(delta)}%</span>
         )}
       </div>
-      {(inbound !== undefined || outbound !== undefined) && (
+      {(inbound !== undefined || outbound !== undefined || unassigned !== undefined) && (
         <div className="mt-1.5 flex flex-col gap-0.5">
           {inbound !== undefined && (
             <div className="flex items-baseline justify-between text-[10.5px] font-semibold text-[#6b7280]">
@@ -117,6 +122,11 @@ export function ValueTile({
           {outbound !== undefined && (
             <div className="flex items-baseline justify-between text-[10.5px] font-semibold text-[#6b7280]">
               <span>Outbound</span><span className="tabular-nums font-bold text-[#111]">{outbound}</span>
+            </div>
+          )}
+          {unassigned !== undefined && (
+            <div className="flex items-baseline justify-between text-[10.5px] font-semibold text-[#6b7280]">
+              <span>No agent</span><span className="tabular-nums font-bold text-[#111]">{unassigned}</span>
             </div>
           )}
         </div>
