@@ -1643,7 +1643,27 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     // Newest page only — cheap enough to poll — merged over what's on screen so the older pages walked by
     // the initial load survive the refresh.
     fetchInboxConversations(auth, customer.customer_id, { limit: 50 })
-      .then((data) => setConv((prev) => mergeConversations(prev, data)));
+      .then((data) => setConv((prev) => {
+        const merged = mergeConversations(prev, data);
+        if (!prev) return merged;
+        // Keep the recording URL already on screen for each call. The backend RE-SIGNS the recording URL on
+        // every conversations/v2 request, so a poll would otherwise hand the <audio> a new src and reload it
+        // mid-play — the "pauses and restarts abruptly" bug. Same file, only the query-string signature
+        // differs, and the first is valid for the file's ~24h TTL. Frozen here at the DATA level so it holds
+        // even if the call card remounts.
+        const kept = new Map(
+          prev.conversations.filter((c) => c.type === "call" && c.callData?.recordingUrl)
+            .map((c) => [c.conversationId, c.callData!.recordingUrl as string]),
+        );
+        if (!kept.size) return merged;
+        return {
+          ...merged,
+          conversations: merged.conversations.map((c) =>
+            c.type === "call" && c.callData && kept.has(c.conversationId)
+              ? { ...c, callData: { ...c.callData, recordingUrl: kept.get(c.conversationId)! } }
+              : c),
+        };
+      }));
   }, [auth, customer.customer_id]);
 
   useEffect(() => {
