@@ -2695,7 +2695,14 @@ function CallCard({ rec, fb, auth, customerName }: { rec: ConvRecord; fb: FbCtx;
   const inbound = (cd.callType || "").toLowerCase().includes("inbound") || recDir === "in";
   const dirKnown = !!(cd.callType || "").trim() || recDir !== "unknown";
   const durSec = callDurationSec(cd.callDuration); // normalized (callDuration is ms on prod, sec on uat)
-  const recording = cd.recordingUrl || null;
+  // The thread re-fetches on a timer (reloadConv) and the backend returns a freshly-SIGNED recording URL each
+  // time; handing the <audio> a changed src reloads it mid-play — the "pauses and restarts abruptly" bug.
+  // Freeze the first URL we see for this call so a background poll never interrupts playback (the signature
+  // covers the file's ~24h TTL). Same recording either way — only the query-string signature differs.
+  const recordingRaw = cd.recordingUrl || null;
+  const [recording, setRecording] = useState<string | null>(recordingRaw);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time latch: capture the first URL, never re-set
+  useEffect(() => { if (recordingRaw && !recording) setRecording(recordingRaw); }, [recordingRaw, recording]);
   // Whether the call actually connected — driven by endedReason, NOT by recording presence. A connected
   // call whose recording is still processing was wrongly shown as "didn't connect" before (INVAI-4961).
   const noAnswer = /voicemail|no[-_ ]?answer|missed|busy|failed|declined|rejected|canceled|cancelled|not[-_ ]?connect|before[-_ ]?warm|did[-_ ]?not[-_ ]?answer/i.test(cd.endedReason || "");
