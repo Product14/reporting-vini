@@ -107,40 +107,62 @@ export async function getOnboardedSlots(teamId: string, token?: string | null, e
   return slots;
 }
 
+/* The mappings that land in each slot, ONBOARDED ONES FIRST — the shared basis for the dealer's real
+ * agent name and avatar below.
+ *
+ * ★ Naming is deliberately NOT gated on isOnboarded (fixed 2026-09-15). The endpoint matches on
+ * { teamId, isActive: true } and carries isOnboarded as a passthrough flag, so it returns agents the
+ * dealer has configured but not yet switched on — and buildResult renders any slot with ACTIVITY in the
+ * window regardless of that flag, because a live agent must never be silently dropped. Filtering the
+ * flag HERE therefore left such an agent with no configured name and fell back to the mock persona:
+ * Bill Wright Toyota (team ef65efcd31) named both sales agents "Avery", but its Sales Outbound mapping
+ * still read isOnboarded=false while placing real calls, so the report titled it "Jenny" — a name the
+ * dealer never chose. Entitlement gating is getOnboardedSlots' job; naming just reports the config.
+ *
+ * A slot that has at least one onboarded mapping ignores its un-onboarded ones (so switching an agent
+ * on never mixes in the name of one that is still off); a slot with none falls back to them. */
+function mappingsBySlot(list: OnboardedAgent[]): Map<SlotId, OnboardedAgent[]> {
+  const bySlot = new Map<SlotId, OnboardedAgent[]>();
+  for (const a of list) {
+    const s = slotOf(a);
+    if (!s) continue;
+    bySlot.set(s, [...(bySlot.get(s) ?? []), a]);
+  }
+  for (const [s, arr] of bySlot) {
+    const on = arr.filter((a) => a.isOnboarded !== false);
+    bySlot.set(s, on.length ? on : arr);
+  }
+  return bySlot;
+}
+
 /* The dealer's REAL agent display name per slot (from the onboarded-agents config) — replaces the mock
  * personas (Emily/Jenny/Mia/Theo) so the report shows the name the dealer actually gave each agent.
- * A slot with more than one onboarded agent (e.g. two service-outbound campaigns) joins its distinct
- * names with " & ". Null / a missing slot → caller keeps the mock persona. */
+ * A slot with more than one agent (e.g. two service-outbound campaigns) joins its distinct names with
+ * " & ". Null / a missing slot → caller keeps the mock persona. */
 export async function getOnboardedNames(teamId: string, token?: string | null, env?: string | null): Promise<Partial<Record<SlotId, string>> | null> {
   const list = await getOnboardedAgents(teamId, token, env);
   if (!list) return null;
-  const perSlot = new Map<SlotId, string[]>();
-  for (const a of list) {
-    if (a.isOnboarded === false) continue;
-    const s = slotOf(a);
-    const name = (a.name || "").trim();
-    if (!s || !name) continue;
-    const arr = perSlot.get(s) ?? [];
-    if (!arr.includes(name)) arr.push(name); // de-dupe repeated names within a slot
-    perSlot.set(s, arr);
-  }
   const names: Partial<Record<SlotId, string>> = {};
-  for (const [s, arr] of perSlot) names[s] = arr.join(" & ");
+  for (const [s, arr] of mappingsBySlot(list)) {
+    const distinct: string[] = [];
+    for (const a of arr) {
+      const name = (a.name || "").trim();
+      if (name && !distinct.includes(name)) distinct.push(name); // de-dupe repeated names within a slot
+    }
+    if (distinct.length) names[s] = distinct.join(" & ");
+  }
   return names;
 }
 
 /* The dealer's REAL agent avatar per slot (imageUrl from the onboarded-agents config) — so the report
- * shows the actual agent photo instead of the mock Emily/Jenny art. First onboarded agent with an image
- * wins per slot. Null / missing slot → caller keeps the mock avatar. */
+ * shows the actual agent photo instead of the mock Emily/Jenny art. First agent with an image wins per
+ * slot. Null / missing slot → caller keeps the mock avatar. */
 export async function getOnboardedPhotos(teamId: string, token?: string | null, env?: string | null): Promise<Partial<Record<SlotId, string>> | null> {
   const list = await getOnboardedAgents(teamId, token, env);
   if (!list) return null;
   const photos: Partial<Record<SlotId, string>> = {};
-  for (const a of list) {
-    if (a.isOnboarded === false) continue;
-    const s = slotOf(a);
-    if (!s || photos[s]) continue; // first image per slot wins
-    const url = imageUrlOf(a);
+  for (const [s, arr] of mappingsBySlot(list)) {
+    const url = arr.map(imageUrlOf).find(Boolean);
     if (url) photos[s] = url;
   }
   return photos;
