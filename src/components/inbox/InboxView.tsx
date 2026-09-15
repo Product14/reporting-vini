@@ -114,7 +114,14 @@ export function setInboxTz(tz: string | null | undefined) { ACTIVE_TZ = tz || un
  * instead of a generic "Vini" + icon. Module state (page shows one team at a time), like ACTIVE_TZ. */
 let AI_AGENT: { name: string | null; imageUrl: string | null; imageByName: Record<string, string> } = { name: null, imageUrl: null, imageByName: {} };
 export function setInboxAgents(agents: OnboardedAgent[], serviceType: "sales" | "service"): void {
-  const onboarded = agents.filter((a) => a.isOnboarded !== false);
+  /* Prefer the agents the dealer has switched on, but fall back to every active mapping when NONE is
+   * flagged. The endpoint matches on { teamId, isActive: true } and returns isOnboarded as a passthrough
+   * flag that is unreliable fleet-wide — 14 live rooftops (all six Sport Durst stores, Ardmore Toyota,
+   * Central City Toyota) carry it false on EVERY agent — so filtering it out left them with no name at
+   * all and the thread showed a generic "Vini" instead of Stacy / Ava / Chloe. Same fix, same reason, as
+   * getOnboardedNames in lib/spyne/teamContext.ts. */
+  const flagged = agents.filter((a) => a.isOnboarded !== false);
+  const onboarded = flagged.length ? flagged : agents;
   const byName: Record<string, string> = {};
   for (const a of onboarded) if (a.name && a.imageUrl) byName[a.name.trim()] = a.imageUrl;
   // Primary = an agent for this department (prefer inbound), else any department agent, else first with a photo.
