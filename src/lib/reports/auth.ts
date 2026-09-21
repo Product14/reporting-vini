@@ -11,10 +11,13 @@
  *      Same secret that already guards the /api/reports/metrics ingest POST.
  *   2. SPYNE SESSION TOKEN — the dealer's forwarded session token (Authorization: Bearer …, or
  *      ?auth_key=/?spyne_token=/?token= — the same sources every route already reads for enrichment).
- *      The token is a base64-encoded JSON blob carrying authKey + deviceId + enterprise_id + team_id
- *      (NOT a signed JWT — see meetings.ts enterpriseIdFromToken). Every genuine dealer token carries a
- *      team_id, and that team_id MUST equal the requested team_id (no cross-tenant reads). A token that
- *      carries a DIFFERENT team, NO team_id, or that does not decode to a JSON object is rejected (403).
+ *      Two token shapes are live in prod: an older opaque base64-encoded JSON blob carrying authKey +
+ *      deviceId + enterprise_id + team_id, and a signed JWT carrying (at least) enterpriseId + teamId
+ *      (camelCase) — decoded via the shared decodeTokenPayload in spyne/client.ts, which handles both;
+ *      see meetings.ts enterpriseIdFromToken for the sibling caller. Neither is verified by signature
+ *      here — see the residual-trust note below. Every genuine dealer token carries a team scope, and
+ *      it MUST equal the requested team_id (no cross-tenant reads). A token that carries a DIFFERENT
+ *      team, NO team scope, or that does not decode to a JSON object is rejected (403).
  *      (It used to be that a no-team_id / undecodable token fell through to "allow any team" as a
  *      supposed admin credential — that let a forged `{"enterprise_id":…}` blob or literally any junk
  *      bearer read every rooftop's PII. There is no legitimate no-team_id dealer token, and the service
@@ -37,6 +40,8 @@
  * Those calls must be updated to send `Authorization: Bearer ${CRON_SECRET}` (preferred) or an
  * `auth_key`/`key` query param, or they will (correctly) start returning 401 once this guard is live.
  */
+
+import { decodeTokenPayload } from "@/lib/spyne/client";
 
 // Read the bearer credential from the same sources the enrichment path uses: the Authorization header
 // first, then the auth_key/spyne_token/token query params. "Bearer " prefix stripped.
@@ -88,32 +93,33 @@ export function spyneEnvFrom(request: Request): string | null {
   return env === "uat" || env === "stag" || env === "prod" ? env : null;
 }
 
-/* The team scope a presented credential carries. A real Spyne session token is base64(JSON{authKey,
- * deviceId, enterprise_id, team_id}) (see meetings.ts) — it ALWAYS carries a team_id. So we distinguish
- * three cases, and only the first is a usable dealer credential:
- *   - "team"    → decoded to an object carrying a non-empty team_id (the real dealer token shape).
- *   - "noScope" → decoded to an object but with no team_id. No genuine dealer token looks like this; the
- *                 only thing that produces it is a hand-crafted blob. MUST NOT be treated as an any-team
- *                 admin credential (that was the forgery hole: `{"enterprise_id":"x"}` → read anything).
+/* The team scope a presented credential carries. Two token shapes are live in prod — an older opaque
+ * base64(JSON{authKey, deviceId, enterprise_id, team_id}) blob, and a signed JWT carrying (at least)
+ * enterpriseId + teamId (camelCase) — both decoded via the shared decodeTokenPayload in spyne/client.ts,
+ * which is the ONLY place either shape should be parsed (see its comment: a decoder that only handles
+ * one shape silently rejects every token in the other shape once that's what's actually presented — a
+ * regression this function hit once already, before this fix, against real JWT-shaped tokens). Every
+ * genuine dealer token carries a team scope, so we distinguish three cases, and only the first is a
+ * usable dealer credential:
+ *   - "team"    → decoded to an object carrying a non-empty team scope (the real dealer token shape).
+ *   - "noScope" → decoded to an object but with no team scope. No genuine dealer token looks like this;
+ *                 the only thing that produces it is a hand-crafted blob. MUST NOT be treated as an
+ *                 any-team admin credential (that was the forgery hole: `{"enterprise_id":"x"}` → read
+ *                 anything).
  *   - "invalid" → not a decodable JSON object at all (e.g. `Bearer garbage`). MUST be rejected — treating
  *                 it as "no scope → allow" let any junk bearer read every rooftop's PII with no account.
- * NOTE: the token is unsigned, so a "team" result is a self-asserted claim, not proof — a caller can still
- * forge `{team_id: <victim>}`. This function only tells us WHAT scope is claimed; closing forgery requires
- * verifying the credential server-side against Spyne (tracked separately). */
+ * NOTE: neither shape is signature-verified, so a "team" result is a self-asserted claim, not proof — a
+ * caller can still forge `{teamId: <victim>}`. This function only tells us WHAT scope is claimed;
+ * closing forgery requires verifying the credential server-side against Spyne (tracked separately). */
 type TokenScope =
   | { kind: "team"; teamId: string }
   | { kind: "noScope" }
   | { kind: "invalid" };
 
 function decodeTokenScope(token: string): TokenScope {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(Buffer.from(token, "base64").toString("utf8"));
-  } catch {
-    return { kind: "invalid" };
-  }
-  if (!payload || typeof payload !== "object") return { kind: "invalid" };
-  const raw = (payload as { team_id?: unknown }).team_id;
+  const payload = decodeTokenPayload(token);
+  if (!payload) return { kind: "invalid" };
+  const raw = payload.teamId ?? payload.team_id;
   const teamId = (typeof raw === "string" ? raw : "").trim();
   return teamId ? { kind: "team", teamId } : { kind: "noScope" };
 }

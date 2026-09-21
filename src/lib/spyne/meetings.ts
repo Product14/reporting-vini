@@ -7,25 +7,23 @@
  * Server-only. Like the other spyne helpers it degrades to an empty list (never throws) when auth is
  * unconfigured or the call fails, so the report keeps rendering. See client.ts for the auth model. */
 
-import { spyneGet, resolveToken } from "./client";
+import { spyneGet, resolveToken, decodeTokenPayload } from "./client";
 import { runClickhouse, chEsc, hasClickhouseCreds } from "./clickhouse";
 import type { Meeting, MeetingsResult } from "@/components/reports/data";
 
 export type ServiceType = "sales" | "service";
 
-/* The Spyne session token is a base64-encoded JSON blob carrying enterprise_id + team_id (it is NOT a
- * signed JWT). The meetings endpoint needs `enterpriseId` as a query param, so decode it from whichever
- * token we hold (request-forwarded in prod, env in local dev). Falls back to SPYNE_ENTERPRISE_ID. */
+/* The meetings endpoint needs `enterpriseId` as a query param, so decode it from whichever token we
+ * hold (request-forwarded in prod, env in local dev) — via the shared decodeTokenPayload (see client.ts
+ * for the two token shapes it handles). This is a FALLBACK only: the request's own `enterprise_id`
+ * query param (the host embeds ?enterprise_id=&team_id=) always wins over anything decoded here — see
+ * fetchMeetings below. Falls back to SPYNE_ENTERPRISE_ID when nothing decodes. Server-only (this module
+ * never ships to a browser) — no token content reaches the frontend, only the resolved id. */
 export function enterpriseIdFromToken(token?: string | null): string | null {
   const t = resolveToken(token);
-  if (t) {
-    try {
-      const payload = JSON.parse(Buffer.from(t, "base64").toString("utf8")) as { enterprise_id?: string };
-      if (payload?.enterprise_id) return payload.enterprise_id;
-    } catch {
-      /* not a decodable token — fall through to the env override */
-    }
-  }
+  const payload = t ? decodeTokenPayload(t) : null;
+  const id = payload?.enterpriseId ?? payload?.enterprise_id;
+  if (typeof id === "string" && id) return id;
   return process.env.SPYNE_ENTERPRISE_ID || null;
 }
 

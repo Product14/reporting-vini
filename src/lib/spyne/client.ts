@@ -75,3 +75,28 @@ export async function cached<T>(key: string, load: () => Promise<T | null>): Pro
   if (value !== null) cache.set(key, { at: Date.now(), value });
   return value;
 }
+
+/* Decode a Spyne session token's claims — WITHOUT verifying a signature; this only ever reads a
+ * self-asserted claim (see auth.ts for the trust model that depends on it). Two shapes are live in
+ * prod: an older opaque token, base64(JSON{authKey, deviceId, enterprise_id, team_id}) — decode the
+ * whole string; and a signed JWT — three dot-separated segments, payload keys camelCase (enterpriseId,
+ * teamId). Every caller that reads a claim from a Spyne token (meetings.ts enterpriseIdFromToken,
+ * auth.ts decodeTokenScope) MUST go through this, not its own ad hoc decode — a decode that only
+ * handles one shape silently breaks the moment the other shape is what's actually presented: the old
+ * whole-string decode throws on every real JWT (3 segments glued with dots isn't valid base64), which
+ * for auth.ts's caller means every real JWT-holding session gets REJECTED (403), not just degraded.
+ * Returns null when the token doesn't decode to a JSON object in either shape. */
+export function decodeTokenPayload(token: string): Record<string, unknown> | null {
+  const decode = (segment: string): Record<string, unknown> | null => {
+    try {
+      // base64url (JWT segments use '-'/'_', no padding) → standard base64
+      const b64 = segment.replace(/-/g, "+").replace(/_/g, "/");
+      const parsed: unknown = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const parts = token.split(".");
+  return parts.length === 3 ? decode(parts[1]) : decode(token);
+}
