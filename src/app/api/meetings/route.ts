@@ -291,7 +291,16 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId, token: spyneToken, env: spyneEnv });
-  return Response.json(result, {
+  /* `result.error` means the live Spyne call itself failed (bad/expired token, Spyne outage, …) — NOT
+   * that the rooftop genuinely has zero appointments. Both used to render identically as `{meetings:
+   * [], total: 0}`, which is exactly what let a dead token look like "no bookings anywhere" fleet-wide
+   * for 40h (2026-09-19→21) with nothing to alert on. `scope=recent` is the poller's own call
+   * (vini-daily-calls eventRunner.cjs, via reporting-vini's apiJson wrapper) — it already treats any
+   * `degraded`-shaped field as a signal to raise a Slack alert (see that file's `_feedDegraded`), so
+   * this flag is named distinctly (`meetingsFeedDegraded`, not the existing `degraded`) to get its own
+   * accurately-worded alert rather than being folded into the ClickHouse-specific one. */
+  const body = result.error ? { ...result, meetingsFeedDegraded: true, meetingsFeedError: result.error } : result;
+  return Response.json(body, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

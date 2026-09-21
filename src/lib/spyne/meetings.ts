@@ -159,8 +159,16 @@ interface FetchOneOpts {
 /* One serviceType's meetings in [startISO, endISO). Reads page 1, then — using the reported total —
  * fetches the remaining pages (up to MAX_PAGES) in parallel so a high-volume book doesn't get truncated
  * by a low page cap and doesn't pay per-page latency. Falls back to sequential hasNextPage paging when
- * the API doesn't report a total. Returns [] on any failure (spyneGet logs + swallows errors). */
-async function fetchOne(o: FetchOneOpts): Promise<Meeting[]> {
+ * the API doesn't report a total.
+ *
+ * Returns [] on any failure — the meetings LIST behavior is unchanged. But it also returns `error`
+ * (page 1's failure reason, via spyneGet's onError) so the caller can tell "the Spyne call itself
+ * failed" apart from "the call succeeded and there's genuinely nothing" — collapsing those two is what
+ * let a dead Spyne token read as zero appointments fleet-wide for 40h with no alert (2026-09-19→21).
+ * Only page 1 is tracked: a first-page failure means this serviceType got nothing at all, which is the
+ * case that matters; a later-page failure on an otherwise-working feed just truncates a busy rooftop's
+ * list, already a known, separate, non-silent tradeoff (see MAX_PAGES above). */
+async function fetchOne(o: FetchOneOpts): Promise<{ meetings: Meeting[]; error: string | null }> {
   const pageUrl = (page: number) =>
     `/leads/dealer/v3/meetings?${new URLSearchParams({
       enterpriseId: o.enterpriseId,
@@ -183,7 +191,10 @@ async function fetchOne(o: FetchOneOpts): Promise<Meeting[]> {
       source: AI_SOURCE,
     }).toString()}`;
 
-  const first = await spyneGet<MeetingsResp>(pageUrl(1), o.token, o.env);
+  let error: string | null = null;
+  const first = await spyneGet<MeetingsResp>(pageUrl(1), o.token, o.env, (info) => {
+    error = `${o.serviceType}: ${info.message}`;
+  });
   const raw: RawMeeting[] = Array.isArray(first?.data) ? [...first!.data!] : [];
   if (raw.length) {
     const total = first?.pagination?.total;
@@ -208,7 +219,7 @@ async function fetchOne(o: FetchOneOpts): Promise<Meeting[]> {
   // AI-booked only — drop the dealer's own BDC/CRM appointments so this matches the AI's count.
   const out: Meeting[] = [];
   for (const r of raw) if ((r.source || "").toLowerCase() === AI_SOURCE) out.push(normalize(r));
-  return out;
+  return { meetings: out, error };
 }
 
 /* Meetings for a rooftop, across one or both serviceTypes, merged. `service: "both"` fetches sales +
@@ -245,13 +256,19 @@ export async function fetchMeetings(opts: {
   if (leadIds && leadIds.length === 0) return { meetings: [], total: 0 };
   const types: ServiceType[] = service === "both" ? ["sales", "service"] : [service];
   try {
-    const lists = await Promise.all(
+    const results = await Promise.all(
       types.map((serviceType) => fetchOne({ teamId, enterpriseId, serviceType, startISO, endISO, sortOrder, token, env })),
     );
+    // A serviceType-level failure (bad/expired token, Spyne outage, …) resolves to [] the same as a
+    // genuinely quiet rooftop — that collapse is exactly what let a dead token read as "zero
+    // appointments" fleet-wide for 40h with no alert (2026-09-19→21). Carry the first failure reason
+    // through on `error` so the caller (route.ts) can tell the two apart and the poller can alert on
+    // it, even though the meetings LIST behavior below is unchanged either way.
+    const feedError = results.find((r) => r.error)?.error ?? null;
     // Drop meta.source 'warm_transfer'/'callback' rows before any scoping/counting below — appointments
     // we did not create (see dropPulledInHistoryMeetings). Applied here so every branch's `total` and every
     // listed row honour it.
-    let meetings = await dropPulledInHistoryMeetings(teamId, lists.flat());
+    let meetings = await dropPulledInHistoryMeetings(teamId, results.flatMap((r) => r.meetings));
     // `total` is the count the modal headlines. Defaults to the rows we list; the lead-scoped drill
     // overrides it with the authoritative booked-lead count so the number matches the tile even if a
     // lead's live meeting record didn't come back (deleted/rescheduled/non-spyne after Q12227 captured it).
@@ -292,7 +309,7 @@ export async function fetchMeetings(opts: {
       });
       total = meetings.length;
     }
-    return { meetings, total };
+    return feedError ? { meetings, total, error: feedError } : { meetings, total };
   } catch (e) {
     return { meetings: [], total: 0, error: e instanceof Error ? e.message : String(e) };
   }

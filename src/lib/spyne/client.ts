@@ -42,9 +42,25 @@ export function spyneConfigured(token?: string | null): boolean {
 
 /* GET a JSON path from the Spyne API. Returns null on any failure (no token, network error, non-2xx,
  * bad JSON) so the report never breaks because an enrichment call hiccuped. Best-effort by design. */
-export async function spyneGet<T>(path: string, token?: string | null, env?: string | null): Promise<T | null> {
+/* Why `onError`: most callers (working hours, onboarded agents) genuinely want the "never throws,
+ * degrade to null" contract — a hiccup on those shouldn't break the report. But one caller (the live
+ * meetings feed, meetings.ts) needs to tell an auth/HTTP failure apart from a legitimately empty
+ * result, because collapsing both to "nothing" is exactly what let a dead Spyne token look like zero
+ * appointments fleet-wide for 40h (2026-09-19→21) with no alert anywhere. Rather than change the
+ * return contract for every caller, failures are ALSO reported through this optional callback — pass
+ * nothing and behavior is identical to before; a caller that cares can observe the reason without
+ * spyneGet throwing. */
+export async function spyneGet<T>(
+  path: string,
+  token?: string | null,
+  env?: string | null,
+  onError?: (info: { status: number | null; message: string }) => void,
+): Promise<T | null> {
   const auth = resolveToken(token);
-  if (!auth) return null;
+  if (!auth) {
+    onError?.({ status: null, message: "no Spyne token configured" });
+    return null;
+  }
   const base = apiBaseForEnv(env);
   try {
     const r = await fetch(`${base}${path}`, {
@@ -53,11 +69,14 @@ export async function spyneGet<T>(path: string, token?: string | null, env?: str
     });
     if (!r.ok) {
       console.error(`[spyne] GET ${path} → ${r.status}`);
+      onError?.({ status: r.status, message: `Spyne API returned HTTP ${r.status} for ${path}` });
       return null;
     }
     return (await r.json()) as T;
   } catch (e) {
-    console.error(`[spyne] GET ${path} failed: ${e instanceof Error ? e.message : String(e)}`);
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`[spyne] GET ${path} failed: ${message}`);
+    onError?.({ status: null, message: `Spyne API call failed: ${message}` });
     return null;
   }
 }
