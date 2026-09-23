@@ -62,7 +62,9 @@ export async function GET(request: Request): Promise<Response> {
   // smsMessages) | 'chat' (website-chatbot threads; same bubble store, conversations type='chat') |
   // 'both'. SMS post-conversation is emailed ONCE at end-of-day (the thread runs all day), so the
   // poll asks for channel=sms with a since=local-midnight window. SMS/chat have no agent-type, so
-  // they are NOT split by sales/service (returns the team's threads regardless of serviceType).
+  // they are NOT split by sales/service (returns the team's threads regardless of serviceType) —
+  // but chat rows now carry the LEAD's department in `dept` so a caller can route on it. SMS still
+  // reports dept:"other"; its EOD digest is batched per team and routing it is a separate change.
   // 'both' stays call+sms (its pre-chat meaning) — chat is only returned when asked for explicitly,
   // so no existing caller suddenly double-reports chat threads.
   const channel = (searchParams.get("channel") || "call").toLowerCase();
@@ -205,7 +207,7 @@ export async function GET(request: Request): Promise<Response> {
   // pinned ('sms' | 'chat') — the bubble store is shared, so an unscoped join returns BOTH and
   // chat threads leak into the SMS EOD digest mislabeled as texts (they did, until chat landed).
   const threadSql = (convType: "sms" | "chat", extraOuter = "", extraInner = "") =>
-    "SELECT t.id AS id, t.leadId AS leadId, ifNull(c.name,'') AS customer," +
+    "SELECT t.id AS id, t.leadId AS leadId, ifNull(c.name,'') AS customer, ifNull(l.svc,'') AS leadSvc," +
     " coalesce(nullIf(c.mobile_number,''), t.phone) AS phone, t.inboundMsgs AS inboundMsgs, t.msgs AS msgs, t.at AS at," +
     extraOuter +
     " t.atypes AS atypes, t.bodies AS bodies, t.statuses AS statuses, t.ats AS ats FROM (" +
@@ -225,7 +227,10 @@ export async function GET(request: Request): Promise<Response> {
     ` WHERE cv.teamId='${chEsc(teamId)}' AND s.__deleted=0 AND ${leadScoped ? `cv.leadId='${chEsc(leadId)}'` : sinceClause("s.createdAt")}` +
     ` GROUP BY s.conversationId ORDER BY at DESC LIMIT ${limit}` +
     ") t" +
-    " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON t.leadId=l.lead_id" +
+    // `svc` = the lead's OWN sales/service department. anyIf (not any) because leads carries CDC
+    // duplicates and a plain any() can land on a row whose service_type is blank.
+    " LEFT JOIN (SELECT lead_id, any(customer_id) cid," +
+    " anyIf(service_type, notEmpty(ifNull(service_type,''))) svc FROM dealer_leads.leads GROUP BY lead_id) l ON t.leadId=l.lead_id" +
     " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
   const bubblesOf = (r: Record<string, unknown>) => {
     const atypes = (Array.isArray(r.atypes) ? r.atypes : []) as string[];
@@ -295,7 +300,12 @@ export async function GET(request: Request): Promise<Response> {
       out.push({
         id: String(r.id || ""), leadId: (r.leadId as string) || null,
         phone: (r.phone as string) || (r.number as string) || null, customer: (r.customer as string) || null,
-        channel: "chat", dept: "other",
+        // A website chat carries no agent-type of its own, but its LEAD does — service_type is set
+        // on 98% of chat leads (344/350 in a 30d check) and is what the rest of the platform means
+        // by sales vs service. It is NOT inferred from the lead's calls: only 25% of chat leads have
+        // ever been called, so a call-derived dept silently defaults three-quarters of chats to sales.
+        // Blank → "other", and the caller decides the fallback (it knows which depts are live).
+        channel: "chat", dept: deptOf(String(r.leadSvc || "")),
         // A widget chat is always customer-initiated on the dealer's own site.
         direction: "inbound",
         title: String(report.title || "") || (outcome ? outcome : ""), summary,
