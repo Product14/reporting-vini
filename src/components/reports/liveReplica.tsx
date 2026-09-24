@@ -637,7 +637,11 @@ const AGENT_VIEWS = [["headline", "Headline"], ["funnel", "Funnel"], ["impact", 
 type AgentView = (typeof AGENT_VIEWS)[number][0];
 
 export function LiveAgentPerformance({ agents, onOpenAgent }: { agents: AgentData[]; onOpenAgent: (id: string) => void }) {
-  const [view, setView] = React.useState<AgentView>("headline");
+  /* Funnel is the default for now (2026-09-24 product decision) — the drop-off shape is what this card
+     is being read for while the layout is still being chosen. Plain local state, unlike the call-flow
+     card's view: this one is not derived from the URL variant, so there is no prerender/hydration path
+     that could freeze it at the wrong value. */
+  const [view, setView] = React.useState<AgentView>("funnel");
   return (
     <div className="flex w-full flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
