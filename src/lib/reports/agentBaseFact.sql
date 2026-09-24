@@ -729,16 +729,26 @@ ob_campaign_outcome AS (
     )
 ),
 
--- canonical: agent-worked = call, SMS or web chat. Per lead, the representative spine conversation a lead-level
--- AI-assisted (CRM) meeting attaches to. We prefer an OUTBOUND conversation (outbound-campaign assist =
--- outbound, mirroring the call-back→OB rule), else the latest spine conversation — so the assist lands on
--- the right agent row even when the booking was worked over SMS with no AI call on the meeting record.
+-- canonical: agent-worked = call, SMS or web chat. Per lead, the spine conversation a lead-level
+-- AI-assisted (CRM) meeting attaches to — which decides WHICH AGENT ROW the assist lands on.
+--
+-- ★ LAST TOUCH (changed 2026-09-24). This was "prefer an OUTBOUND conversation, else the latest", a rule
+-- that credited Outbound whenever it had spoken to the lead at all — even when Inbound had been the one
+-- to speak to them most recently, right before the store booked the appointment. It is now simply the
+-- LATEST conversation on the lead, whichever agent that was: the last agent to talk to a customer before
+-- a booking is the one the booking is most plausibly credited to, and it is the rule a reader assumes
+-- when they see an assist on an agent's card.
+--
+-- NOT A COMPLETENESS FIX. This changes WHICH agent gets an assist, never HOW MANY are attributable: a
+-- flagged meeting whose lead has NO conversation inside the window still joins to nothing and lands on no
+-- agent row, so the per-agent figures can still sum to less than the rooftop total. That residual is
+-- reported honestly by the rooftop tiles, which read the appointment snapshot instead (see
+-- appointmentsAssistedBy in the reports route).
 lead_assist_conv AS (
     SELECT
         lead_id,
         team_id,
-        -- pri: outbound (2) beats inbound (1); within that, the latest conversation wins.
-        argMax(conversationId, (if(direction = 'outbound', 2, 1), activity_ts)) AS conv_id
+        argMax(conversationId, activity_ts) AS conv_id
     FROM conversation_spine
     GROUP BY lead_id, team_id
 ),
@@ -809,11 +819,13 @@ appt_attribution AS (
                cbl.conversationId AS conv_id, 2 AS pri, 0 AS is_assisted
         FROM chat_booking_link AS cbl
         UNION ALL
-        -- SECONDARY: AI-assisted (CRM). canonical: agent-worked = call, SMS or chat. Attribute the CRM meeting
-        -- by LEAD_ID to the lead's representative spine conversation (lead_assist_conv) — this captures
-        -- SMS-only worked leads whose meeting record carries no call_id/conversation_id (the bug where a
-        -- call-only join silently dropped them). Gated to outbound-campaign leads with an in-window spine
-        -- touch (call or SMS), so only genuine AI-worked outbound leads count.
+        -- SECONDARY: AI-assisted (CRM). Attribute the CRM meeting by LEAD_ID to the LAST conversation on
+        -- that lead (lead_assist_conv — last touch, see its note), which is what decides the agent row.
+        -- Going by lead rather than by the meeting's own ids captures SMS-only worked leads whose meeting
+        -- record carries no call_id/conversation_id — the bug where a call-only join silently dropped them.
+        -- The outbound-enrolment gate that used to sit here is gone with the ai_assisted redefinition; the
+        -- join to lead_assist_conv is now the only thing scoping this branch, so a flagged meeting whose
+        -- lead has no in-window conversation lands on no agent at all.
         SELECT m.meeting_id AS meeting_id, m.team_id AS team_id, m.lead_id AS lead_id,
                lac.conv_id AS conv_id, 1 AS pri, 1 AS is_assisted
         FROM dealer_leads.meetings AS m FINAL
