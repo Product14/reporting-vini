@@ -376,6 +376,249 @@ function AgentUpsellCard({ dept, dir, teamId, accountName }: { dept: "Sales" | "
   );
 }
 
+/* ══════════ 2b. Agent performance — NEW variant, three readings of one set of numbers ══════════
+ *
+ * Headline / Impact / Compact are three PRESENTATIONS, never three calculations: every figure on all
+ * three comes from agentFacts() below, so switching tabs can never change a number.
+ *
+ * WHAT WAS VETTED AGAINST THE DATA (the mockups were directional and two things did not survive):
+ *
+ *  1. "Emily booked 33 appointments", where 33 = 18 booked + 15 assisted. The AI did not book 33 — it
+ *     booked 18, and the store's own people booked 15 on leads the AI had worked. Folding them is the
+ *     one thing the appointment canon forbids (see apptSub / agentBaseFact.sql), because it turns a
+ *     secondary, differently-sourced metric into the headline claim. The total is still shown, with a
+ *     verb that is true of both halves ("leads produced"), and the split sits directly under it.
+ *  2. "Zero staff minutes", on a card whose own footer reports 99 live hand-offs TO the staff. Those
+ *     hand-offs are staff minutes. Dropped rather than reworded — the hand-off count already says the
+ *     honest version of it.
+ *
+ *  Also: the mockup's own arithmetic does not close (75 qualified, 33 appointments, 52 "in pipeline";
+ *  75 - 33 = 42). "In pipeline" is defined here as qualified leads that have NOT booked — the same
+ *  definition the hero's "Additional qualified leads" tile uses, so the two agree on one screen.
+ *
+ *  Delta pills appear ONLY where a real prior-window basis exists (report.deltas covers appointments,
+ *  qualified and contacts). The mockups put a pill on every row; assisted, pipeline and engaged have no
+ *  prior in the aggregate, and inventing one would be the easiest number on this card to get wrong.
+ */
+interface AgentFacts {
+  person: string; inbound: boolean;
+  contacts: number; engaged: number; qualified: number;
+  booked: number; assisted: number; total: number; pipeline: number;
+  setRate: string; handoffs: number;
+  calls: number; texts: number; talkMinutes: number;
+  dAppointments: number | null; dQualified: number | null; dContacts: number | null;
+}
+/* ONE source for every figure on all three tabs. Reads the same fields the old card did (leadFunnel
+   first, event counts as the fallback) so the New tabs cannot disagree with the Old card beside them. */
+function agentFacts(a: AgentData): AgentFacts {
+  const lf = a.leadFunnel;
+  const contacts = lf?.contacted ?? a.report?.leadsAttempted ?? 0;
+  const engaged = lf?.connected ?? a.metrics.conversations;
+  const qualified = lf?.qualified ?? a.metrics.qualified;
+  const booked = a.metrics.appointments;
+  const assisted = a.metrics.appointmentsAssisted ?? 0;
+  const cf = a.report?.callFlow;
+  const d = a.report?.deltas;
+  const num = (v: number | undefined) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    person: a.report?.summary?.person || a.name,
+    inbound: a.dir === "Inbound",
+    contacts, engaged, qualified, booked, assisted,
+    total: booked + assisted,
+    // Clamped: a lead can book without ever being marked qualified, which would otherwise print negative.
+    pipeline: Math.max(0, qualified - booked),
+    setRate: fmtRate(booked, qualified),
+    handoffs: (cf?.transferred ?? 0) + (cf?.callbacks ?? 0),
+    calls: a.metrics.calls, texts: a.metrics.smsSent, talkMinutes: a.metrics.talkMinutes,
+    dAppointments: num(d?.appointments), dQualified: num(d?.leadsQualified), dContacts: num(d?.leadsAttempted),
+  };
+}
+
+// "flat" rather than "0%" — a period that genuinely did not move should not look like a missing value.
+function DeltaPill({ pct, invert }: { pct: number | null; invert?: boolean }) {
+  if (pct === null) return null;
+  if (pct === 0) return <span className="rounded-full bg-[#f1f2f5] px-2 py-0.5 text-[11px] font-semibold text-[#6b7280]">flat</span>;
+  const good = invert ? pct < 0 : pct > 0;
+  return (
+    <span className="rounded-full px-2 py-0.5 text-[11px] font-semibold" style={good ? { background: C.greenBg, color: C.green } : { background: C.redBg, color: C.red }}>
+      {pct > 0 ? "↑" : "↓"} {Math.abs(pct)}%
+    </span>
+  );
+}
+function AgentHeader({ agent, f }: { agent: AgentData; f: AgentFacts }) {
+  return (
+    <div className="flex w-full items-start justify-between gap-4 px-5 py-[15px]">
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="flex h-10 w-10 flex-none items-center justify-center overflow-hidden rounded-full" style={{ background: avatarColor(f.person) }}>
+          {agent.photoUrl
+            // eslint-disable-next-line @next/next/no-img-element
+            ? <img src={agent.photoUrl} alt="" className="h-full w-full object-cover object-top" />
+            : <span className="text-[13px] font-bold text-white">{initials(f.person)}</span>}
+        </span>
+        <div className="flex min-w-0 flex-col gap-1">
+          <p className="truncate text-[16px] font-bold leading-none text-[#030712]">{f.person}</p>
+          <span className="flex w-fit items-center gap-1 rounded-md px-2 py-0.5 text-[11.5px] font-medium"
+            style={f.inbound ? { background: C.blueBg, color: C.blue } : { background: C.greenBg, color: C.green }}>
+            {f.inbound ? "↙" : "↗"} {agent.dept} {agent.dir}
+          </span>
+        </div>
+      </div>
+      <div className="flex flex-none flex-col items-end">
+        <p className="text-[26px] font-bold leading-none tracking-[-0.5px] text-[#030712]">{f.setRate}</p>
+        <p className="text-[11.5px] font-medium text-[#626f81]">Set rate</p>
+        <p className="text-[11px] text-[#9ca3af]">{fmtInt(f.booked)} of {fmtInt(f.qualified)} qualified</p>
+      </div>
+    </div>
+  );
+}
+function AgentFooter({ f }: { f: AgentFacts }) {
+  const bits: [string, string][] = [
+    [fmtInt(f.calls), "calls"], [fmtInt(f.texts), "texts"],
+    [fmtDuration(f.talkMinutes), "talk time"], [fmtInt(f.handoffs), "hand-offs"],
+  ];
+  return (
+    <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-[#e5e7eb] px-5 py-3 text-[12px] text-[#626f81]">
+      {bits.map(([v, l], i) => (
+        <React.Fragment key={l}>
+          {i > 0 && <span className="text-[#d1d5db]">·</span>}
+          <span><span className="font-semibold text-[#030712]">{v}</span> {l}</span>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+function HeadlineBody({ f }: { f: AgentFacts }) {
+  const stats: { v: number; label: string }[] = [
+    { v: f.booked, label: "Booked by the AI" },
+    { v: f.assisted, label: "Assisted — your team closed" },
+    { v: f.pipeline, label: "Qualified leads in pipeline" },
+  ];
+  return (
+    <div className="flex w-full flex-col gap-4 px-5 py-4">
+      <div>
+        {/* "leads produced", not "booked" — see the vetting note at the top of this block. */}
+        <p className="text-[19px] font-bold leading-snug text-[#030712]">
+          {possessive(f.person)} leads produced <span style={{ color: C.primary }}>{fmtInt(f.total)}</span> appointment{f.total === 1 ? "" : "s"}
+        </p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <p className="text-[12.5px] text-[#626f81]">
+            on your {f.inbound ? "inbound" : "outbound"} sales desk this period
+          </p>
+          <DeltaPill pct={f.dAppointments} />
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-x-8 gap-y-3">
+        {stats.map((s) => (
+          <div key={s.label} className="flex min-w-[96px] flex-col gap-0.5">
+            <p className="text-[20px] font-bold leading-none text-[#030712]">{fmtInt(s.v)}</p>
+            <p className="text-[11.5px] text-[#626f81]">{s.label}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function ImpactBody({ f }: { f: AgentFacts }) {
+  const did: [string, string, string][] = [
+    ["📞", fmtInt(f.calls), f.inbound ? "calls answered and placed" : "calls placed"],
+    ["💬", fmtInt(f.texts), "texts sent"],
+    ["⏱", fmtDuration(f.talkMinutes), "spent talking to customers"],
+    ["🔀", fmtInt(f.handoffs), "live hand-offs to your team"],
+  ];
+  return (
+    <div className="flex w-full flex-col border-t border-[#e5e7eb] sm:flex-row">
+      <div className="flex flex-1 flex-col gap-3 border-b border-[#e5e7eb] px-5 py-4 sm:border-b-0 sm:border-r">
+        <p className="text-[10.5px] font-bold uppercase tracking-wider text-[#9ca3af]">What {f.person} did for you</p>
+        {did.map(([icon, v, l]) => (
+          <div key={l} className="flex items-start gap-3">
+            <span className="w-5 flex-none text-[13px] leading-5" aria-hidden>{icon}</span>
+            <p className="w-[68px] flex-none text-[15px] font-bold leading-5 text-[#030712]">{v}</p>
+            <p className="text-[12.5px] leading-5 text-[#626f81]">{l}</p>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-1 flex-col gap-4 px-5 py-4">
+        <p className="text-[10.5px] font-bold uppercase tracking-wider text-[#9ca3af]">What it produced</p>
+        <div>
+          <p className="text-[26px] font-bold leading-none text-[#030712]">{fmtInt(f.total)}</p>
+          <p className="text-[12.5px] text-[#626f81]">Appointments</p>
+          <p className="text-[11.5px] text-[#9ca3af]">{fmtInt(f.booked)} booked by the AI · {fmtInt(f.assisted)} assisted</p>
+        </div>
+        <div>
+          <p className="text-[26px] font-bold leading-none" style={{ color: C.primary }}>{fmtInt(f.pipeline)}</p>
+          <p className="text-[12.5px] text-[#626f81]">Qualified leads in pipeline</p>
+          <p className="text-[11.5px] text-[#9ca3af]">{fmtInt(f.qualified)} qualified from {fmtInt(f.contacts)} {f.inbound ? "contacts" : "reachouts"}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+function CompactBody({ f }: { f: AgentFacts }) {
+  const rows: { label: string; value: number; delta?: number | null; strong?: boolean }[] = [
+    { label: "Appointments", value: f.total, delta: f.dAppointments, strong: true },
+    { label: "Booked by the AI", value: f.booked },
+    { label: "Assisted", value: f.assisted },
+    { label: "Qualified leads in pipeline", value: f.pipeline, strong: true },
+    { label: "Qualified leads", value: f.qualified, delta: f.dQualified },
+    { label: f.inbound ? "Contacts" : "Reachouts", value: f.contacts, delta: f.dContacts },
+    { label: "Engaged", value: f.engaged },
+  ];
+  return (
+    <div className="flex w-full flex-col border-t border-[#e5e7eb]">
+      {rows.map((r) => (
+        <div key={r.label} className={`flex w-full items-center justify-between gap-3 border-b border-[#f0f1f4] px-5 py-2 ${r.strong ? "bg-[#fbfbfc]" : ""}`}>
+          <p className={`truncate text-[12.5px] ${r.strong ? "font-bold text-[#030712]" : "text-[#4b5563]"}`}>{r.label}</p>
+          <div className="flex flex-none items-center gap-2">
+            <p className={`tabular-nums ${r.strong ? "text-[14px] font-bold text-[#030712]" : "text-[13px] font-semibold text-[#111]"}`}>{fmtInt(r.value)}</p>
+            <span className="w-[62px] text-right"><DeltaPill pct={r.delta ?? null} /></span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const AGENT_VIEWS = [["headline", "Headline"], ["impact", "Impact"], ["compact", "Compact"]] as const;
+type AgentView = (typeof AGENT_VIEWS)[number][0];
+
+export function LiveAgentPerformance({ agents, onOpenAgent }: { agents: AgentData[]; onOpenAgent: (id: string) => void }) {
+  const [view, setView] = React.useState<AgentView>("headline");
+  return (
+    <div className="flex w-full flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[10.5px] font-bold uppercase tracking-wider text-[#9ca3af]">Agent performance</p>
+        <div className="no-print flex flex-none rounded-lg bg-[#f1f2f5] p-0.5" role="group" aria-label="Agent card layout">
+          {AGENT_VIEWS.map(([v, label]) => (
+            <button key={v} type="button" onClick={() => setView(v)} aria-pressed={view === v}
+              className={`rounded-md px-3 py-1 text-[11.5px] font-semibold transition-colors ${view === v ? "bg-white text-[#813fed] shadow-sm" : "text-[#6b7280] hover:text-[#374151]"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
+        {agents.map((a) => {
+          const f = agentFacts(a);
+          return (
+            <button key={a.id} onClick={() => onOpenAgent(a.id)}
+              className="lv-lift flex flex-1 basis-0 flex-col justify-between rounded-[10px] border border-[#e5e7eb] bg-white text-left transition-colors hover:border-[#d8caff]">
+              <div className="flex w-full flex-col">
+                <AgentHeader agent={a} f={f} />
+                {view === "headline" && <HeadlineBody f={f} />}
+                {view === "impact" && <ImpactBody f={f} />}
+                {view === "compact" && <CompactBody f={f} />}
+              </div>
+              {/* Impact already spells the activity out down its left column ("67 calls answered and
+                  placed", …), so the footer strip would print the same four figures twice on one card. */}
+              {view !== "impact" && <AgentFooter f={f} />}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /* ══════════════════════════ 3. Lead-to-sale funnel ══════════════════════════ */
 function FunnelCell({ label, value, delta, last, note }: { label: string; value: number; delta: number | null; last?: boolean; note?: string }) {
   const up = (delta ?? 0) >= 0;
@@ -961,7 +1204,20 @@ export function LiveOverview({
 
   const nodes: Record<string, React.ReactNode> = {
     "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
-    "live.agents": (
+    /* NEW: one set of numbers, three readings (Headline / Impact / Compact) — see LiveAgentPerformance.
+       Upsell cards still fill a missing direction, so a rooftop running one agent keeps its "get the
+       other one" prompt instead of a half-empty row. OLD keeps the production pair. */
+    "live.agents": variant === "new" ? (
+      <div className="flex flex-col gap-5">
+        {agents.length > 0 && <LiveAgentPerformance agents={agents} onOpenAgent={onOpenAgent} />}
+        {(!inbound || !outbound) && (
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
+            {!inbound && <AgentUpsellCard dept={deptLabel} dir="Inbound" teamId={account.teamId} accountName={account.name} />}
+            {!outbound && <AgentUpsellCard dept={deptLabel} dir="Outbound" teamId={account.teamId} accountName={account.name} />}
+          </div>
+        )}
+      </div>
+    ) : (
       <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
         {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" teamId={account.teamId} accountName={account.name} />}
         {outbound ? <LiveAgentCard agent={outbound} onClick={() => onOpenAgent(outbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Outbound" teamId={account.teamId} accountName={account.name} />}
