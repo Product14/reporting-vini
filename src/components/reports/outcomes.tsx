@@ -568,8 +568,10 @@ function TableView({ o, onDrill, noun, variant = "old" }: { o: ChannelFlow; onDr
      opening at full length is a wall of rows before anything else on the page (outbound: 4,348 rows of
      cohort behind ~14 intents). Collapsed shows the GROUP lines only; expanding adds the per-intent rows.
      OLD keeps production's fully-expanded table — there the table is opt-in, so its length is a choice the
-     reader already made. Totals and "Never connected" are summary, not detail, and show in every state. */
-  const [expanded, setExpanded] = useState(variant === "old");
+     reader already made. Totals and "Never connected" are summary, not detail, and show in every state.
+     Derived rather than seeded for the same reason as `view` above — see that comment. */
+  const [pickedExpanded, setPickedExpanded] = useState<boolean | null>(null);
+  const expanded = pickedExpanded ?? variant === "old";
   const hiddenRows = o.groups.reduce((n, g) => n + g.primaries.length, 0);
   /* A figure in this table and a segment on the chart are the same set of conversations, so they open the
      same way. Only non-zero cells are clickable — an em-dash has nothing behind it. */
@@ -640,7 +642,7 @@ function TableView({ o, onDrill, noun, variant = "old" }: { o: ChannelFlow; onDr
               <td colSpan={3 + rungs.length} className="py-1.5">
                 <button
                   type="button"
-                  onClick={() => setExpanded((v) => !v)}
+                  onClick={() => setPickedExpanded(!expanded)}
                   aria-expanded={expanded}
                   className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[#813fed] hover:opacity-70"
                 >
@@ -874,12 +876,21 @@ export function CallFlowCard({
 }) {
   const dirLabel = o.dir === "inbound" ? "Inbound" : "Outbound";
   /* DEFAULT VIEW follows the staged-rollout variant: OLD keeps production's chart-first behaviour, NEW
-     opens on the table (exact figures read first; the chart stays one click away). Initial state only —
-     once the dealer picks a view by hand, that choice stands and flipping the header toggle won't yank
-     the card back. This is the only place the default lives, so Overview, By-agent and the report library
-     all follow it together. */
+     opens on the table (exact figures read first; the chart stays one click away). This is the only place
+     the default lives, so Overview, By-agent and the report library all follow it together.
+     ★ DERIVED, NOT SEEDED (fixed 2026-09-24). This was `useState(variant === "new" ? …)`, which reads the
+     variant exactly once — at mount — and never again. Two ways that lost:
+       • The page is statically prerendered, so the initializer runs server-side where useSearchParams()
+         has no ?view=new to read. It computed "sankey", hydration kept it, and a direct load of a New
+         URL still opened on the chart.
+       • Clicking the header toggle is a router.replace, which re-renders this card without unmounting
+         it — so the initializer never re-ran and the card stayed on whatever the previous variant chose.
+     `picked` holds ONLY a deliberate click, so the variant still drives the default while a hand-picked
+     view keeps winning over it. */
   const { variant } = useVariant();
-  const [view, setView] = useState<FlowView>(variant === "new" ? "table" : "sankey");
+  const [picked, setPicked] = useState<FlowView | null>(null);
+  const view: FlowView = picked ?? (variant === "new" ? "table" : "sankey");
+  const setView = setPicked;
   const [channel, setChannel] = useState<FlowChannel>("both");
   const [tip, setTip] = useState<Tip>(null);
   const [target, setTarget] = useState<DrillTarget | null>(null);
