@@ -574,6 +574,133 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
   );
 }
 
+/* UPCOMING APPOINTMENTS (NEW variant) — replaces the week-calendar card above.
+ *
+ * WHY IT REPLACES THE CALENDAR. The calendar opened on TODAY, so a rooftop with nothing booked today
+ * showed an empty card however full the rest of the week was — the most common state on a slow day, and
+ * the one that reads as "the AI booked nothing". A forward list cannot be empty while any future booking
+ * exists, which is the question the card is actually there to answer.
+ *
+ * WHAT IT LISTS. Only appointments the AI booked or that the CRM flags AI-assisted — never the dealer's
+ * other bookings. That needs no filter here: `namedAppts` comes from report_appointments, whose query is
+ * gated to exactly those two halves (detailQueries.ts: source='spyne' OR ai_assisted=1). If that gate
+ * ever widens, this card widens with it silently, so the two must be changed together.
+ *
+ * WINDOW. From the START OF TODAY forward, not "later than this exact minute". meeting_start is read as
+ * wall-clock (UTC getters, same as fmtWhenShort and the calendar card it replaces), so comparing it to a
+ * real instant would skew by the store's offset — up to 8h on a Pacific rooftop, enough to hide a booking
+ * later today or surface one already past. Whole days are immune to that, and a dealer opening the report
+ * mid-morning wants to see the rest of today regardless.
+ *
+ * Cancelled bookings are dropped: "next on the books" means something the store still expects.
+ */
+function apptDayHeading(iso: string): string {
+  const d = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
+  if (!Number.isFinite(d.getTime())) return "";
+  const dow = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"][d.getUTCDay()];
+  const mon = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"][d.getUTCMonth()];
+  return `${dow}, ${mon} ${d.getUTCDate()}`;
+}
+function apptTime(iso: string): string {
+  const d = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
+  if (!Number.isFinite(d.getTime())) return "—";
+  let h = d.getUTCHours();
+  const m = d.getUTCMinutes().toString().padStart(2, "0");
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${String(h).padStart(2, "0")}:${m} ${ap}`;
+}
+// "schedule_test_drive" → "schedule test drive". The meeting record's own wording, just made readable —
+// we do not re-label it, so a dealer reading the console and this report see the same thing.
+function apptIntent(raw: string): string {
+  return raw.replace(/[_-]+/g, " ").trim().toLowerCase();
+}
+const APPT_ROWS_SHOWN = 5; // the card sits beside Hot Leads; more than this and the pair stops matching
+
+export function LiveUpcomingApptsCard({ items, onViewAll }: { items: NamedAppt[]; onViewAll: () => void }) {
+  const groups = React.useMemo(() => {
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const upcoming = items
+      .filter((a) => a.when && a.when.slice(0, 10) >= todayKey && !/cancel/i.test(a.status))
+      .sort((a, b) => (a.when ?? "").localeCompare(b.when ?? ""));
+    const out: { key: string; label: string; rows: NamedAppt[] }[] = [];
+    for (const a of upcoming) {
+      const k = (a.when as string).slice(0, 10);
+      const last = out[out.length - 1];
+      if (last && last.key === k) last.rows.push(a);
+      else out.push({ key: k, label: apptDayHeading(a.when as string), rows: [a] });
+    }
+    return out;
+  }, [items]);
+
+  const total = groups.reduce((n, g) => n + g.rows.length, 0);
+  // Trim to the first APPT_ROWS_SHOWN across groups, dropping any group left with nothing — the footer
+  // still counts every upcoming booking, so the card never understates what is on the books.
+  const shown = React.useMemo(() => {
+    let budget = APPT_ROWS_SHOWN;
+    const out: typeof groups = [];
+    for (const g of groups) {
+      if (budget <= 0) break;
+      out.push({ ...g, rows: g.rows.slice(0, budget) });
+      budget -= Math.min(budget, g.rows.length);
+    }
+    return out;
+  }, [groups]);
+
+  return (
+    <div className="flex min-h-[460px] flex-1 basis-0 flex-col justify-between rounded-[10px] border border-[#e5e7eb] bg-white">
+      <div className="flex w-full flex-col">
+        <div className="flex w-full flex-col gap-1 border-b border-[#e5e7eb] px-5 py-[15px]">
+          <p className="text-[15px] font-bold text-[#030712]">Upcoming appointments</p>
+          <p className="text-[12.5px] text-[#626f81]">Next on the books, soonest first</p>
+        </div>
+        {total === 0 ? (
+          <p className="px-5 py-6 text-[12.5px] text-[#626f81]">
+            No upcoming appointments on the books. Ones your AI books from here will appear at the top.
+          </p>
+        ) : (
+          shown.map((g) => (
+            <React.Fragment key={g.key}>
+              <div className="w-full bg-[#f7f8fa] px-5 py-2">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-[#6b7280]">{g.label}</p>
+              </div>
+              {g.rows.map((a, i) => (
+                <div key={`${g.key}-${a.customer}-${i}`} className="flex w-full items-center gap-4 border-b border-[#f0f1f4] px-5 py-3">
+                  <p className="w-[74px] flex-none text-[12.5px] font-medium text-[#535353]">{apptTime(a.when as string)}</p>
+                  <span
+                    className="flex h-8 w-8 flex-none items-center justify-center rounded-full text-[11.5px] font-bold text-white"
+                    style={{ background: avatarColor(a.customer) }}
+                    aria-hidden
+                  >
+                    {initials(a.customer)}
+                  </span>
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <p className="truncate text-[13.5px] font-semibold text-[#030712]">{a.customer}</p>
+                    {/* Falls back to the vehicle when the record carries no intent, rather than leaving a
+                        bare name with nothing to say what the visit is for. */}
+                    <p className="truncate text-[12px] text-[#626f81]">{apptIntent(a.intent) || a.vehicle || "appointment"}</p>
+                  </div>
+                  {/* canonical: the two halves this report recognises, named as they are everywhere else. */}
+                  <span
+                    className="flex-none rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                    style={a.assisted ? { background: "#f3eaff", color: "#6d28d9" } : { background: C.greenBg, color: C.green }}
+                  >
+                    {a.assisted ? "AI-assisted" : "AI-booked"}
+                  </span>
+                </div>
+              ))}
+            </React.Fragment>
+          ))
+        )}
+      </div>
+      <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
+        <p className="text-[12px] text-[#626f81]">{fmtInt(total)} upcoming</p>
+        <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View all →</button>
+      </div>
+    </div>
+  );
+}
+
 /* ══════════════════════════ 5. Action items table ══════════════════════════ */
 function overdueLabel(dueAt: string): { text: string; danger: boolean } {
   const days = Math.round((Date.now() - new Date(dueAt).getTime()) / 86400000);
@@ -852,7 +979,11 @@ export function LiveOverview({
     // Sales-only, and only once it has something to say (the section renderer skips undefined ids).
     ...(outcomes ? { "live.outcomes": outcomes } : {}),
     "live.hotleads": <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />,
-    "live.appts": <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
+    /* NEW swaps the week-calendar for the forward list (see LiveUpcomingApptsCard for why). OLD keeps the
+       calendar so that arm still matches production. */
+    "live.appts": variant === "new"
+      ? <LiveUpcomingApptsCard items={namedAppts} onViewAll={onViewAppointments} />
+      : <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
     "live.actions": <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,
     "live.conversations": <LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} />,
   };

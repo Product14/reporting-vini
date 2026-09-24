@@ -274,6 +274,9 @@ export interface NamedAppt {
   when: string | null; // meeting_start ISO
   bookedAt: string | null;
   status: string; // scheduled | cancelled | show | noshow | completed | ""
+  /* What the customer booked for, as the meeting record states it (meetings.intent), e.g.
+     "schedule_test_drive". Raw snake_case — the UI humanises it. "" when the record carries none. */
+  intent: string;
   assisted: boolean; // AI-assisted (CRM) — SECONDARY, never folded into the AI-booked headline
   serviceType: string; // 'sales' | 'service'
 }

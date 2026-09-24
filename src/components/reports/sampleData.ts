@@ -24,11 +24,11 @@ const WARM: WarmLeadItem[] = [
 ];
 
 const APPTS: NamedAppt[] = [
-  { customer: "Aaron Espinoza", phone: "+1 (205) 555-0180", channel: "Inbound", how: "AI-booked, on call", vehicle: "2019 Honda Odyssey", when: at(0, 9, 30), bookedAt: at(1, 17), status: "scheduled", assisted: false, serviceType: "service" },
-  { customer: "Dana Whitfield", phone: "+1 (316) 555-0116", channel: "Outbound", how: "AI-booked, on call", vehicle: "2021 Honda CR-V", when: at(0, 11, 0), bookedAt: at(1, 10), status: "scheduled", assisted: false, serviceType: "service" },
-  { customer: "Ken Osei", phone: "+1 (671) 555-0110", channel: "Inbound", how: "AI-assisted → CRM", vehicle: "2020 Honda Accord", when: at(0, 13, 15), bookedAt: at(2, 9), status: "scheduled", assisted: true, serviceType: "service" },
-  { customer: "Priya Anand", phone: "+1 (684) 555-0102", channel: "Inbound", how: "AI-booked, on call", vehicle: "2018 Honda Civic", when: at(0, 15, 30), bookedAt: at(1, 12), status: "scheduled", assisted: false, serviceType: "service" },
-  { customer: "Marcus Reid", phone: "+1 (205) 555-0100", channel: "Outbound", how: "AI-booked, via SMS", vehicle: "2017 Honda Pilot", when: at(-1, 10, 0), bookedAt: at(0, 8), status: "scheduled", assisted: false, serviceType: "service" },
+  { customer: "Aaron Espinoza", phone: "+1 (205) 555-0180", channel: "Inbound", how: "AI-booked, on call", vehicle: "2019 Honda Odyssey", when: at(0, 9, 30), bookedAt: at(1, 17), status: "scheduled", intent: "schedule_appointment", assisted: false, serviceType: "service" },
+  { customer: "Dana Whitfield", phone: "+1 (316) 555-0116", channel: "Outbound", how: "AI-booked, on call", vehicle: "2021 Honda CR-V", when: at(0, 11, 0), bookedAt: at(1, 10), status: "scheduled", intent: "schedule_test_drive", assisted: false, serviceType: "service" },
+  { customer: "Ken Osei", phone: "+1 (671) 555-0110", channel: "Inbound", how: "AI-assisted → CRM", vehicle: "2020 Honda Accord", when: at(0, 13, 15), bookedAt: at(2, 9), status: "scheduled", intent: "schedule_appointment", assisted: true, serviceType: "service" },
+  { customer: "Priya Anand", phone: "+1 (684) 555-0102", channel: "Inbound", how: "AI-booked, on call", vehicle: "2018 Honda Civic", when: at(0, 15, 30), bookedAt: at(1, 12), status: "scheduled", intent: "schedule_test_drive", assisted: false, serviceType: "service" },
+  { customer: "Marcus Reid", phone: "+1 (205) 555-0100", channel: "Outbound", how: "AI-booked, via SMS", vehicle: "2017 Honda Pilot", when: at(-1, 10, 0), bookedAt: at(0, 8), status: "scheduled", intent: "schedule_appointment", assisted: false, serviceType: "service" },
 ];
 
 export const SAMPLE_SERVICE_FEED: FetchResult = {

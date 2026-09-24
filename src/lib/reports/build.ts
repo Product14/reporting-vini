@@ -193,6 +193,7 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
         when: a.meeting_start ?? null,
         bookedAt: a.booked_at ?? null,
         status: a.status ?? "",
+        intent: (a.intent ?? "").trim(),
         assisted: Boolean(a.assisted),
         serviceType: (a.service_type ?? "").toLowerCase(),
         direction: (a.direction ?? "").toLowerCase(),
