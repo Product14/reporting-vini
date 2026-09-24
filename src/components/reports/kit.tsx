@@ -149,8 +149,11 @@ export function ReportTopBar({
         )}
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           {/* Sits FIRST, left of every other control: it changes what the rest of the header is describing,
-              so it reads as a scope on the page rather than one more filter among the filters. */}
-          {teamId && <VariantSwitcher variant={variant} setVariant={setVariant} />}
+              so it reads as a scope on the page rather than one more filter among the filters.
+              SALES ONLY — every change behind the New variant is a sales-report change (the service hero
+              is a separate component, and the outcomes cards are already gated to sales), so offering the
+              switch on a Service report would promise a difference that variant cannot produce. */}
+          {teamId && dept !== "service" && <VariantSwitcher variant={variant} setVariant={setVariant} />}
           {teamId && !locked && !hideDept && <DeptSwitcher dept={dept} setDept={setDept} />}
           {right}
         </div>

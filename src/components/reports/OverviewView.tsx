@@ -213,8 +213,14 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   const hasTeam = teamId !== "" || sampleMode;
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
   // chosen date range survives navigation to the By-agent view.
-  // Staged rollout switch (header toggle) — decides which Overview layout this render produces.
-  const { variant } = useVariant();
+  /* Staged rollout switch (header toggle) — decides which Overview layout this render produces.
+     FORCED TO "old" ON A SERVICE REPORT. The switcher is hidden there (see ReportTopBar), but the value
+     rides the URL and reportNavQuery carries it across tabs, so a reader who flips to New on Sales and
+     then lands on Service would otherwise arrive with ?view=new still set and get a layout that was never
+     designed or checked for Service. Pinning it here makes Service immune to the param however it arrives,
+     rather than relying on the control being out of sight. */
+  const { variant: urlVariant } = useVariant();
+  const variant = dept === "service" ? "old" : urlVariant;
   const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked, variant);
   const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : BUCKET_LABELS[bucket];
   // Appointment drill-down — clicking the headline count opens a modal listing the rooftop's appointments
