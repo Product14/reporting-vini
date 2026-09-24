@@ -14,7 +14,7 @@ import {
 } from "@/components/reports/kit";
 import { fmtWhenShort } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/reports/dateRange";
 import { fetchConversations, addDay, type Conversation } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { track } from "@/lib/analytics";
@@ -34,7 +34,9 @@ function RecentCallsView() {
   const { teamId, account, spyneToken, spyneEnv } = useScenario();
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
-  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
+  // variant rides along so the Old/New choice survives navigation between tabs.
+  const { variant } = useVariant();
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, false, variant);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
   // custom → explicit store-local [start,end); preset → pass the bucket so the SERVER resolves a
   // store-local window (RETCONVAI-4152). The old rangeFor(bucket) computed a UTC window with no upper

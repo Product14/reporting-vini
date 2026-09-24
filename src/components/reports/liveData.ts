@@ -192,6 +192,11 @@ export interface FetchResult {
   /** The same bookings split by the department that DOES own them; `unknown` belongs to neither.
    *  Read it through unattributedApptsFor() — never add the rooftop total into a department's tile. */
   appointmentsUnattributedBy?: { sales: number; service: number; unknown: number };
+  /** Rooftop AI-assisted (CRM) totals by department, from the appointment snapshot. The rooftop truth:
+   *  the spine can only credit an assist to an AGENT when the lead has an in-window conversation, so the
+   *  agent rows are a subset. Read it through assistedApptsFor(); absent on an older API response, in
+   *  which case aggregateFleet falls back to summing the agent rows. */
+  appointmentsAssistedBy?: { sales: number; service: number; unknown: number };
   /* When the AGGREGATE was last rebuilt (sync_state.last_run_at), NOT when this client fetched. The
    * header's "Synced …" line reads this: fetchedAt says how fresh the REQUEST is, which is always
    * "just now" and told dealers the numbers were current when the ETL was hours behind. */
@@ -297,7 +302,20 @@ export function unattributedApptsFor(feed: { appointmentsUnattributedBy?: { sale
   return by.sales + by.service + by.unknown;
 }
 
-export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>, unattributedAppointments = 0): FleetLive {
+/* The rooftop's AI-assisted total for a department, straight from the appointment snapshot (see the
+ * matching block in the reports route). Mirrors unattributedApptsFor: a department scope takes its own
+ * department's, and only the rooftop view ("All") also picks up rows whose department is unresolved.
+ * undefined when the API didn't send it (older deploy) → aggregateFleet keeps summing the agent rows. */
+export function assistedApptsFor(feed: { appointmentsAssistedBy?: { sales: number; service: number; unknown: number } } | null | undefined, dept: string): number | undefined {
+  const by = feed?.appointmentsAssistedBy;
+  if (!by) return undefined;
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  if (dept === "sales") return n(by.sales);
+  if (dept === "service") return n(by.service);
+  return n(by.sales) + n(by.service) + n(by.unknown);
+}
+
+export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>, unattributedAppointments = 0, assistedTotal?: number): FleetLive {
   const sum = (f: (a: AgentData) => number) => agents.reduce((s, a) => s + f(a), 0);
   const calls = sum((a) => a.metrics.calls);
   const connectedCalls = sum((a) => a.metrics.conversations); // connected CALLS — the answer-rate basis
@@ -334,7 +352,13 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
    * with the same dept. Handing a department-scoped tile the rooftop-wide number counts another
    * department's booking on this one (Principle BMW MINI: service read 46 over a list of 45). */
   const appointments = sum((a) => a.metrics.appointments) + unattributedAppointments;
-  const appointmentsAssisted = sum((a) => a.metrics.appointmentsAssisted ?? 0);
+  /* ROOFTOP AI-assisted. Prefer the snapshot total the caller passes: the spine can only attribute an
+   * assist to an agent when the lead has an in-window conversation, so the agent sum is a SUBSET of the
+   * meetings the CRM flags (2b110492b6, 30d: 19 vs 23). Falls back to the agent sum when the caller has
+   * no snapshot total — an older API response, or a surface that never had one. The per-agent cards keep
+   * reading their own metrics.appointmentsAssisted, which is the attributed half and correct AS a per-agent
+   * number; only this rooftop roll-up is allowed to exceed their sum. */
+  const appointmentsAssisted = assistedTotal ?? sum((a) => a.metrics.appointmentsAssisted ?? 0);
   // Hand-offs: transfers are lead-level (build prefers report_lead_counts), callbacks call-level daily
   // sums — both windowed. Failed transfers tracked separately, never added into transfers/handoffs.
   const cf = (f: (c: NonNullable<AgentData["report"]["callFlow"]>) => number) =>
@@ -526,6 +550,9 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
         syncedAt: typeof j.syncedAt === "string" ? j.syncedAt : null,
         appointmentsUnattributed: typeof j.appointmentsUnattributed === "number" ? j.appointmentsUnattributed : 0,
         appointmentsUnattributedBy: normalizeUnattributed(j.appointmentsUnattributedBy, j.appointmentsUnattributed),
+        appointmentsAssistedBy: j.appointmentsAssistedBy && typeof j.appointmentsAssistedBy === "object"
+          ? normalizeUnattributed(j.appointmentsAssistedBy, 0)
+          : undefined,
         warmLeads: Array.isArray(j.warmLeads) ? (j.warmLeads as WarmLeadItem[]) : undefined,
       };
       CACHE.set(cacheKey, result); // cache ONLY a clean response

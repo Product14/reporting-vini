@@ -28,6 +28,7 @@ import { UnlockPotentialBanner } from "./valueStory";
 import { InterestForm } from "./upsell";
 import { CountUp, useInView } from "./anim";
 import type { CustomizeCtrl } from "./customize";
+import type { ReportVariant } from "./dateRange";
 
 /* ── palette (exact Figma tokens for this design — intentionally not the site's #813fed accent) ── */
 const C = {
@@ -128,6 +129,24 @@ function apptSub(fleet: FleetLive): string {
   return parts.length ? parts.join(" · ") : "AI-booked meetings";
 }
 
+/* SALES variant of the appointment sub-line. The sales hero now carries AI-assisted as its own tile, so
+   repeating "+N AI-assisted (CRM)" here would print the same number twice on one row. Only the
+   no-agent caveat still belongs under the headline (same reason as apptSub). Service keeps apptSub. */
+function apptSubSales(fleet: FleetLive): string {
+  return fleet.appointmentsNoAgent > 0 ? `${fmtInt(fleet.appointmentsNoAgent)} with no agent` : "AI-booked meetings";
+}
+
+/* Qualified leads the AI produced that are NOT already counted in the appointment tile beside it —
+   canonical: the funnel's "Qualified leads" stage minus its "Appointments — AI-booked" stage, the exact
+   two values LiveFunnelCard and the per-agent performance cards render (fleet.qualified is the
+   leadFunnel.qualified sum; fleet.appointments is the same total the funnel's last band shows). Kept on
+   that basis deliberately: read off any other pair of numbers this tile would contradict the funnel two
+   rows below it. Clamped at 0 — fleet.appointments carries unattributed bookings that fleet.qualified
+   (agent-summed) cannot, so a rooftop with near-zero qualified can cross over. */
+function extraQualified(fleet: FleetLive): number {
+  return Math.max(0, fleet.qualified - fleet.appointments);
+}
+
 // Service hero: 4 metric tiles in ONE divided container, each an icon-chip + "N Noun" headline + sub
 // (matches the Figma service overview — not the sales tile grid).
 function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; hotLeads: number; nav?: HeroNav }) {
@@ -160,13 +179,26 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
   );
 }
 
-export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; nav?: HeroNav }) {
-  const tiles = [
-    { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled },
+export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, variant = "old", nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; variant?: ReportVariant; nav?: HeroNav }) {
+  // Speed-to-lead leads both sets and is identical in both — only tiles 2-4 differ.
+  const stlTile = { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled };
+  // OLD — production today. Keep this arm byte-for-byte as it shipped: it is the control the New arm is
+  // being compared against, so "improving" it here would quietly invalidate the comparison.
+  const oldTiles = [
+    stlTile,
     { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…", onClick: nav?.onActionItems },
     { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSub(fleet), onClick: nav?.onAppointments },
     { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed", onClick: nav?.onConversations },
   ];
+  // NEW — appointment-led: what got booked, what the CRM credits to the AI, and the qualified leads still
+  // on the table. apptSubSales drops the "+N AI-assisted" sub-line because tile 3 now carries that number.
+  const newTiles = [
+    stlTile,
+    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSubSales(fleet), onClick: nav?.onAppointments },
+    { icon: "/live-overview/icon-resolved.svg", value: <CountUp value={fleet.appointmentsAssisted} />, label: "AI-assisted appointments", sub: "flagged AI-assisted in your CRM", onClick: nav?.onAppointments },
+    { icon: "/live-overview/icon-actionitems.svg", value: <CountUp value={extraQualified(fleet)} />, label: "Additional qualified leads", sub: "qualified, not yet booked", onClick: nav?.onConversations },
+  ];
+  const tiles = variant === "new" ? newTiles : oldTiles;
   return (
     <section
       className="flex flex-col items-center justify-center gap-6 rounded-lg border border-[#e5e7eb] px-10 py-6"
@@ -759,6 +791,8 @@ export interface LiveOverviewProps {
   /* Conversation-outcome panels (eval pipeline, SALES only). Omitted / null on a Service-scoped report,
    * which drops the "live.outcomes" section entirely rather than showing sales evals under Service. */
   outcomes?: React.ReactNode;
+  /** Staged rollout: "old" reproduces production, "new" shows the 2026-09-24 changes. Default "old". */
+  variant?: ReportVariant;
   headerControls?: React.ReactNode; // date filter + customize, rendered inside the hero (this IS the header)
   ctrl?: CustomizeCtrl; // Customize: hide + reorder the sections below (omit → default order, all shown)
   serviceMode: boolean; // department SKIN, from the URL serviceType scope — NOT inferred from the agent
@@ -771,7 +805,9 @@ export interface LiveOverviewProps {
 export const LIVE_SECTIONS: { id: string; label: string }[] = [
   { id: "live.hero", label: "Hero metric tiles" },
   { id: "live.agents", label: "Agent performance" },
-  { id: "live.funnel", label: "Lead-to-sale funnel" },
+  // In the NEW variant this section holds only the "unlock more flows" banner (the funnel card is dropped),
+  // so the label names both things rather than promising a funnel that variant does not render.
+  { id: "live.funnel", label: "Lead-to-sale funnel / flows banner" },
   // Sales-only (conversation evals are requested for agentType=sales); on a Service-scoped report the
   // node is absent, so the section silently drops out of the layout instead of rendering empty.
   { id: "live.outcomes", label: "Where your calls went" },
@@ -787,6 +823,7 @@ const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
 export function LiveOverview({
   account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
   onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, outcomes, headerControls, ctrl, serviceMode,
+  variant = "old",
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
@@ -796,7 +833,7 @@ export function LiveOverview({
   const deptLabel: "Sales" | "Service" = serviceMode ? "Service" : "Sales";
 
   const nodes: Record<string, React.ReactNode> = {
-    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
+    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
     "live.agents": (
       <div className="flex flex-col gap-5 lg:flex-row lg:items-stretch">
         {inbound ? <LiveAgentCard agent={inbound} onClick={() => onOpenAgent(inbound.id)} /> : <AgentUpsellCard dept={deptLabel} dir="Inbound" teamId={account.teamId} accountName={account.name} />}
@@ -806,7 +843,10 @@ export function LiveOverview({
     "live.funnel": (
       <div className="flex flex-col gap-3.5">
         <UnlockPotentialBanner liveCount={1} total={3} teamId={account.teamId} accountName={account.name} />
-        <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />
+        {/* LEAD-TO-SALE FUNNEL — dropped in the NEW layout (2026-09-24), kept in OLD so that variant still
+            matches production. In New, the hero's "Additional qualified leads" tile carries the two numbers
+            this card existed to show (qualified − appointments). */}
+        {variant === "old" && <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />}
       </div>
     ),
     // Sales-only, and only once it has something to say (the section renderer skips undefined ids).

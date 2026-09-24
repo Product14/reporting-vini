@@ -21,6 +21,7 @@ import { ConversationDrawer, fmtSecs, fmtWhenShort } from "@/components/reports/
 import { fetchConversations, type Conversation } from "@/components/reports/liveData";
 import type { DrillConversation } from "@/app/api/reports/conversation-drill/route";
 import type { EvalOutcomes, EvalFunnel, EvalDirection, EvalCallTypeGroup } from "@/lib/spyne/evalPipeline";
+import { useVariant, type ReportVariant } from "./dateRange";
 
 // ───────────────────────── outcome rungs ─────────────────────────
 
@@ -561,8 +562,15 @@ function SankeyView({
 
 /* The same numbers as a table — every row visible at once, exact counts, no interaction needed. This is
  * also the accessible read of the chart: the segment colours are backed by a column of figures. */
-function TableView({ o, onDrill, noun }: { o: ChannelFlow; onDrill?: (t: DrillTarget) => void; noun: string }) {
+function TableView({ o, onDrill, noun, variant = "old" }: { o: ChannelFlow; onDrill?: (t: DrillTarget) => void; noun: string; variant?: ReportVariant }) {
   const rungs = OUTCOME_RUNGS.filter((r) => (o.outcomes[r.key] ?? 0) > 0);
+  /* COLLAPSED only in the NEW variant. Once the table is what loads first, every intent under every group
+     opening at full length is a wall of rows before anything else on the page (outbound: 4,348 rows of
+     cohort behind ~14 intents). Collapsed shows the GROUP lines only; expanding adds the per-intent rows.
+     OLD keeps production's fully-expanded table — there the table is opt-in, so its length is a choice the
+     reader already made. Totals and "Never connected" are summary, not detail, and show in every state. */
+  const [expanded, setExpanded] = useState(variant === "old");
+  const hiddenRows = o.groups.reduce((n, g) => n + g.primaries.length, 0);
   /* A figure in this table and a segment on the chart are the same set of conversations, so they open the
      same way. Only non-zero cells are clickable — an em-dash has nothing behind it. */
   const cell = (n: number, r: { key: string; label: string; color: string }, t: Omit<DrillTarget, "outcome" | "label" | "color" | "count">, rowLabel: string, cls: string) => {
@@ -611,7 +619,7 @@ function TableView({ o, onDrill, noun }: { o: ChannelFlow; onDrill?: (t: DrillTa
                   </td>
                 ))}
               </tr>
-              {g.primaries.map((p) => (
+              {expanded && g.primaries.map((p) => (
                 <tr key={`${g.id}/${p.id}`} className="border-b border-[#f7f7f9]">
                   <td className="py-1.5 pl-4 pr-3 text-[11.5px] text-[#4b5563]">{p.label}</td>
                   <td className="px-2 py-1.5 text-right text-[11.5px] tabular-nums text-[#374151]">{fmtInt(p.total)}</td>
@@ -625,6 +633,25 @@ function TableView({ o, onDrill, noun }: { o: ChannelFlow; onDrill?: (t: DrillTa
               ))}
             </React.Fragment>
           ))}
+          {/* The CTA sits INSIDE the table, directly under the group rows it expands — put below the
+              totals it reads as expanding those instead. Hidden when there is nothing nested to show. */}
+          {variant === "new" && hiddenRows > 0 && (
+            <tr className="border-b border-[#f4f4f6]">
+              <td colSpan={3 + rungs.length} className="py-1.5">
+                <button
+                  type="button"
+                  onClick={() => setExpanded((v) => !v)}
+                  aria-expanded={expanded}
+                  className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[#813fed] hover:opacity-70"
+                >
+                  {expanded
+                    ? "Hide what they asked for"
+                    : `Show what they asked for (${fmtInt(hiddenRows)} ${hiddenRows === 1 ? "intent" : "intents"})`}
+                  <span aria-hidden className={expanded ? "rotate-180 transition-transform" : "transition-transform"}>⌄</span>
+                </button>
+              </td>
+            </tr>
+          )}
           <tr className="border-t-2 border-[#e9eaee]">
             <td className="py-2 pr-3 text-[11.5px] font-bold text-[#374151]">Conversations</td>
             <td className="px-2 py-2 text-right text-[12px] font-extrabold tabular-nums text-[#111]">{fmtInt(o.engaged)}</td>
@@ -846,7 +873,13 @@ export function CallFlowCard({
   appointments?: number | null;
 }) {
   const dirLabel = o.dir === "inbound" ? "Inbound" : "Outbound";
-  const [view, setView] = useState<FlowView>("sankey");
+  /* DEFAULT VIEW follows the staged-rollout variant: OLD keeps production's chart-first behaviour, NEW
+     opens on the table (exact figures read first; the chart stays one click away). Initial state only —
+     once the dealer picks a view by hand, that choice stands and flipping the header toggle won't yank
+     the card back. This is the only place the default lives, so Overview, By-agent and the report library
+     all follow it together. */
+  const { variant } = useVariant();
+  const [view, setView] = useState<FlowView>(variant === "new" ? "table" : "sankey");
   const [channel, setChannel] = useState<FlowChannel>("both");
   const [tip, setTip] = useState<Tip>(null);
   const [target, setTarget] = useState<DrillTarget | null>(null);
@@ -940,7 +973,7 @@ export function CallFlowCard({
             </p>
           </>
         ) : (
-          <TableView o={f} onDrill={onDrill} noun={noun} />
+          <TableView o={f} onDrill={onDrill} noun={noun} variant={variant} />
         )}
 
         {target && drill && (
@@ -1343,6 +1376,8 @@ export function OutcomesSection({
   loading: boolean;
   callsByDir?: Partial<Record<EvalDirection, number>>;
 }) {
+  // Before the early returns below — hooks must run unconditionally on every render.
+  const { variant } = useVariant();
   const dirs = (["inbound", "outbound"] as EvalDirection[]).filter((d) => data[d] && data[d]!.scored > 0);
   if (loading && !dirs.length) {
     return (
@@ -1353,8 +1388,9 @@ export function OutcomesSection({
     );
   }
   if (!dirs.length) return null;
-  // The leak funnel is the same sales-intent cohort for both directions (see ScopeNote) — render it once,
-  // from whichever direction has the larger funnel base, instead of twice with the same numbers.
+  /* The leak funnel is the same sales-intent cohort for both directions (see ScopeNote) — render it once,
+     from whichever direction has the larger funnel base, instead of twice with the same numbers.
+     Dropped in the NEW variant (2026-09-24); OLD keeps it so that arm still matches production. */
   const leakFrom = dirs.map((d) => data[d]!).sort((a, b) => b.funnelBase - a.funnelBase)[0];
   return (
     <div className="flex flex-col gap-3.5">
@@ -1363,7 +1399,7 @@ export function OutcomesSection({
         {dirs.map((d) => (
           <CallFlowCard key={d} o={data[d]!} calls={callsByDir?.[d]} />
         ))}
-        <AppointmentLeakCard o={leakFrom} />
+        {variant === "old" && <AppointmentLeakCard o={leakFrom} />}
       </div>
     </div>
   );

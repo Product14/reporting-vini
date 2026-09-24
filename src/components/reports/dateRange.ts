@@ -40,9 +40,11 @@ export function dateQS(bucket: Bucket, custom: { start: string; end: string } | 
  * `locked` (host-scoped via ?serviceType=, see useDept below) re-encodes the scope as `serviceType=`
  * instead of `dept=` so the NEXT page's useDept() also sees it as host-locked — otherwise an in-app nav
  * (e.g. Overview → By-agent, same iframe) would silently drop the lock and the switcher would reappear. */
-export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: string; end: string } | null, dept: Dept = "all", locked = false): string {
+export function reportNavQuery(teamId: string, bucket: Bucket, custom: { start: string; end: string } | null, dept: Dept = "all", locked = false, variant: ReportVariant = "old"): string {
   const deptQS = dept !== "all" ? `${locked ? "serviceType" : "dept"}=${dept}` : "";
-  const parts = [dateQS(bucket, custom), deptQS].filter(Boolean);
+  // `variant` rides along for the same reason dept and the window do: without it, clicking through from a
+  // "new" Overview to the By-agent tab silently drops you back into the old layout mid-review.
+  const parts = [dateQS(bucket, custom), deptQS, variantQS(variant)].filter(Boolean);
   const tail = parts.length ? parts.join("&") : "";
   if (teamId) return `?team_id=${teamId}${tail ? `&${tail}` : ""}`;
   return tail ? `?${tail}` : "";
@@ -138,4 +140,44 @@ export function useDateRange(): DateRangeState {
   const setCustom = useCallback((r: { start: string; end: string }) => write({ start: r.start, end: r.end }), [write]);
 
   return { bucket, custom, setPreset, setCustom };
+}
+
+/* ── OLD / NEW REPORT VARIANT ──────────────────────────────────────────────────────────────────────
+ * A staged rollout switch. "old" renders the report EXACTLY as production does today; "new" renders the
+ * 2026-09-24 changes (reworked hero tiles, funnel + appointment-leak cards hidden, call-flow defaulting
+ * to a collapsed table). Default is "old" — a dealer who never touches the toggle sees no change, which
+ * is the whole point: this ships to main without shipping the redesign to everyone.
+ *
+ * Lives in the URL (?view=new) like dept and the date window, so the choice SURVIVES navigation between
+ * the Overview and the By-agent tab instead of resetting on every click.
+ *
+ * ⚠️ PRESENTATION ONLY. This toggle cannot stage a DATA definition. The AI-assisted redefinition
+ * (meetings.ai_assisted) is materialized into the Supabase aggregate by the ETL, so once that backfill
+ * runs BOTH variants read the new numbers — "old" is the old LAYOUT, not the old figures. Staging the
+ * definition too would mean carrying both counts as separate columns through the spine and the snapshot.
+ */
+export type ReportVariant = "old" | "new";
+
+/** The variant portion of a query string (no leading "&"/"?"). "" for the default "old". */
+export function variantQS(variant: ReportVariant): string {
+  return variant === "new" ? "view=new" : "";
+}
+
+export function useVariant(): { variant: ReportVariant; setVariant: (v: ReportVariant) => void } {
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const variant: ReportVariant = params.get("view") === "new" ? "new" : "old";
+  const setVariant = useCallback(
+    (v: ReportVariant) => {
+      const sp = new URLSearchParams(params.toString());
+      if (v === "new") sp.set("view", "new");
+      else sp.delete("view");
+      const qs = sp.toString();
+      // replace (not push) — same reasoning as setDept: toggling a view is not a history step.
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    },
+    [params, pathname, router],
+  );
+  return { variant, setVariant };
 }

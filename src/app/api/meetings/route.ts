@@ -1,6 +1,6 @@
 import { fetchMeetings, type ServiceType } from "@/lib/spyne/meetings";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
-import { assistedApptLeads, assistedInWindow } from "@/lib/reports/assistedAppts";
+
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getSupabase, AGENT_LEAD_DAYS, REPORT_APPOINTMENTS } from "@/lib/reports/supabase";
 import { rangeFor } from "@/components/reports/liveData";
@@ -64,14 +64,11 @@ async function sbAppointments(
     else q = q.gte("meeting_start", startISO).order("meeting_start", { ascending: true });
     const { data, error } = await q;
     if (error || !Array.isArray(data)) return null;
-    let rows = data as ApptRow[];
-    /* AI-assisted rows need the window's own AI-touch check, exactly as the report card applies it — the
-     * snapshot's is a trailing 120 days. Without this the same rooftop's appointment list is longer here
-     * than on the card it is supposed to be the detail for. Only meaningful for a bounded window. */
-    if (mode === "window" && rows.some((r) => r.assisted)) {
-      const leads = await assistedApptLeads(sb, teamId, startISO.slice(0, 10), endISO.slice(0, 10));
-      rows = rows.filter((r) => assistedInWindow(r, leads));
-    }
+    const rows = data as ApptRow[];
+    /* The AI-touch re-check that used to run here went with the definition change (2026-09-24): an
+     * assisted row is now one the meetings table itself flags ai_assisted=1, and booked_at above is the
+     * whole window test. Re-applying the retired rule here would make this list SHORTER than the card
+     * it is the detail for — the same mismatch, pointing the other way. */
     return rows.map(toMeeting);
   } catch {
     return null;

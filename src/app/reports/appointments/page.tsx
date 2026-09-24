@@ -14,8 +14,8 @@ import {
 } from "@/components/reports/kit";
 import { NamedApptsTable } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
-import { fetchAgents, agentsForAccount, aggregateFleet, unattributedApptsFor, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
+import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/reports/dateRange";
+import { fetchAgents, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
 import type { NamedAppt } from "@/components/reports/data";
 import { track } from "@/lib/analytics";
 
@@ -33,7 +33,9 @@ function AppointmentsView() {
   const { teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
-  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
+  // variant rides along so the Old/New choice survives navigation between tabs.
+  const { variant } = useVariant();
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, false, variant);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
   const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
 
@@ -55,7 +57,7 @@ function AppointmentsView() {
     const all = agentsForAccount(feed?.agents ?? [], account);
     return dept === "all" ? all : all.filter((a) => a.dept.toLowerCase() === dept);
   }, [feed, account, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept)), [agents, feed, dept]);
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept)), [agents, feed, dept]);
   const appts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
   const filtered = useMemo<NamedAppt[]>(
     () => appts.filter((a) => (filter === "all" ? true : filter === "assisted" ? a.assisted : !a.assisted)),
@@ -102,7 +104,10 @@ function AppointmentsView() {
         <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <StatTile label="AI-booked" value={fmtInt(fleet.appointments)} sub="the AI created the meeting" accent="#059669" onClick={fleet.appointments > 0 ? () => { setModalOpen(true); track("appointments_drilldown_opened", { tab: "appointments", team_id: teamId }); } : undefined} />
-            <StatTile label="AI-assisted (CRM)" value={fmtInt(fleet.appointmentsAssisted)} sub="booked in your CRM on an AI-worked lead" accent="#6d28d9" />
+            {/* fleet.appointmentsAssisted is now the snapshot total for this department (aggregateFleet
+                takes it from assistedApptsFor), i.e. the same rows the table below lists — so the tile,
+                the "AI-assisted" filter and the overview card it was opened from all show one number. */}
+            <StatTile label="AI-assisted (CRM)" value={fmtInt(fleet.appointmentsAssisted)} sub="flagged AI-assisted in your CRM" accent="#6d28d9" />
             <StatTile label="Close rate" value={fleet.qualified > 0 ? `${Math.round((100 * fleet.appointments) / fleet.qualified)}%` : "—"} sub="AI-booked ÷ qualified leads" accent="#2563eb" />
           </div>
 
@@ -120,7 +125,7 @@ function AppointmentsView() {
             </div>
             <Card
               title="On the books"
-              sub="AI-booked = the AI created the meeting · AI-assisted = booked in your CRM on a lead the AI worked (never counted in the headline)"
+              sub="AI-booked = the AI created the meeting · AI-assisted = flagged AI-assisted in your CRM (never counted in the headline)"
               pad={filtered.length === 0}
               right={fleet.appointments > 0 ? (
                 <button onClick={() => { setModalOpen(true); track("appointments_drilldown_opened", { tab: "appointments", team_id: teamId }); }}

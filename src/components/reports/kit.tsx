@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
 import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
-import { useDept, type Dept } from "./dateRange";
+import { useDept, useVariant, type Dept, type ReportVariant } from "./dateRange";
 import { track } from "@/lib/analytics";
 
 export * from "./data";
@@ -115,6 +115,9 @@ export function ReportTopBar({
   }, []);
   // top-level department scope — shared across every tab (persisted in the URL via useDept).
   const { dept, setDept, locked } = useDept();
+  // Staged rollout: Old (today's production report) vs New (the 2026-09-24 changes). URL-persisted so the
+  // choice carries across tabs; default "old" so nobody sees the redesign until they ask for it.
+  const { variant, setVariant } = useVariant();
 
   return (
     <div
@@ -145,6 +148,9 @@ export function ReportTopBar({
         </div>
         )}
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          {/* Sits FIRST, left of every other control: it changes what the rest of the header is describing,
+              so it reads as a scope on the page rather than one more filter among the filters. */}
+          {teamId && <VariantSwitcher variant={variant} setVariant={setVariant} />}
           {teamId && !locked && !hideDept && <DeptSwitcher dept={dept} setDept={setDept} />}
           {right}
         </div>
@@ -155,6 +161,35 @@ export function ReportTopBar({
           <ReportTabs active={active} teamId={teamId} query={query} />
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── OLD / NEW report variant — staged-rollout switch shown in the header on every tab ──────────────
+ * Deliberately styled as a distinct pill (purple when New is active) rather than blending in with the
+ * Sales/Service switcher beside it: this is a preview control, not a normal report filter, and a dealer
+ * looking at unfamiliar numbers needs to be able to see at a glance that they are not on the default. */
+export function VariantSwitcher({ variant, setVariant }: { variant: ReportVariant; setVariant: (v: ReportVariant) => void }) {
+  return (
+    <div
+      className={`flex flex-none items-center rounded-lg p-0.5 transition-colors ${variant === "new" ? "bg-[#ede4ff]" : "bg-[#f1f2f5]"}`}
+      role="group"
+      aria-label="Report version"
+    >
+      {([["old", "Old"], ["new", "New"]] as [ReportVariant, string][]).map(([v, label]) => (
+        <button
+          key={v}
+          type="button"
+          onClick={() => setVariant(v)}
+          aria-pressed={variant === v}
+          title={v === "old" ? "The report as it is in production today" : "Preview the updated report"}
+          className={`rounded-md px-3 py-1 text-[11.5px] font-semibold transition-colors ${
+            variant === v ? "bg-white text-[#813fed] shadow-sm" : "text-[#6b7280] hover:text-[#374151]"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }

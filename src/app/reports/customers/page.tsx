@@ -12,7 +12,7 @@ import {
 } from "@/components/reports/kit";
 import { fmtWhenShort } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/reports/dateRange";
 import { fetchCustomers, type Customer } from "@/components/reports/liveData";
 import { track } from "@/lib/analytics";
 
@@ -37,7 +37,9 @@ function CustomersView() {
   const { teamId, account, spyneToken } = useScenario();
   const { bucket: dateBucket, custom } = useDateRange();
   const { dept } = useDept();
-  const navQuery = reportNavQuery(teamId, dateBucket, custom, dept);
+  // variant rides along so the Old/New choice survives navigation between tabs.
+  const { variant } = useVariant();
+  const navQuery = reportNavQuery(teamId, dateBucket, custom, dept, false, variant);
 
   const [bucket, setBucket] = useState<Bucket>("all");
   const [q, setQ] = useState("");

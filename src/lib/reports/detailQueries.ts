@@ -464,23 +464,22 @@ export interface AppointmentsOpts {
 // by ${startFloor} so a full run stays bounded (covers the daily window + the 30d top-vehicles window).
 export function appointmentsSql({ teamId, startFloor = "addDays(today(), -120)" }: AppointmentsOpts = {}): string {
   return `
-WITH ob_enrolled AS (
-    -- outbound-campaign enrollment: the canonical AI-assisted gate (a CRM meeting only counts as
-    -- assisted on a lead the AI worked; enrollment + the \`worked\` AI-touch check below mirror the
-    -- spine's appointment_assisted rule at snapshot grain).
-    SELECT DISTINCT clm.leadId AS lead_id
-    FROM dealer_leads.campaignLeadMappings AS clm FINAL
-    WHERE clm.__deleted = 0
-      ${teamPred("clm.teamId", teamId)}
-),
-meet AS (
+WITH meet AS (
     SELECT
         m.team_id AS team_id, m.enterprise_id AS enterprise_id, m.service_type AS service_type,
         m.lead_id AS lead_id, m.meeting_id AS meeting_id, m.customer_id AS customer_id,
         m.conversation_id AS conversation_id, m.call_id AS call_id,
         m.intent AS intent, m.meeting_start_time AS meeting_start, m.created_at AS booked_at,
         m.status AS status,
-        if(ifNull(m.source,'') = 'spyne', 0, 1) AS assisted,
+        /* canonical (CHANGED 2026-09-24): AI-assisted is now the meetings table's OWN ai_assisted flag,
+         * not "any CRM meeting on an outbound-enrolled, AI-worked lead". The old rule was a derivation
+         * this query reconstructed; ai_assisted is the upstream system's own answer, so it is read
+         * directly and no enrollment / AI-touch gate is applied to it any more.
+         * source='spyne' still WINS: the two halves must stay mutually exclusive or a meeting flagged
+         * both ways would leave the AI-booked headline and reappear in the secondary counter. No such
+         * row exists today (every ai_assisted=1 row fleet-wide is source='bdc'), so this only guards
+         * the case where upstream starts setting the flag on its own bookings. */
+        if(ifNull(m.source,'') != 'spyne' AND ifNull(m.ai_assisted, 0) = 1, 1, 0) AS assisted,
         JSONExtractString(ifNull(m.proposed_vins, ''), 1) AS tok
     -- ★ FINAL added 2026-09-09. This was the ONE meetings read in this file without it (campaignsSql's
     -- has always had it), so meet saw every CDC version of a row and any()/argMax() could mix fields
@@ -492,7 +491,13 @@ meet AS (
     FROM dealer_leads.meetings AS m FINAL
     JOIN eventila.enterprise_details ed FINAL ON ed.enterprise_id = m.enterprise_id
     WHERE m.__deleted = 0 AND m.is_active = 1
-      AND (m.source = 'spyne' OR m.lead_id IN (SELECT lead_id FROM ob_enrolled))
+      /* The two halves this list is made of: AI-booked (the AI created the meeting) and AI-assisted
+       * (upstream flagged it). Widened from the old "spyne OR outbound-enrolled lead" gate, which
+       * dropped 73 of the 96 ai_assisted=1 meetings fleet-wide because their lead was never enrolled
+       * in an outbound campaign. Anything else in the CRM is not ours and must stay out — without the
+       * ai_assisted arm this reads as an unfiltered CRM meetings dump (1,826 rows on Covina Kia
+       * alone), every one of which would land in the list as an AI-booked appointment. */
+      AND (m.source = 'spyne' OR ifNull(m.ai_assisted, 0) = 1)
       -- never list a warm_transfer/callback row: we didn't create it (see notPulledInHistory)
       AND ${notPulledInHistory("m")}
       AND m.service_type IN ('sales','service')
@@ -517,16 +522,9 @@ meet AS (
       AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
       ${teamPred("m.team_id", teamId)}
 ),
--- agent-worked = ≥1 AI call/SMS touch (trailing window). Keyed to only the assisted meetings' leads
--- so the conversations scan stays bounded.
-worked AS (
-    SELECT DISTINCT c.leadId AS lead_id
-    FROM dealer_leads.conversations AS c FINAL
-    WHERE c.__deleted = 0 AND ifNull(c.isTest, 0) = 0 AND c.status != 'failed'
-      AND lower(c.type) IN ('sms','call')
-      AND toDate(c.createdAt) >= ${startFloor}
-      AND c.leadId IN (SELECT lead_id FROM meet WHERE assisted = 1)
-),
+-- (The \`worked\` CTE — ≥1 AI call/SMS touch on an assisted meeting's lead — was removed 2026-09-24 with
+-- the definition change above. It existed only to gate the assisted half; ai_assisted is now read
+-- straight off the meeting, so there is nothing left for it to filter.)
 -- Callback-from-outbound signal (mirrors callbackAttribution.ts / the spine). A customer calling back
 -- the outbound line and booking is OUTBOUND-driven effort, so its appointment must be credited to the
 -- Outbound agent — same rule the AI-booked headline (agent_lead_days) applies. Bounded to these
@@ -632,7 +630,9 @@ LEFT JOIN vm AS vm2 ON vm2.vin = dvm.vin
 LEFT JOIN conv_dir AS cd1 ON cd1.conv_id = meet.conversation_id
 LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id
 LEFT JOIN chat_link AS cl ON cl.meeting_id = meet.meeting_id
-WHERE meet.assisted = 0 OR meet.lead_id IN (SELECT lead_id FROM worked)
+-- No assisted-side filter any more: \`meet\` is already exactly the two halves we list (see its gate), so
+-- every row it returns belongs here. The old \`meet.assisted = 0 OR lead IN worked\` line enforced the
+-- retired AI-touch rule.
 GROUP BY meet.team_id, meet.meeting_id, meet.assisted
 ORDER BY booked_at DESC
 SETTINGS join_use_nulls = 1`.trim();

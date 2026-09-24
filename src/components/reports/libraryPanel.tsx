@@ -20,7 +20,7 @@ import { useSearchParams } from "next/navigation";
 
 import { Card, DateFilter, SectionLabel, fmtInt } from "@/components/reports/kit";
 import { useScenario } from "@/components/reports/scenario";
-import { useDateRange, useDept } from "@/components/reports/dateRange";
+import { useDateRange, useDept, useVariant } from "@/components/reports/dateRange";
 import {
   fetchAgents,
   fetchReportMetrics,
@@ -29,6 +29,7 @@ import {
   agentsForAccount,
   aggregateFleet,
   unattributedApptsFor,
+  assistedApptsFor,
   addDay,
   peekAgents,
   tzShortLabel,
@@ -161,7 +162,8 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
 
   const agents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const scoped = useMemo(() => (dept === "all" ? agents : agents.filter((a) => a.dept.toLowerCase() === dept)), [agents, dept]);
-  const fleet = useMemo(() => aggregateFleet(scoped, feed?.prior, unattributedApptsFor(feed, dept)), [scoped, feed, dept]);
+  const { variant } = useVariant(); // staged-rollout switch — rides in ReportCtx (see library.tsx)
+  const fleet = useMemo(() => aggregateFleet(scoped, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept)), [scoped, feed, dept]);
   const periodLabel = custom ? `${custom.start} → ${custom.end}` : BUCKET_TEXT[bucket] ?? "Last 30 days";
 
   const ctx: ReportCtx = useMemo(
@@ -179,12 +181,13 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
       outcomes: outcomesFeed.data,
       insights,
       dept: dept === "all" ? "all" : dept,
+      variant,
       window: custom ? { start: custom.start, end: addDay(custom.end) } : { bucket },
       spyneToken,
       warmLeads: (feed?.warmLeads ?? []).filter((w) => dept === "all" || w.serviceType === dept),
       namedAppts: (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept),
     }),
-    [teamId, enterpriseId, periodLabel, feed, fleet, scoped, metrics, actionStats, actionItems, outcomesFeed.data, dept, insights, bucket, custom, spyneToken],
+    [teamId, enterpriseId, periodLabel, feed, fleet, scoped, metrics, actionStats, actionItems, outcomesFeed.data, dept, insights, bucket, custom, spyneToken, variant],
   );
 
   const ready = feed !== null;

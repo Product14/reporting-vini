@@ -15,6 +15,7 @@ import React, { useEffect, useState } from "react";
 import { Card, fmtInt, StepFunnel, TrendBars, Th } from "@/components/reports/kit";
 import { fmtRate, fmtSecs, fmtDuration, NamedApptsTable, WarmLeadChips, RankedOutcomeTable, MetricTile, ConversationDrawer } from "@/components/reports/kitV3";
 import { CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
+import type { ReportVariant } from "@/components/reports/dateRange";
 import type { EvalOutcomes, EvalDirection } from "@/lib/spyne/evalPipeline";
 import type { AgentData, NamedAppt, WarmLeadItem } from "@/components/reports/data";
 import { fetchConversations, type FetchResult, type FleetLive, type ActionItem, type ActionItemStats, type ReportMetrics, type Conversation } from "@/components/reports/liveData";
@@ -43,6 +44,9 @@ export interface ReportCtx {
   insights: InsightsPayload | null;
   /** Department the reader is scoped to — reports meaningful only to the other one are not offered. */
   dept?: "sales" | "service" | "all";
+  /* Staged-rollout variant, passed down rather than read from a hook: these cards render inside `render(c)`
+     callbacks, so calling useVariant() in one would be a conditionally-executed hook. */
+  variant?: ReportVariant;
   /** The selected window, so a drill-down can ask the server for the same slice the report is showing. */
   window?: { bucket?: string; start?: string; end?: string };
   /* The dealer's session token, which arrives on the iframe URL. EVERY request to our own API has to
@@ -507,7 +511,7 @@ export const REPORTS: ReportDef[] = [
           <Stats
             items={[
               { label: "Booked by the AI", value: fmtInt(c.fleet.appointments), sub: "confirmed in your CRM", accent: "#15803d" },
-              { label: "Also booked after an AI touch", value: fmtInt(c.fleet.appointmentsAssisted), sub: "your team closed these" },
+              { label: "Flagged AI-assisted in the CRM", value: fmtInt(c.fleet.appointmentsAssisted), sub: "your team closed these" },
               { label: "Qualified leads", value: fmtInt(c.fleet.qualified), sub: "showed buying intent" },
               { label: "Close rate", value: fmtRate(c.fleet.appointments, c.fleet.qualified), sub: "appointments ÷ qualified leads", accent: "#813fed" },
             ]}
@@ -682,7 +686,8 @@ export const REPORTS: ReportDef[] = [
       const apptAgent = scopedAgents(c).find((a) => a.dir.toLowerCase() === o.dir);
       return (
         <div className="flex flex-col gap-4">
-          <AppointmentLeakCard o={o} appointments={apptAgent?.metrics.appointments} />
+          {/* Dropped in the NEW variant (2026-09-24), kept in OLD so that arm matches production. */}
+          {c.variant !== "new" && <AppointmentLeakCard o={o} appointments={apptAgent?.metrics.appointments} />}
           <ConversationQualityCard o={o} />
         </div>
       );
@@ -1855,7 +1860,7 @@ export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
   switch (report.id) {
     case "appointments":
       sheets.push({ name: "Summary", rows: [["Measure", "Value"],
-        ["Booked by the AI", c.fleet.appointments], ["Also booked after an AI touch", c.fleet.appointmentsAssisted],
+        ["Booked by the AI", c.fleet.appointments], ["Flagged AI-assisted in the CRM", c.fleet.appointmentsAssisted],
         ["Qualified leads", c.fleet.qualified]] });
       sheets.push({ name: "By agent", rows: [["Agent", "Direction", "Appointments"],
         ...scopedAgents(c).map((a) => [a.report.summary.person || a.name, a.dir, a.metrics.appointments])] });

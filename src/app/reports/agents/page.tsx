@@ -34,7 +34,7 @@ import { fmtRate, fmtWhenShort, IntentOutcomeTable, RankedOutcomeTable, WarmLead
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, useDept, useVariant, reportNavQuery } from "@/components/reports/dateRange";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { StlUpsell } from "@/components/reports/upsell";
 import { ExportMenu } from "@/components/reports/ExportMenu";
@@ -147,7 +147,8 @@ function AgentReportsView() {
   const hasTeam = teamId !== "";
   // Carries team scope + the selected window into the tab links and the back arrow, so the window
   // survives navigation back to the Overview tab.
-  const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked);
+  const { variant } = useVariant(); // staged-rollout switch (header toggle)
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked, variant);
   // Gated on lifetime "ever live", NOT the selected window — a live rooftop with an empty window (e.g.
   // "Today" before its first synced call) renders the report with zeros instead of the on-its-way gate.
   // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
@@ -1051,7 +1052,8 @@ function AgentReportsView() {
                    showing, and the same department the URL scoped it to. */
                 drill={{ teamId, serviceType: agentSvc, ...meetingWindow, spyneToken, spyneEnv }}
               />
-              <AppointmentLeakCard o={outcomes} appointments={scale(m.appointments)} />
+              {/* Dropped in the NEW variant (2026-09-24), kept in OLD so that arm matches production. */}
+              {variant === "old" && <AppointmentLeakCard o={outcomes} appointments={scale(m.appointments)} />}
               <HandoffsCard o={outcomes} />
               <ConversationQualityCard o={outcomes} calls={m.calls} />
             </>

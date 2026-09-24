@@ -1,7 +1,7 @@
 import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS, SYNC_STATE } from "@/lib/reports/supabase";
 import { buildResult, AGENT_TYPE_BY_ID } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
-import { assistedApptLeads, assistedInWindow } from "@/lib/reports/assistedAppts";
+
 import { fetchLiveAppointments, countByAgent } from "@/lib/reports/liveAppointments";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -313,12 +313,11 @@ export async function GET(request: Request): Promise<Response> {
 
   // Detail tables (one rpc, fallback to six reads) + both lead-count windows (one rpc) + the
   // lifetime "ever live" probe in parallel.
-  const [detail, lc, sourceCounts, everLive, assistedLeads, syncedAt, live] = await Promise.all([
+  const [detail, lc, sourceCounts, everLive, syncedAt, live] = await Promise.all([
     fetchDetailCombined(sb, teamId).then((d) => d ?? fetchDetailPerTable(sb, teamId)),
     leadCountsBoth(sb, teamId, start, end, prior.start, prior.end),
     sourceCountsFor(sb, teamId, start, end),
     teamEverLive(sb, teamId),
-    assistedApptLeads(sb, teamId, start, end),
     lastSyncAt(sb),
     /* AI-booked appointments come from the meetings API, not the aggregate — the one number dealers
      * check against the appointments console, which reads that same API. Fetched across BOTH windows in
@@ -341,9 +340,11 @@ export async function GET(request: Request): Promise<Response> {
     const raw = (a.booked_at ?? "").slice(0, 10);
     if (!raw) return false;
     const day = storeLocalDay(a.booked_at ?? "", timezone ?? undefined, raw);
-    if (!(day >= start && day < end)) return false;
-    // ★ AI-assisted rows must ALSO have an in-window AI touch — see assistedAppts.ts for why.
-    return assistedInWindow(a, assistedLeads);
+    /* Booking date is now the ONLY window test, for both halves. The extra "an assisted row must also
+     * have an in-window AI touch" gate went with the definition change (2026-09-24): AI-assisted is the
+     * meeting's own ai_assisted flag, so there is no AI-touch claim left to re-verify here. Keeping it
+     * would have silently filtered the newly-admitted rows back out through the retired rule. */
+    return day >= start && day < end;
   });
 
   /* ── AI-BOOKED APPOINTMENTS, SWAPPED TO LIVE ──
@@ -483,8 +484,19 @@ export async function GET(request: Request): Promise<Response> {
    * kept apart in `unknown` and only "All" picks it up — which is exactly how the LIST beneath these
    * tiles already filters (`a.serviceType === dept`). Tile and list now scope identically. */
   const unattributedBy = { sales: 0, service: 0, unknown: 0 };
+  /* ROOFTOP TOTAL for AI-assisted, by department. The spine can only credit an assist to an AGENT when
+   * the lead has an in-window spine conversation to hang it on (lead_assist_conv), so summing the agent
+   * rows under-reports the rooftop: 2b110492b6, 30d — 19 attributed against 23 meetings the CRM flags.
+   * Assisted rows carry no direction by construction (a CRM meeting has no inbound/outbound), so they
+   * CANNOT be re-attributed from the snapshot the way the AI-booked half is above. The honest split is
+   * therefore: per-agent cards show what the spine can attribute, the rooftop tiles show this total. */
+  const assistedBy = { sales: 0, service: 0, unknown: 0 };
   for (const a of windowedAppointments) {
-    if (a.assisted) continue;
+    if (a.assisted) {
+      const svcA = (a.service_type || "").toLowerCase();
+      assistedBy[svcA === "sales" || svcA === "service" ? svcA : "unknown"]++;
+      continue;
+    }
     const svc = (a.service_type || "").toLowerCase();
     const dir = (a.direction || "").toLowerCase();
     const dept = svc === "sales" || svc === "service" ? svc : null;
@@ -508,7 +520,7 @@ export async function GET(request: Request): Promise<Response> {
     if (priByAgent && basis && typeof basis.appointments === "number") basis.appointments = priByAgent[type] ?? 0;
   }
 
-  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, everLive: everLiveResolved }, {
+  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved }, {
     headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
   });
 }

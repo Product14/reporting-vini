@@ -664,14 +664,8 @@ conv_hours AS (
     )
 ),
 
--- canonical: outbound-campaign-enrolled leads (campaignLeadMappings membership). Used to scope the
--- AI-assisted (CRM) secondary to genuine outbound-worked leads, matching the spec's "outbound-campaign
--- lead" wording, so a stray CRM/walk-in booking on a never-worked lead is never credited as AI-assisted.
-outbound_campaign_leads AS (
-    SELECT DISTINCT clm.leadId AS lead_id
-    FROM dealer_leads.campaignLeadMappings AS clm FINAL
-    WHERE clm.__deleted = 0
-),
+-- (outbound_campaign_leads — campaignLeadMappings membership — was removed 2026-09-24. Its only consumer
+-- was the AI-assisted gate in appt_attribution, which now reads meetings.ai_assisted directly.)
 
 -- ★ SALES OUTBOUND QUALIFIED — CAMPAIGN-OUTCOME RULE (locked 2026-08-18) ★
 -- For SALES OUTBOUND ONLY, qualified is the campaign DISPOSITION the agent recorded on the lead, gated on
@@ -751,11 +745,24 @@ lead_assist_conv AS (
 
 -- canonical (LOCKED 2026-06-30): Appointments are TWO distinct metrics, never folded together.
 --   • AI-booked (PRIMARY / headline) = the AI created the meeting record (meetings.source='spyne').
---   • AI-assisted (CRM, SECONDARY)   = meeting booked in the CRM (source!='spyne') on a lead the agent
---                                      WORKED. canonical: agent-worked = call, SMS or web chat — ANY
---                                      AI sales touch in-window (present in the conversation spine) AND is
---                                      outbound-campaign enrolled. NOT call-only. Shown smaller; never
---                                      added into the headline.
+--   • AI-assisted (CRM, SECONDARY)   = meeting the CRM itself flags meetings.ai_assisted = 1 (and that we
+--                                      did not book, i.e. source != 'spyne'). Shown smaller; never added
+--                                      into the headline.
+--
+-- ★ REDEFINED 2026-09-24. This used to be a rule we RECONSTRUCTED — "a CRM meeting on an outbound-campaign
+-- enrolled lead the AI worked by call/SMS/chat in-window". It is now read from the meetings table's own
+-- ai_assisted flag, which is upstream's answer to the same question. The two are NOT equivalent: on the 13
+-- rooftops where the flag fires, the old rule returned 9/3/6/4 where the flag says 30/23/11/4, because the
+-- enrolment gate alone excluded 73 of 96 flagged meetings. Verified against prod 2026-09-24.
+--   Kept from the old rule: source != 'spyne' (the two halves must stay mutually exclusive, or a meeting
+--   flagged both ways leaves the headline and reappears in the secondary counter) and the warm_transfer /
+--   callback exclusion. Dropped: outbound-campaign enrolment, and the in-window AI-touch test.
+--   KNOWN COST — this branch still attaches the meeting to a spine conversation (lead_assist_conv), so a
+--   flagged meeting on a lead the AI never spoke to has no conversation to hang on and is dropped by the
+--   conv_id filter below. Fleet-wide that is 1 of 96 today. The AI-booked half has an unattributed path
+--   for exactly this case; the assisted half does not, and 1 row did not justify building a second one.
+--   Revisit if that ratio moves — the appointments SNAPSHOT (detailQueries.ts) has no such join and will
+--   count it, so this is the one place the two surfaces can legitimately differ by a row.
 -- Each meeting is classified once: source='spyne' → booked; else (CRM) → assisted, attached to the lead's
 -- representative spine conversation. is_assisted carries the split downstream (two separate counters).
 --
@@ -815,7 +822,11 @@ appt_attribution AS (
         WHERE m.is_active = 1 AND m.__deleted = 0
           AND ifNull(m.source, '') != 'spyne'
           AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
-          AND m.lead_id IN (SELECT lead_id FROM outbound_campaign_leads)
+          -- ★ ai_assisted = 1 replaces the outbound-campaign-enrolment gate (2026-09-24). See the
+          -- canonical note above: the flag is now upstream's own answer, not a rule we reconstruct.
+          -- Enrolment was the single biggest difference between the two — it alone dropped 73 of the
+          -- 96 flagged meetings fleet-wide, which is why the old counter read 9 where the flag says 30.
+          AND ifNull(m.ai_assisted, 0) = 1
           -- canonical: bound the BOOKING to the report window (like AI-booked meetings attach to in-window
           -- conversations), so a windowed view credits only assists booked in that window.
           AND toDate(m.created_at) >= {START} AND toDate(m.created_at) < {END}

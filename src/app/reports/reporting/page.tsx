@@ -22,13 +22,14 @@ import {
   ValueTile,
 } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/reports/dateRange";
 import {
   fetchAgents,
   fetchActionItemStats,
   agentsForAccount,
   aggregateFleet,
   unattributedApptsFor,
+  assistedApptsFor,
   addDay,
   peekAgents,
   tzShortLabel,
@@ -53,7 +54,9 @@ function ReportingView() {
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept();
   const svc = dept === "all" ? "both" : dept; // shared dept scope → action-items serviceType
-  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
+  // variant rides along so the Old/New choice survives navigation between tabs.
+  const { variant } = useVariant();
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, false, variant);
   const periodLabel = custom ? `${custom.start} – ${custom.end}` : BUCKET_LABELS[bucket];
   const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
 
@@ -79,7 +82,7 @@ function ReportingView() {
   // Scope to the rooftop's agents, then to the selected department (the shared header switcher).
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept)), [agents, feed, dept]);
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept)), [agents, feed, dept]);
   const split = fleet.bySplit;
   const namedAppts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
 
@@ -244,7 +247,7 @@ function ReportingView() {
           {namedAppts.length > 0 && (
             <div className="flex flex-col gap-3.5">
               <SectionLabel hint={`${fmtInt(namedAppts.length)} on the books`}>Appointments — named</SectionLabel>
-              <Card title="On the books" sub="AI-booked = the AI created the meeting · AI-assisted = booked in your CRM on an AI-worked lead" pad={false}>
+              <Card title="On the books" sub="AI-booked = the AI created the meeting · AI-assisted = flagged AI-assisted in your CRM" pad={false}>
                 <NamedApptsTable items={namedAppts.slice(0, 20)} teamId={teamId} />
               </Card>
             </div>

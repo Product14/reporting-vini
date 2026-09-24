@@ -10,7 +10,7 @@
 import { Suspense } from "react";
 import { ReportTopBar, DateFilter } from "@/components/reports/kit";
 import { useScenario } from "@/components/reports/scenario";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/reports/dateRange";
 import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
 
 export default function ReportLibraryPage() {
@@ -25,7 +25,9 @@ function LibraryRoute() {
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept, locked } = useDept();
   const { teamId } = useScenario();
-  const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked);
+  // variant rides along so the Old/New choice survives navigation between tabs.
+  const { variant } = useVariant();
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked, variant);
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">

@@ -969,7 +969,7 @@ export function DefinitionsFooter({ tzLabel }: { tzLabel?: string }) {
       <p>
         <b className="text-[#6b7280]">Real conversation</b> = the customer actually spoke on a non-voicemail call, or replied to a text (voicemail excluded). ·{" "}
         <b className="text-[#6b7280]">Qualified</b> = concrete buying intent (vehicle / availability / price / financing / trade-in / test-drive / booking) — same rule for calls and SMS; a bare reply counts as Engaged, not Qualified. ·{" "}
-        <b className="text-[#6b7280]">Appointments — AI-booked</b> = the AI created the meeting record; <b className="text-[#6b7280]">AI-assisted (CRM)</b> = booked in your CRM on a lead the AI worked, shown separately and never folded into the headline. ·{" "}
+        <b className="text-[#6b7280]">Appointments — AI-booked</b> = the AI created the meeting record; <b className="text-[#6b7280]">AI-assisted (CRM)</b> = flagged AI-assisted in your CRM, shown separately and never folded into the headline. ·{" "}
         <b className="text-[#6b7280]">Hand-offs</b> = completed transfers + requested callbacks; failed transfers reported separately. ·{" "}
         <b className="text-[#6b7280]">Turn rate</b> = qualified ÷ real conversations. · <b className="text-[#6b7280]">Close rate</b> = AI-booked ÷ qualified.
       </p>

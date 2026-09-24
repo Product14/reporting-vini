@@ -32,7 +32,7 @@ export const CANONICAL_DEFINITION_ROWS: [string, string][] = [
   ["Real conversation", "The customer actually spoke on a non-voicemail call, or replied to a text. Voicemail is excluded."],
   ["Qualified", "Concrete buying intent — vehicle, availability, price, financing, trade-in, test-drive or booking. Same rule for calls and texts. A bare reply counts as Engaged, not Qualified."],
   ["Appointments — AI-booked", "The AI created the meeting record. This is the headline appointment number."],
-  ["AI-assisted (CRM)", "Booked in your CRM on a lead the AI worked. Reported separately and never folded into the AI-booked total."],
+  ["AI-assisted (CRM)", "Flagged AI-assisted in your CRM (meetings.ai_assisted). Reported separately and never folded into the AI-booked total."],
   ["Hand-offs", "Completed transfers plus requested callbacks. Failed transfers are reported separately."],
   ["Turn rate", "Qualified leads ÷ real conversations."],
   ["Close rate", "AI-booked appointments ÷ qualified leads."],
@@ -44,7 +44,7 @@ export const CANONICAL_DEFINITIONS =
   "(voicemail excluded). Qualified = concrete buying intent (vehicle / availability / price / financing " +
   "/ trade-in / test-drive / booking) — same rule for calls and texts; a bare reply counts as Engaged, " +
   "not Qualified. Appointments — AI-booked = the AI created the meeting record; AI-assisted (CRM) = " +
-  "booked in your CRM on a lead the AI worked, shown separately and never folded into that total. " +
+  "flagged AI-assisted in your CRM, shown separately and never folded into that total. " +
   "Hand-offs = completed transfers plus requested callbacks; failed transfers are reported separately. " +
   "Turn rate = qualified leads ÷ real conversations. Close rate = AI-booked appointments ÷ qualified leads.\n\n" +
   "All figures are de-duplicated and consistent with the live report, the Vini console, and your " +

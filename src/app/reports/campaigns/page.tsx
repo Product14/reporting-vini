@@ -12,7 +12,7 @@ import {
 import { ActiveCampaign, CalibratingBanner, EmptyState, fmtInt, ReportTopBar, Td, Th } from "@/components/reports/kit";
 import { useScenario } from "@/components/reports/scenario";
 import { fetchAgents, agentsForAccount, peekAgents, type FetchResult } from "@/components/reports/liveData";
-import { useDateRange, useDept, reportNavQuery } from "@/components/reports/dateRange";
+import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/reports/dateRange";
 import { track } from "@/lib/analytics";
 
 /* Per-campaign audience size — the ONLY genuinely-real field we have client-side for a campaign
@@ -42,7 +42,9 @@ function CampaignsReportView() {
   // CUMULATIVE (~120d) snapshot from report_campaigns and are NOT windowed by the date filter.
   const { bucket, custom } = useDateRange();
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
-  const navQuery = reportNavQuery(teamId, bucket, custom, dept);
+  // variant rides along so the Old/New choice survives navigation between tabs.
+  const { variant } = useVariant();
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, false, variant);
   const [filterSubType, setFilterSubType] = useState<string>("all");
   // Engagement: fires once per opened campaigns report (the rooftop is resolved by mount).
   useEffect(() => { track("report_viewed", { tab: "campaigns", team_id: teamId }); }, [teamId]);
