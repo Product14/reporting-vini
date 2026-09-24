@@ -216,8 +216,14 @@ export async function GET(request: Request): Promise<Response> {
     " formatDateTime(a.due_date,'%Y-%m-%dT%H:%i:%SZ') AS dueAt," +
     " formatDateTime(a.createdAt,'%Y-%m-%dT%H:%i:%SZ') AS at" +
     ` FROM (${dedupedList}) a` +
-    " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON a.lead_id=l.lead_id" +
-    " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+    // TENANT-SCOPE BOTH JOIN SUBQUERIES. Without the team_id predicate each of these aggregates the
+    // WHOLE fleet — leads (1.37M) + customer (1.20M) — to resolve names for at most `limit` rows, so a
+    // 200-row page built a ~2.5M-row hash table and peaked at ~850 MiB. Measured A/B on the busiest
+    // rooftop: 296ms/775 MiB → 57ms/151 MiB, same rows out. Verified lossless: across the 8 busiest
+    // teams, ZERO leads resolve to a customer row belonging to a different team, so scoping drops
+    // nothing that used to match.
+    ` LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads WHERE team_id='${chEsc(teamId)}' GROUP BY lead_id) l ON a.lead_id=l.lead_id` +
+    ` LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer WHERE team_id='${chEsc(teamId)}' GROUP BY customer_id) c ON l.cid=c.customer_id` +
     ` ORDER BY a.createdAt DESC LIMIT ${limit} OFFSET ${offset}`;
 
   const rows = await runClickhouse<Record<string, string | number>>(sql);

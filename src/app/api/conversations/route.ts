@@ -143,8 +143,10 @@ export async function GET(request: Request): Promise<Response> {
       " q.score AS aiScore, q.grade AS grade, q.frustrated AS frustrated," +
       " formatDateTime(e.createdAt,'%Y-%m-%dT%H:%i:%SZ') AS at" +
       " FROM dealer_leads.endcallreports e" +
-      " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
-      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number, any(emails) emails FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+      // Tenant-scoped — see the note in /api/action-items. Unscoped, these two aggregate the whole
+      // fleet's leads + customer tables on every call just to attach a name to one page of calls.
+      ` LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads WHERE team_id='${chEsc(teamId)}' GROUP BY lead_id) l ON e.leadId=l.lead_id` +
+      ` LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number, any(emails) emails FROM dealer_leads.customer WHERE team_id='${chEsc(teamId)}' GROUP BY customer_id) c ON l.cid=c.customer_id` +
       " LEFT JOIN (SELECT callId, any(scorePercentage) score, any(overallGrade) grade, any(customerFrustrated) frustrated FROM dealer_leads.conversationQualities WHERE createdAt >= now()-INTERVAL 30 DAY GROUP BY callId) q ON e.callId=q.callId" +
       " WHERE " + where.join(" AND ") +
       ` ORDER BY e.createdAt DESC LIMIT ${limit}`;
@@ -223,15 +225,20 @@ export async function GET(request: Request): Promise<Response> {
     ` argMax(ifNull(status,''), ifNull(updatedAt, toDateTime(0))) convStatus,` +
     ` argMax(ifNull(summary,''), ifNull(updatedAt, toDateTime(0))) summaryJson,` +
     ` argMax(ifNull(conversationAnalytics,''), ifNull(updatedAt, toDateTime(0))) analyticsJson` +
-    ` FROM dealer_leads.conversations WHERE type='${convType}' AND ifNull(isTest,0)=0 GROUP BY conversationId) cv ON s.conversationId=cv.conversationId` +
+    // teamId pushed INTO the subquery, not just asserted on its output below. Unscoped, this
+    // argMax-aggregated all 1.67M fleet conversations — including the two big JSON blobs (summary,
+    // conversationAnalytics) — and then threw all but one team's away. Provably lossless: across all
+    // 1.56M conversationIds in prod, ZERO span more than one teamId, so a row the push-down removes
+    // could never have survived the `cv.teamId=` filter on the next line anyway.
+    ` FROM dealer_leads.conversations AS c0 WHERE c0.teamId='${chEsc(teamId)}' AND c0.type='${convType}' AND ifNull(c0.isTest,0)=0 GROUP BY conversationId) cv ON s.conversationId=cv.conversationId` +
     ` WHERE cv.teamId='${chEsc(teamId)}' AND s.__deleted=0 AND ${leadScoped ? `cv.leadId='${chEsc(leadId)}'` : sinceClause("s.createdAt")}` +
     ` GROUP BY s.conversationId ORDER BY at DESC LIMIT ${limit}` +
     ") t" +
     // `svc` = the lead's OWN sales/service department. anyIf (not any) because leads carries CDC
     // duplicates and a plain any() can land on a row whose service_type is blank.
-    " LEFT JOIN (SELECT lead_id, any(customer_id) cid," +
-    " anyIf(service_type, notEmpty(ifNull(service_type,''))) svc FROM dealer_leads.leads GROUP BY lead_id) l ON t.leadId=l.lead_id" +
-    " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+    ` LEFT JOIN (SELECT lead_id, any(customer_id) cid,` +
+    ` anyIf(service_type, notEmpty(ifNull(service_type,''))) svc FROM dealer_leads.leads WHERE team_id='${chEsc(teamId)}' GROUP BY lead_id) l ON t.leadId=l.lead_id` +
+    ` LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer WHERE team_id='${chEsc(teamId)}' GROUP BY customer_id) c ON l.cid=c.customer_id`;
   const bubblesOf = (r: Record<string, unknown>) => {
     const atypes = (Array.isArray(r.atypes) ? r.atypes : []) as string[];
     const bodies = (Array.isArray(r.bodies) ? r.bodies : []) as string[];

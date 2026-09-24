@@ -78,7 +78,9 @@ export async function GET(request: Request): Promise<Response> {
     "   argMax(__deleted,_version) AS del" +
     `  FROM dealer_leads.leads WHERE team_id='${chEsc(teamId)}' GROUP BY lead_id` +
     " ) l" +
-    " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+    // Tenant-scoped — the `l` subquery above is already team-filtered; without the same predicate here
+    // this side aggregated all 1.20M customer rows fleet-wide on every call. See /api/action-items.
+    ` LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer WHERE team_id='${chEsc(teamId)}' GROUP BY customer_id) c ON l.cid=c.customer_id` +
     " WHERE l.del=0 AND ifNull(c.name,'') != ''" +
     bucketSql(bucket) +
     (q ? ` AND positionCaseInsensitive(c.name, '${chEsc(q)}') > 0` : "") +
