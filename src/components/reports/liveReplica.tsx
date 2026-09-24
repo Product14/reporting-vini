@@ -578,7 +578,62 @@ function CompactBody({ f }: { f: AgentFacts }) {
   );
 }
 
-const AGENT_VIEWS = [["headline", "Headline"], ["impact", "Impact"], ["compact", "Compact"]] as const;
+/* The lead funnel, kept from the production card because it is the one view that shows the SHAPE of the
+   drop-off rather than the totals — which of reach / conversation / qualification / booking is actually
+   leaking. Same maths as LiveAgentCard so the two cannot disagree: each band is the drop-off BETWEEN two
+   stages as a share of leads reached, so the bands sum to 100% of `reached` (a true funnel, not an
+   independent part-of-whole split), and the last band is the booked share itself. */
+function FunnelBody({ f }: { f: AgentFacts }) {
+  const [barRef, grown] = useInView<HTMLDivElement>(0.6);
+  const tones = f.inbound ? IB_TONES : OB_TONES;
+  const reached = f.contacts;
+  const seg = (a: number, b: number) => (reached > 0 ? Math.max(0, ((a - b) / reached) * 100) : 0);
+  const segments = [
+    { pct: seg(reached, f.engaged), color: tones[0] },
+    { pct: seg(f.engaged, f.qualified), color: tones[1] },
+    { pct: seg(f.qualified, f.booked), color: tones[2] },
+    { pct: reached > 0 ? (f.booked / reached) * 100 : 0, color: tones[3] },
+  ];
+  const legend = [
+    { value: reached, label: f.inbound ? "Leads reached" : "Leads contacted", color: tones[0] },
+    { value: f.engaged, label: "Real conversations", color: tones[1] },
+    { value: f.qualified, label: "Qualified leads", color: tones[2] },
+    { value: f.booked, label: "Appointments booked", color: tones[3] },
+  ];
+  return (
+    <div className="flex w-full flex-col gap-3 px-5 py-4">
+      <div className="flex w-full items-center justify-between">
+        <p className="text-[12.5px] font-semibold text-[#030712]">Where {possessive(f.person)} leads stand</p>
+        <p className="text-[20px] font-bold tracking-[-0.4px] text-[#030712]">{fmtInt(reached)}</p>
+      </div>
+      <div ref={barRef} className="flex h-2 w-full overflow-hidden rounded-lg bg-[#f3f4f6]">
+        {segments.map((s, i) => (
+          <div key={i} className="h-full" style={{ width: grown ? `${s.pct}%` : "0%", background: s.color, transition: `width .9s cubic-bezier(.16,1,.3,1) ${i * 90}ms` }} />
+        ))}
+      </div>
+      <div className="flex w-full flex-col">
+        {legend.map((l, i) => (
+          <div key={l.label} className={`flex w-full items-center justify-between py-2 ${i > 0 ? "border-t border-[#f0f1f3]" : ""}`}>
+            <div className="flex items-center gap-2.5">
+              <span className="h-3 w-3 flex-none rounded-sm" style={{ background: l.color }} />
+              <span className="text-[12.5px] tracking-[-0.24px] text-[#626f81]">{l.label}</span>
+            </div>
+            <span className="text-[14px] font-semibold tracking-[-0.28px] text-[#030712]">{fmtInt(l.value)}</span>
+          </div>
+        ))}
+      </div>
+      {/* The funnel's last stage is AI-booked only, so a card with assists would otherwise look short
+          against the other tabs' appointment total. Stated rather than folded into the band. */}
+      {f.assisted > 0 && (
+        <p className="text-[11.5px] text-[#9ca3af]">
+          Plus {fmtInt(f.assisted)} AI-assisted — booked by your team on these leads, not counted in the funnel.
+        </p>
+      )}
+    </div>
+  );
+}
+
+const AGENT_VIEWS = [["headline", "Headline"], ["funnel", "Funnel"], ["impact", "Impact"], ["compact", "Compact"]] as const;
 type AgentView = (typeof AGENT_VIEWS)[number][0];
 
 export function LiveAgentPerformance({ agents, onOpenAgent }: { agents: AgentData[]; onOpenAgent: (id: string) => void }) {
@@ -605,6 +660,7 @@ export function LiveAgentPerformance({ agents, onOpenAgent }: { agents: AgentDat
               <div className="flex w-full flex-col">
                 <AgentHeader agent={a} f={f} />
                 {view === "headline" && <HeadlineBody f={f} />}
+                {view === "funnel" && <FunnelBody f={f} />}
                 {view === "impact" && <ImpactBody f={f} />}
                 {view === "compact" && <CompactBody f={f} />}
               </div>
