@@ -264,7 +264,7 @@ export function DateFilter({
   // makes the end exclusive). Seed from the active range when it already spans a single day.
   const [day, setDay] = useState(() => (custom && custom.start === custom.end ? custom.start : new Date().toISOString().slice(0, 10)));
   return (
-    <div className="relative flex flex-wrap items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
+    <div className="relative flex min-w-0 max-w-full flex-wrap items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
       {DATE_PRESETS.map((p) => {
         const on = !custom && bucket === p.id;
         return (
@@ -284,7 +284,7 @@ export function DateFilter({
         {custom ? (custom.start === custom.end ? custom.start.slice(5) : `${custom.start.slice(5)}–${custom.end.slice(5)}`) : "Custom"}
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-30 mt-2 flex flex-col gap-2.5 rounded-xl border border-[#e5e7eb] bg-white p-3 shadow-[0_10px_30px_rgba(16,24,40,0.15)]">
+        <div className="absolute right-0 top-full z-30 mt-2 flex max-w-[calc(100vw-32px)] flex-col gap-2.5 rounded-xl border border-[#e5e7eb] bg-white p-3 shadow-[0_10px_30px_rgba(16,24,40,0.15)]">
           <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
             Single day
             <div className="flex items-end gap-2">
@@ -571,7 +571,7 @@ export function StepFunnel({
         const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
         const isLast = i === stages.length - 1;
         return (
-          <div key={s.label} className="flex flex-1 flex-col">
+          <div key={s.label} className="flex min-w-0 flex-1 flex-col">
             {/* bar zone */}
             <div className="relative flex items-end" style={{ height }}>
               <div

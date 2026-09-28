@@ -100,7 +100,7 @@ function ActionItemsView() {
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ReportTopBar
           title="Action items"
           subtitle="Follow-up tasks the AI logged for the team — what's open, what's overdue, and who's closing them."

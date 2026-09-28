@@ -800,7 +800,7 @@ function AgentReportsView() {
     const upcoming = svcMetrics.namedAppointments ?? [];
     return (
       <div className="flex min-h-screen bg-[#fafafa]">
-        <div className="flex flex-1 flex-col">
+        <div className="flex min-w-0 flex-1 flex-col">
           <ReportTopBar
             title="Agent performance"
             subtitle="Appointments and action items for this rooftop."
@@ -809,7 +809,7 @@ function AgentReportsView() {
             query={navQuery}
             back={`/reports${navQuery}`}
             right={hasTeam ? (
-              <div className="no-print flex items-center gap-3">
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
@@ -902,7 +902,7 @@ function AgentReportsView() {
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
 
         <ReportTopBar
           title="Agent performance"
@@ -913,7 +913,7 @@ function AgentReportsView() {
           back={`/reports${navQuery}`}
           right={
             hasTeam ? (
-              <div className="no-print flex items-center gap-3">
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
@@ -1001,8 +1001,10 @@ function AgentReportsView() {
               department's upsell pills removed there are two, and a hard-coded four left half the row
               empty. */}
           <div
-            className="grid grid-cols-1 gap-2.5 sm:grid-cols-2"
-            style={visibleAgents.length > 2 ? { gridTemplateColumns: `repeat(${visibleAgents.length}, minmax(0, 1fr))` } : undefined}
+            // Mobile QA 29-Sep: the inline column count applied at every width, so 3+ agents
+            // squeezed side by side on a phone. One column on phone, the count from sm up.
+            className={`grid grid-cols-1 gap-2.5 sm:grid-cols-2 ${visibleAgents.length > 2 ? "sm:[grid-template-columns:repeat(var(--agent-cols),minmax(0,1fr))]" : ""}`}
+            style={visibleAgents.length > 2 ? ({ "--agent-cols": visibleAgents.length } as React.CSSProperties) : undefined}
           >
             {visibleAgents.map((ag) => {
               const selected = ag.id === activeId;
