@@ -131,6 +131,9 @@ function ActionItemsView() {
               {serviceMetricsOn ? (
                 <div className="grid grid-cols-3 gap-4">
                   <ScoreTile label="Open now" value={svcMetrics.openNow} />
+                  {/* Past SLA is a count of the loaded rows' own isLate flag, same as the Overview table
+                      — never a separate live metric, so there is nothing that can disagree with the rows
+                      below it and no caveat is needed (checker fix, 28-Sep). */}
                   <ScoreTile label="Past SLA" value={svcMetrics.pastSla} />
                   <ScoreTile label="Cleared" value={svcMetrics.cleared} />
                 </div>

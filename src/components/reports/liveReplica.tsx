@@ -29,6 +29,7 @@ import { InterestForm } from "./upsell";
 import { CountUp, useInView } from "./anim";
 import type { CustomizeCtrl } from "./customize";
 import type { ReportVariant } from "./dateRange";
+import type { ServiceOverviewOverlay } from "@/lib/serviceMetrics";
 
 /* ── palette (exact Figma tokens for this design — intentionally not the site's #813fed accent) ── */
 const C = {
@@ -179,7 +180,52 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
   );
 }
 
-export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, variant = "old", nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; variant?: ReportVariant; nav?: HeroNav }) {
+/* RETCONVAI-5066, live-overview pass (coordinator, 28-Sep). Service + the flag on: the hero tiles read
+ * service-metrics instead of the ClickHouse fleet, same rule as everywhere else in this file — a number
+ * with no twin on ov-prod hides rather than showing a ClickHouse figure the new page can't back. Only two
+ * of the four hero tiles have a sanctioned twin: Appointments (bookedBySpyne, + the inbound/outbound
+ * split via bookingRate numerators) and Action Items (openNow only — checker fix, 28-Sep: ov-prod's
+ * Overview never renders pastSla at all, only its separate Action Items tab does, alongside a caveat
+ * about the two disagreeing; that field and caveat live on the Action Items PAGE overlay, not here). Hot
+ * Leads and "captured after-hours" have none (Classification / Contact are never called — see
+ * NO_TWIN_ON_OLD_OVERVIEW) and are dropped rather than shown from ClickHouse. */
+function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOverlay; nav?: HeroNav }) {
+  const appt = overlay.appointments;
+  const ai = overlay.actionItems;
+  const apptSplit = appt && (appt.inbound != null || appt.outbound != null)
+    ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound`
+    : "Booked by Spyne";
+  type Tile = { icon: string; chipBg: string; headline: React.ReactNode; sub: string; onClick?: () => void };
+  const maybeTiles: Array<Tile | null> = [
+    ai && { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <><CountUp value={ai.openNow} /> Action Items</>, sub: "open now", onClick: nav?.onActionItems },
+    appt && { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={appt.total} /> Appointments</>, sub: apptSplit, onClick: nav?.onAppointments },
+  ];
+  const tiles: Tile[] = maybeTiles.filter((t): t is Tile => t !== null);
+  if (tiles.length === 0) return null;
+  return (
+    <div className="flex w-full flex-wrap items-stretch overflow-hidden rounded-xl border border-[#e5e7eb] bg-white">
+      {tiles.map((t, i) => {
+        const cell = (
+          <>
+            <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg" style={{ background: t.chipBg }}>
+              <Image src={t.icon} alt="" width={18} height={18} />
+            </span>
+            <div className="flex flex-col gap-1">
+              <p className="flex items-center gap-1 text-[18px] font-bold leading-[22px] text-[#030712]">{t.headline}{t.onClick && <span className="text-[14px] text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
+              <p className="text-[12px] text-[#626f81]">{t.sub}</p>
+            </div>
+          </>
+        );
+        const base = `flex flex-1 basis-[210px] items-start gap-3 px-6 py-5 ${i > 0 ? "border-l border-[#e5e7eb]" : ""}`;
+        return t.onClick
+          ? <button key={i} onClick={t.onClick} className={`group ${base} text-left transition-colors hover:bg-[#faf8ff]`}>{cell}</button>
+          : <div key={i} className={base}>{cell}</div>;
+      })}
+    </div>
+  );
+}
+
+export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, variant = "old", nav, serviceMetricsOverlay }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; variant?: ReportVariant; nav?: HeroNav; serviceMetricsOverlay?: ServiceOverviewOverlay | null }) {
   // Speed-to-lead leads both sets and is identical in both — only tiles 2-4 differ.
   const stlTile = { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled };
   // OLD — production today. Keep this arm byte-for-byte as it shipped: it is the control the New arm is
@@ -211,7 +257,9 @@ export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads =
       </div>
       {controls && <div className="no-print flex flex-wrap items-center justify-center gap-2.5">{controls}</div>}
       {serviceMode ? (
-        <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} nav={nav} />
+        serviceMetricsOverlay
+          ? <ServiceMetricsHeroTiles overlay={serviceMetricsOverlay} nav={nav} />
+          : <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} nav={nav} />
       ) : (
         <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
           {tiles.map((t) => <HeroTile key={t.label} {...t} />)}
@@ -1100,6 +1148,88 @@ export function LiveActionItemsTable({ items, stats, onViewAll }: { items: Actio
   );
 }
 
+/* Service + flag on: openNow + the list are the sanctioned twins (coordinator, 28-Sep); no
+ * `created`/`dueToday` field exists on service-metrics, so those tabs and the Created/Due-Today counts
+ * this table shows for Sales/flag-off just don't exist here — Open and Past SLA only.
+ *
+ * Checker fix, 28-Sep: "Past SLA" here is a CLIENT-SIDE filter on the `isLate` flag each fetched row
+ * already carries — never the aggregate `pastSla` metric (which ov-prod's Overview doesn't render at
+ * all; see ServiceOverviewOverlay's doc comment). Its tab badge is the count of rows the filter actually
+ * produced (capped the same as what's shown), so the badge can never disagree with what's listed below
+ * it — unlike ov-prod's Action Items tab, this table has no "See all N" reconciliation for a live metric
+ * that can legitimately differ from a loaded-row count, so it never claims one. */
+type ServiceActionItem = { customer: string; what: string; due: string | null; isLate: boolean };
+
+/** Pure — extracted for testability (checker fix, 28-Sep). `openNow` is a real metric with a genuine
+ * Overview twin, so its badge stays the API value even though only `sampleSize` rows are listed (same
+ * "live count + short sample" convention ov-prod itself uses elsewhere). `pastSla` has none here — its
+ * badge MUST equal the rows the table actually lists, never the aggregate metric, so the two can never
+ * disagree on screen. */
+export function buildServiceActionItemsTabs(items: ServiceActionItem[], openNow: number | null | undefined, sampleSize = 5) {
+  const openRows = items.slice(0, sampleSize);
+  const pastSlaRows = items.filter((i) => i.isLate).slice(0, sampleSize);
+  return {
+    openRows,
+    pastSlaRows,
+    tabs: [
+      { key: "open" as const, label: "Open", count: openNow ?? undefined },
+      { key: "pastSla" as const, label: "Past SLA", count: pastSlaRows.length },
+    ],
+  };
+}
+
+export function LiveActionItemsTableService({ overlay, onViewAll }: { overlay: ServiceOverviewOverlay; onViewAll: () => void }) {
+  const ai = overlay.actionItems;
+  const [tab, setTab] = React.useState<"open" | "pastSla">("open");
+  const { openRows, pastSlaRows, tabs } = buildServiceActionItemsTabs(ai?.items ?? [], ai?.openNow);
+  const rows = tab === "pastSla" ? pastSlaRows : openRows;
+  return (
+    <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
+      <div className="flex min-h-[60px] w-full flex-wrap items-center justify-between gap-3 border-b border-[#e5e7eb] px-5 py-[15px]">
+        <p className="text-[14px] font-semibold uppercase text-[#030712]">📝 Action items</p>
+        <TableTabs tabs={tabs} active={tab} onPick={(k) => setTab(k as "open" | "pastSla")} />
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">No action items in this view.</p>
+      ) : (
+        <div className="w-full overflow-x-auto px-[15px]">
+          <table className="w-full min-w-[640px] border-collapse text-[14px]">
+            <thead>
+              <tr className="text-left text-[#626f81]">
+                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Customer</th>
+                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">What to do?</th>
+                <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Due Date</th>
+                <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((a, i) => (
+                <tr key={`${a.customer}-${i}`}>
+                  <td className="border-b border-[#e5e7eb] p-[15px]">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(a.customer) }}>{initials(a.customer)}</span>
+                      <span className="whitespace-nowrap text-[#030712]">{a.customer}</span>
+                    </div>
+                  </td>
+                  <td className="max-w-[320px] border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.what}</td>
+                  <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.due ? fmtWhenShort(a.due).split(" · ")[0] : ""}</td>
+                  <td className="border-b border-[#e5e7eb] p-[15px] text-center">
+                    <span className="whitespace-nowrap rounded px-[15px] py-1 text-[12px] font-medium" style={a.isLate ? { background: C.redBg, color: C.red } : { background: C.blueBg, color: C.blue }}>{a.isLate ? "Past SLA" : "Open"}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
+        <p className="text-[12px] text-[#626f81]">{ai ? `${fmtInt(ai.openNow)} open now` : ""}</p>
+        <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View All Action Items →</button>
+      </div>
+    </div>
+  );
+}
+
 /* ══════════════════════════ 6. Recent conversations table ══════════════════════════ */
 function convStatus(c: Conversation): { text: string; ok: boolean } {
   if (c.appointmentScheduled) return { text: "Appointment", ok: true };
@@ -1228,6 +1358,15 @@ export interface LiveOverviewProps {
   serviceMode: boolean; // department SKIN, from the URL serviceType scope — NOT inferred from the agent
                         // list (which is empty when the dept has no live agents), so a service rooftop
                         // with no service agents still shows the Service skin + "Get Service …" upsell.
+  /* RETCONVAI-5066, live-overview pass (coordinator, 28-Sep). Present (non-null) ONLY when
+   * NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW is 'on' AND serviceMode is true — Sales and flag-off Service
+   * pass `undefined`/`null` here and get the EXACT byte-identical rendering below (every branch on this
+   * prop has a matching `: (existing)` arm). When present, every section with no service-metrics twin
+   * (agent performance, the lead-to-sale funnel, Hot Leads, Recent Conversations, and the after-hours /
+   * Close-rate / Leads-reached / Real-conversations / Qualified / Calls / SMS / Talk-time / Hand-offs
+   * numbers inside those sections) is dropped rather than shown from the ClickHouse `fleet`/`agents`
+   * this component still receives — see serviceMetrics.ts's NO_TWIN_ON_OLD_OVERVIEW for why. */
+  serviceMetricsOverlay?: ServiceOverviewOverlay | null;
 }
 
 // The customizable sections of the Live overview, in default order. Exposed so OverviewView can build
@@ -1250,10 +1389,31 @@ export const LIVE_SECTIONS: { id: string; label: string }[] = [
 // full-width when hidden/separated — so reorder + independent hide work without breaking the layout.
 const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
 
+// Adapts a service-metrics appointment row into the shape LiveUpcomingApptsCard already knows how to
+// render, so Service + the flag on reuses that component unchanged rather than forking a new one.
+// `assisted` is always false and `how`/`status`/`intent` are neutral placeholders: the service-metrics
+// row carries none of those fields, and `assisted` specifically must never read true here — workedBySpyne
+// (AI-assisted) is HELD (see serviceMetrics.ts), so nothing sourced from this overlay may claim it.
+export function namedApptsFromServiceMetrics(items: NonNullable<ServiceOverviewOverlay["namedAppointments"]>): NamedAppt[] {
+  return items.map((it) => ({
+    customer: it.customer,
+    phone: "",
+    channel: null,
+    how: "Booked by Spyne",
+    vehicle: it.vehicle ?? "",
+    when: it.when,
+    bookedAt: null,
+    status: "scheduled",
+    intent: "",
+    assisted: false,
+    serviceType: "service",
+  }));
+}
+
 export function LiveOverview({
   account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
   onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, outcomes, headerControls, ctrl, serviceMode,
-  variant = "old",
+  variant = "old", serviceMetricsOverlay,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
@@ -1261,13 +1421,21 @@ export function LiveOverview({
   // Department skin follows the URL scope (serviceMode), so a scope with no live agents still shows the
   // right "Get {dept} {dir}" upsell — not a Sales fallback.
   const deptLabel: "Sales" | "Service" = serviceMode ? "Service" : "Sales";
+  // Non-null only for Service with the flag on (see LiveOverviewProps's doc comment) — every `svc ? … : …`
+  // branch below has a `: (existing)` arm that is exactly what shipped before this prop existed, so Sales
+  // and flag-off Service are byte-identical.
+  const svc = serviceMetricsOverlay ?? null;
 
   const nodes: Record<string, React.ReactNode> = {
-    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
+    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} serviceMetricsOverlay={svc} />,
     /* NEW: one set of numbers, three readings (Headline / Impact / Compact) — see LiveAgentPerformance.
        Upsell cards still fill a missing direction, so a rooftop running one agent keeps its "get the
-       other one" prompt instead of a half-empty row. OLD keeps the production pair. */
-    "live.agents": variant === "new" ? (
+       other one" prompt instead of a half-empty row. OLD keeps the production pair.
+       Service + the flag on: EVERY number this section shows (Close Rate, Leads Reached, Real
+       Conversations, Qualified, Calls, SMS, Talk Time, Hand-offs, and the per-agent funnel) has no
+       service-metrics twin (see NO_TWIN_ON_OLD_OVERVIEW) — the whole section hides rather than showing a
+       partial, ClickHouse-sourced card. */
+    "live.agents": svc ? false : variant === "new" ? (
       <div className="flex flex-col gap-5">
         {agents.length > 0 && <LiveAgentPerformance agents={agents} onOpenAgent={onOpenAgent} />}
         {(!inbound || !outbound) && (
@@ -1286,40 +1454,50 @@ export function LiveOverview({
     "live.funnel": (
       <div className="flex flex-col gap-3.5">
         <UnlockPotentialBanner liveCount={1} total={3} teamId={account.teamId} accountName={account.name} />
-        {/* LEAD-TO-SALE FUNNEL — dropped in the NEW layout (2026-09-24), kept in OLD so that variant still
-            matches production. In New, the hero's "Additional qualified leads" tile carries the two numbers
-            this card existed to show (qualified − appointments). */}
-        {variant === "old" && <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />}
+        {/* LEAD-TO-SALE FUNNEL — dropped in the NEW layout (2026-09-24), and for Service + the flag on
+            (no service-metrics twin: it's built from leads/conversations/qualified, all held/no-twin —
+            see NO_TWIN_ON_OLD_OVERVIEW). Kept in OLD/flag-off so that arm still matches production. */}
+        {!svc && variant === "old" && <LiveFunnelCard fleet={fleet} serviceMode={serviceMode} />}
       </div>
     ),
     // Sales-only, and only once it has something to say (the section renderer skips undefined ids).
     ...(outcomes ? { "live.outcomes": outcomes } : {}),
-    "live.hotleads": <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />,
+    // Hot Leads has no service-metrics twin (Classification stays available:false) — hidden for Service
+    // once the flag is on, rather than shown from the ClickHouse warm-leads snapshot.
+    "live.hotleads": svc ? false : <LiveHotLeadsCard items={warmLeads} onViewAll={onOpenWarmModal} />,
     /* NEW swaps the week-calendar for the forward list (see LiveUpcomingApptsCard for why). OLD keeps the
-       calendar so that arm still matches production. */
-    "live.appts": variant === "new"
-      ? <LiveUpcomingApptsCard items={namedAppts} onViewAll={onViewAppointments} />
-      : <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
-    "live.actions": <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,
-    "live.conversations": <LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} />,
+       calendar so that arm still matches production. Service + the flag on ALWAYS uses the upcoming-list
+       shape (never the week-calendar) because "the upcoming appointments list" is the one sanctioned twin
+       — fed from service-metrics' own appointment list via the shim above, not the ClickHouse namedAppts. */
+    "live.appts": svc
+      ? <LiveUpcomingApptsCard items={namedApptsFromServiceMetrics(svc.namedAppointments ?? [])} onViewAll={onViewAppointments} />
+      : variant === "new"
+        ? <LiveUpcomingApptsCard items={namedAppts} onViewAll={onViewAppointments} />
+        : <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
+    // Service + the flag on: openNow + the list are the sanctioned twins (no Created/Due-Today —
+    // service-metrics has no such fields); "Past SLA" is a client-side isLate filter, not the pastSla
+    // metric (see LiveActionItemsTableService's own doc comment) — via LiveActionItemsTableService.
+    "live.actions": svc
+      ? <LiveActionItemsTableService overlay={svc} onViewAll={onViewActionItems} />
+      : <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,
+    // Recent conversations has no service-metrics twin (no transcript/list endpoint) — hidden for Service
+    // once the flag is on.
+    "live.conversations": svc ? false : <LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} />,
   };
 
   // Apply the customize layout: chosen order (ctrl.order) minus hidden ids; default order + all shown
-  // when there's no ctrl. Unknown ids are skipped so a stale saved layout never renders a ghost.
+  // when there's no ctrl. Unknown ids are skipped so a stale saved layout never renders a ghost. A node
+  // that resolved to `false` (a whole section hiding itself — e.g. every Service+flag-on hide above) is
+  // dropped from `order` too, so PAIRABLE's side-by-side pairing (below) never leaves an empty half.
   const defaultOrder = LIVE_SECTIONS.map((s) => s.id);
-  const order = (ctrl ? ctrl.order.filter((id) => nodes[id] !== undefined) : defaultOrder).filter((id) => !ctrl?.hidden.has(id));
-  const rows: React.ReactNode[] = [];
-  for (let i = 0; i < order.length; i++) {
-    const id = order[i];
-    const next = order[i + 1];
-    const delay = `${rows.length * 70}ms`;
-    if (PAIRABLE.has(id) && next && PAIRABLE.has(next)) {
-      rows.push(<div key={id} className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: delay }}>{nodes[id]}{nodes[next]}</div>);
-      i++; // consumed the pair
-    } else {
-      rows.push(<div key={id} className="lv-rise" style={{ animationDelay: delay }}>{nodes[id]}</div>);
-    }
-  }
+  const order = computeLiveOverviewOrder(nodes, defaultOrder, ctrl);
+  const groups = groupPairedSections(order, PAIRABLE);
+  const rows: React.ReactNode[] = groups.map((group, i) => {
+    const delay = `${i * 70}ms`;
+    return group.length === 2
+      ? <div key={group[0]} className="lv-rise flex flex-col gap-5 lg:flex-row lg:items-stretch" style={{ animationDelay: delay }}>{nodes[group[0]]}{nodes[group[1]]}</div>
+      : <div key={group[0]} className="lv-rise" style={{ animationDelay: delay }}>{nodes[group[0]]}</div>;
+  });
 
   return (
     <div className="flex flex-col gap-4">
@@ -1327,4 +1505,37 @@ export function LiveOverview({
       {rows}
     </div>
   );
+}
+
+/** Pure — extracted for testability (RETCONVAI-5066 gating tests). Chosen order (ctrl.order) minus
+ * hidden ids and unknown ids; default order + all shown when there's no ctrl. An id whose node resolved
+ * to `false` (a whole section hiding itself) is ALSO dropped here — never rendered as an empty slot, and
+ * never left in the list for `groupPairedSections` to (wrongly) pair with a visible neighbor. */
+export function computeLiveOverviewOrder(
+  nodes: Record<string, React.ReactNode>,
+  defaultOrder: string[],
+  ctrl?: Pick<CustomizeCtrl, "order" | "hidden">,
+): string[] {
+  return (ctrl ? ctrl.order.filter((id) => nodes[id] !== undefined) : defaultOrder)
+    .filter((id) => !ctrl?.hidden.has(id))
+    .filter((id) => nodes[id] !== false);
+}
+
+/** Pure — extracted for testability. Walks `order` left to right and pairs two ADJACENT ids that are
+ * both in `pairable` into one group (rendered side by side); everything else is its own single-id group.
+ * Because `computeLiveOverviewOrder` already dropped every hidden (`false`-node) id, a pairable id can
+ * only ever be grouped with a neighbor that is genuinely visible — never with an empty hidden slot. */
+export function groupPairedSections(order: string[], pairable: ReadonlySet<string>): string[][] {
+  const groups: string[][] = [];
+  for (let i = 0; i < order.length; i++) {
+    const id = order[i];
+    const next = order[i + 1];
+    if (pairable.has(id) && next && pairable.has(next)) {
+      groups.push([id, next]);
+      i++; // consumed the pair
+    } else {
+      groups.push([id]);
+    }
+  }
+  return groups;
 }

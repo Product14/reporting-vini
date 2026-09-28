@@ -289,15 +289,15 @@ function mapActionItemItems(ai: ActionItemMetricsResponse | null): Array<{ custo
 
 /* ── OVERVIEW ──────────────────────────────────────────────────────────────────────────────────────── */
 
-// Every field here has a real twin on ov-prod's Overview today. Nothing about Contact (leads,
-// conversations, calls & texts, talk time, after-hours) belongs on this type — see NO_TWIN_ON_OLD_OVERVIEW.
+// Every field here has a real twin on ov-prod today. Nothing about Contact (leads, conversations,
+// calls & texts, talk time, after-hours) belongs on this type — see NO_TWIN_ON_OLD_OVERVIEW.
 export interface ServiceOverviewOverlay {
   loading: boolean;
   appointments: { total: number; inbound: number | null; outbound: number | null; assisted: number | null } | null;
   namedAppointments: Array<{ customer: string; vehicle?: string; when: string | null }> | null;
-  // openNow only — ov-prod's Overview ("Waiting on your team") never renders `cleared` or `pastSla`,
-  // only the live open count + the waiting-tasks list. `cleared` has a twin on the Action Items PAGE
-  // (see ServiceActionItemsPageOverlay below), just not here.
+  // openNow + the list only. Checker fix, 28-Sep: pastSla was added here in the live-overview pass, but
+  // ov-prod's Overview (model.ts / service-overview.tsx) never renders `pastSla` at all — that stays on
+  // ServiceActionItemsPageOverlay below, derived from rows (isLate), never a separate metric.
   actionItems: { openNow: number; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
 }
 
@@ -322,6 +322,15 @@ export async function loadServiceOverviewOverlay(ctx: Ctx, w: ServiceMetricsWind
     namedAppointments: (appt?.appointments?.items?.length ?? 0) > 0 ? mapAppointmentItems(appt) : null,
     actionItems: openNow !== null ? { openNow, items: mapActionItemItems(ai) } : null,
   };
+}
+
+/** Pure — extracted for testability (checker fix, 28-Sep, /reports/agents ~246). A page can be opened
+ * with a top-level `dept` of "all" (unlike Overview, which is host-locked to one department) while the
+ * AGENT actually shown/selected is Service — that combination must still gate, because the numbers on
+ * screen are Service data regardless of what the page-level dept scope says. Shared here rather than
+ * inlined per call site so every page uses the identical rule. */
+export function shouldUseServiceMetrics(params: { flagOn: boolean; deptIsService: boolean; agentIsService: boolean; hasTeam: boolean }): boolean {
+  return params.flagOn && (params.deptIsService || params.agentIsService) && params.hasTeam;
 }
 
 /* Map this app's Bucket (+ optional custom range) onto the service-metrics API's own window vocabulary
@@ -418,6 +427,10 @@ export interface ServiceActionItemsPageOverlay {
   // scoreboard stat and tab this app shows for Sales has no Service twin and is dropped entirely.
   openNow: number | null;
   cleared: number | null;
+  // Checker fix, 28-Sep: NEVER read from `metrics.pastSla`. ov-prod's own Action Items page does not
+  // read that field for its "Overdue" band either (re-checked vini-action-items-queue.tsx /
+  // vini-action-items-data.ts) — it counts past-SLA from the loaded rows' own `isLate`/due-date state,
+  // same as this app's LiveActionItemsTableService. Derived below from `items`, never the raw metric.
   pastSla: number | null;
   items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> | null;
 }
@@ -427,12 +440,14 @@ const ACTION_ITEMS_PAGE_EMPTY: ServiceActionItemsPageOverlay = { loading: false,
 export async function loadServiceActionItemsPageOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceActionItemsPageOverlay> {
   const ai = await fetchActionItem(ctx, actionItemParams(w, 200));
   const windowFrom = ai?.window.from ?? null;
+  const items = (ai?.actionItems?.items?.length ?? 0) > 0 ? mapActionItemItems(ai) : null;
   return {
     loading: false,
     openNow: metricValue(ai?.metrics.openNow, windowFrom),
     cleared: metricValue(ai?.metrics.cleared, windowFrom),
-    pastSla: metricValue(ai?.metrics.pastSla, windowFrom),
-    items: (ai?.actionItems?.items?.length ?? 0) > 0 ? mapActionItemItems(ai) : null,
+    // Rows-based count, exactly like LiveActionItemsTableService's "Past SLA" tab — never metrics.pastSla.
+    pastSla: items ? items.filter((it) => it.isLate).length : null,
+    items,
   };
 }
 
