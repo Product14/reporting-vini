@@ -44,6 +44,7 @@ import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, CANONICAL_DEFINITION_ROWS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
+import { useServiceOverviewOverlay } from "@/lib/serviceMetrics";
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
 const MISSED_LABELS: Record<string, string> = {
@@ -230,6 +231,31 @@ function AgentReportsView() {
   // Drives the swap below: when the scorer has this agent's window, its flow REPLACES the older
   // intent/outcome table; otherwise that table stays as the fallback.
   const hasOutcomes = !!outcomes && outcomes.scored > 0;
+
+  /* RETCONVAI-5066 (coordinator, 28-Sep): the console's Service "Reports" tab iframes THIS route
+   * (see the comment above on view2 — "The console's Reports tab iframes THIS route"), so every number
+   * on this whole per-agent drill-down is dealer-facing and in scope for the same rule as Overview: a
+   * service-metrics twin or hidden. The page's own report library ships nothing new yet, so the only
+   * twins available today are the same three already used on Overview — Appointments (bookedBySpyne +
+   * bookingRate split), Action Items (openNow/pastSla + list) and the upcoming-appointments list — none
+   * of the per-agent funnel/calls/conversations/outcomes/highlights/missed/library numbers below have one.
+   * Called unconditionally (rules of hooks) even though the early return below is the only path that
+   * reads it — Sales and flag-off Service never construct this fetch's request (enabled: false → EMPTY,
+   * no network call, see serviceMetrics.ts). */
+  const serviceMetricsFlagOn = process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
+  const serviceMetricsOn = serviceMetricsFlagOn && dept === "service" && hasTeam;
+  const svcMetrics = useServiceOverviewOverlay({
+    enabled: serviceMetricsOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: feed?.start,
+    rangeEndExclusive: feed?.end,
+    timezone: feed?.timezone ?? undefined,
+  });
   /* The rebuilt page is for the two SALES agents only. Every restructured block below is gated on this,
    * so a Service agent renders exactly the page it always did — no reordering, no removed cards. */
   const isSales = agentSvc === "sales";
@@ -753,6 +779,114 @@ function AgentReportsView() {
       subtitle: `${r.summary.person || a.name} · ${a.dept} · ${a.dir} · ${periodLabel}${feed?.timezone ? ` · times in ${tzShortLabel(feed.timezone)}` : ""}`,
     });
   };
+
+  // RETCONVAI-5066 (coordinator, 28-Sep): Service + the flag on gets a SEPARATE, minimal render — not a
+  // sprinkling of hides through the 1000+ lines below — so this stays provably byte-identical for Sales
+  // and flag-off Service (the huge return below is completely untouched, never re-entered on this path).
+  // Only the three sanctioned twins render; every per-agent/funnel/outcomes/library number this page
+  // otherwise shows has none (see the comment above svcMetrics for the full list) and simply isn't built.
+  if (serviceMetricsOn) {
+    const appt = svcMetrics.appointments;
+    const ai = svcMetrics.actionItems;
+    const upcoming = svcMetrics.namedAppointments ?? [];
+    return (
+      <div className="flex min-h-screen bg-[#fafafa]">
+        <div className="flex flex-1 flex-col">
+          <ReportTopBar
+            title="Agent performance"
+            subtitle="Appointments and action items — Service, this rooftop."
+            active="agents"
+            teamId={teamId}
+            query={navQuery}
+            back={`/reports${navQuery}`}
+            right={hasTeam ? (
+              <div className="no-print flex items-center gap-3">
+                <DateFilter
+                  bucket={bucket}
+                  custom={custom}
+                  onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
+                  onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "agents", range: "custom", team_id: teamId }); }}
+                />
+              </div>
+            ) : undefined}
+          />
+          <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Card title="Appointments" sub="AI-booked, this window">
+                {appt ? (
+                  <div className="flex flex-col gap-1 px-1 py-1">
+                    <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(appt.total)}</p>
+                    <p className="text-[12px] text-[#6b7280]">{appt.inbound != null || appt.outbound != null ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound` : "AI-booked meetings"}</p>
+                  </div>
+                ) : (
+                  <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No appointment data for {periodLabel} yet.</p>
+                )}
+              </Card>
+              <Card title="Action items" sub="Waiting on your team — live count">
+                {ai ? (
+                  <div className="flex flex-col gap-1 px-1 py-1">
+                    <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(ai.openNow)}</p>
+                    <p className="text-[12px] text-[#6b7280]">{ai.pastSla != null ? `${fmtInt(ai.pastSla)} past SLA` : "open now"}</p>
+                  </div>
+                ) : (
+                  <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No action-item data for {periodLabel} yet.</p>
+                )}
+              </Card>
+            </div>
+            <div className="flex flex-col gap-3.5">
+              <SectionLabel>Upcoming appointments</SectionLabel>
+              <Card title="" pad={upcoming.length === 0}>
+                {upcoming.length > 0 ? (
+                  <div className="flex flex-col gap-2 px-4 py-3">
+                    {upcoming.map((it, i) => (
+                      <div key={`${it.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f0f0f0] pb-2 last:border-0 last:pb-0">
+                        <div className="min-w-0">
+                          <span className="font-semibold text-[#111]">{it.customer}</span>
+                          {it.vehicle && <span className="ml-2 text-[11px] text-[#6b7280]">{it.vehicle}</span>}
+                        </div>
+                        <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{it.when ? fmtWhenShort(it.when) : ""}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState icon="📅" title="No upcoming appointments" body="Ones your AI books from here will appear at the top." />
+                )}
+              </Card>
+            </div>
+            {ai && ai.items.length > 0 && (
+              <div className="flex flex-col gap-3.5">
+                <SectionLabel>Waiting on your team</SectionLabel>
+                <Card title="" pad={false}>
+                  <div className="overflow-x-auto px-[15px]">
+                    <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
+                      <thead>
+                        <tr>
+                          <Th>Customer</Th>
+                          <Th>What to do</Th>
+                          <Th>Due</Th>
+                          <Th>Status</Th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ai.items.map((it, i) => (
+                          <tr key={`${it.customer}-${i}`} className="border-t border-[#f0f0f0]">
+                            <Td><span className="font-semibold text-[#111]">{it.customer}</span></Td>
+                            <Td><span className="text-[#374151]">{it.what}</span></Td>
+                            <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due) : "—"}</span></Td>
+                            <Td>{it.isLate ? <span className="font-semibold text-[#dc2626]">Overdue</span> : <span className="font-semibold text-[#2563eb]">Open</span>}</Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              </div>
+            )}
+          </main>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">

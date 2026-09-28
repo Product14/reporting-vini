@@ -731,7 +731,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
               {stage === "onboarding" ? (
                 <OnboardingStub onGoLive={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
               ) : stage === "training" ? (
-                <TrainingOverview account={account} overrides={directionOverrides} earlyStats={trainingEarly} fleet={fleet} aiStats={aiStats?.stats ?? null} onGoLive={() => { setManualStage("live"); window.scrollTo({ top: 0, behavior: "smooth" }); }} onOnboard={() => { setManualStage("onboarding"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+                <TrainingOverview account={account} overrides={directionOverrides} earlyStats={trainingEarly} fleet={fleet} aiStats={aiStats?.stats ?? null} serviceMetricsOn={serviceMetricsOn} onGoLive={() => { setManualStage("live"); window.scrollTo({ top: 0, behavior: "smooth" }); }} onOnboard={() => { setManualStage("onboarding"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
               ) : (
                 <LiveOverview
                   account={account}
@@ -820,14 +820,19 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           <p className="text-[12.5px] text-[#6b7280]">No appointment details for {periodLabel} yet — the counts above are correct; the named list syncs shortly.</p>
         )}
       </Modal>
-      {/* Warm-leads "view all" — click a lead to review its conversation (calls + SMS) in the drawer. */}
-      <WarmLeadsModal
-        open={warmModalOpen}
-        onClose={() => setWarmModalOpen(false)}
-        items={warmLeads}
-        agentNames={agentNames}
-        loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken, spyneEnv })}
-      />
+      {/* Warm-leads "view all" — click a lead to review its conversation (calls + SMS) in the drawer.
+          No service-metrics twin (Classification unavailable), and Hot Leads has no trigger left once the
+          flag is on for Service (its card is hidden) — so this isn't just unreachable, it's not mounted
+          at all, and real ClickHouse warmLeads never even reaches it as a prop. */}
+      {!serviceMetricsOn && (
+        <WarmLeadsModal
+          open={warmModalOpen}
+          onClose={() => setWarmModalOpen(false)}
+          items={warmLeads}
+          agentNames={agentNames}
+          loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken, spyneEnv })}
+        />
+      )}
       {/* Customize layout — hide/reorder sections (opened from the header). Two modals: `ctrl` for the
           legacy layout, `liveCtrl` for the new Live overview. Each renders only when ITS editing is on. */}
       <CustomizeModal ctrl={ctrl} groups={customizeGroups} accountLabel={account.name} />

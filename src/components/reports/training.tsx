@@ -239,7 +239,7 @@ function AgentNotLiveCard({ direction, status, importProgress = 40, delay, onAct
   );
 }
 
-export function TrainingOverview({ account, overrides, earlyStats, onGoLive, onOnboard, fleet, aiStats }: { account: Account; overrides?: Partial<Record<Direction, DirectionStatus>>; earlyStats?: EarlyStats | null; onGoLive?: () => void; onOnboard?: () => void; fleet?: FleetLive; aiStats?: ActionItemStats | null }) {
+export function TrainingOverview({ account, overrides, earlyStats, onGoLive, onOnboard, fleet, aiStats, serviceMetricsOn }: { account: Account; overrides?: Partial<Record<Direction, DirectionStatus>>; earlyStats?: EarlyStats | null; onGoLive?: () => void; onOnboard?: () => void; fleet?: FleetLive; aiStats?: ActionItemStats | null; serviceMetricsOn?: boolean }) {
   const directions: Direction[] = ["Inbound", "Outbound"];
   return (
     <div className="flex flex-col gap-9">
@@ -278,8 +278,14 @@ export function TrainingOverview({ account, overrides, earlyStats, onGoLive, onO
       </div>
 
       {/* THE VALUE STORY — the three flows (after-hours running + goal line, overflow & all-leads to come).
-          Moved here from Live: this is the pitch the dealer sees while calibrating. */}
-      {fleet && (
+          Moved here from Live: this is the pitch the dealer sees while calibrating.
+          RETCONVAI-5066 (coordinator, 28-Sep): Service + the flag on hides this entirely — every number
+          in it (after-hours recovered, real conversations, coverage %, response time, follow-ups) has no
+          service-metrics twin (see serviceMetrics.ts's NO_TWIN_ON_OLD_OVERVIEW); showing only the one
+          field that DOES have a twin (appointments) out of context of this card's "after-hours recovered"
+          framing would itself be misleading, so the whole card drops rather than showing a partial,
+          ClickHouse-sourced pitch. */}
+      {fleet && !serviceMetricsOn && (
         <div className="tr-rise" style={{ animationDelay: "220ms" }}>
           <ImpactStory fleet={fleet} aiStats={aiStats ?? null} onViewAfterHours={() => {}} onBackToTraining={() => {}} mode="training" />
         </div>
