@@ -289,16 +289,18 @@ function mapActionItemItems(ai: ActionItemMetricsResponse | null): Array<{ custo
 
 /* ── OVERVIEW ──────────────────────────────────────────────────────────────────────────────────────── */
 
-// Every field here has a real twin on ov-prod's Overview today. Nothing about Contact (leads,
-// conversations, calls & texts, talk time, after-hours) belongs on this type — see NO_TWIN_ON_OLD_OVERVIEW.
+// Every field here has a real twin on ov-prod today. Nothing about Contact (leads, conversations,
+// calls & texts, talk time, after-hours) belongs on this type — see NO_TWIN_ON_OLD_OVERVIEW.
 export interface ServiceOverviewOverlay {
   loading: boolean;
   appointments: { total: number; inbound: number | null; outbound: number | null; assisted: number | null } | null;
   namedAppointments: Array<{ customer: string; vehicle?: string; when: string | null }> | null;
-  // openNow only — ov-prod's Overview ("Waiting on your team") never renders `cleared` or `pastSla`,
-  // only the live open count + the waiting-tasks list. `cleared` has a twin on the Action Items PAGE
-  // (see ServiceActionItemsPageOverlay below), just not here.
-  actionItems: { openNow: number; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
+  // openNow always; pastSla tags along when available (coordinator, 28-Sep RETCONVAI-5066 live-overview
+  // pass: openNow/pastSla + the list are the sanctioned twins for the LIVE Overview's action-items card
+  // and hero tile — ov-prod's static Overview page itself only renders openNow + the list, so `cleared`
+  // still has no home here; that stays on the Action Items PAGE overlay below). `pastSla` is a genuine
+  // available metric when present, never a guess, so a real 0 is shown as 0, not hidden.
+  actionItems: { openNow: number; pastSla: number | null; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
 }
 
 const OVERVIEW_EMPTY: ServiceOverviewOverlay = { loading: false, appointments: null, namedAppointments: null, actionItems: null };
@@ -315,12 +317,13 @@ export async function loadServiceOverviewOverlay(ctx: Ctx, w: ServiceMetricsWind
   const bookInbound = rateNumerator(appt?.metrics.bookingRate.inbound);
   const bookOutbound = rateNumerator(appt?.metrics.bookingRate.outbound);
   const openNow = metricValue(ai?.metrics.openNow, windowFrom);
+  const pastSla = metricValue(ai?.metrics.pastSla, windowFrom);
 
   return {
     loading: false,
     appointments: booked !== null ? { total: booked, inbound: bookInbound, outbound: bookOutbound, assisted: worked } : null,
     namedAppointments: (appt?.appointments?.items?.length ?? 0) > 0 ? mapAppointmentItems(appt) : null,
-    actionItems: openNow !== null ? { openNow, items: mapActionItemItems(ai) } : null,
+    actionItems: openNow !== null ? { openNow, pastSla, items: mapActionItemItems(ai) } : null,
   };
 }
 

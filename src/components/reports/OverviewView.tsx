@@ -739,6 +739,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   agents={ranked}
                   serviceMode={dept === "service"}
                   variant={variant}
+                  serviceMetricsOverlay={serviceMetricsOn ? svcMetrics : null}
                   warmLeads={warmLeads}
                   namedAppts={namedAppts}
                   aiStats={aiStats}
