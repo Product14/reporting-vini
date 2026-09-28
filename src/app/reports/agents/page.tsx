@@ -247,7 +247,11 @@ function AgentReportsView() {
    * route can be opened with dept="all" (unlike Overview, which is host-locked to one department) — a
    * dealer viewing the Service Inbound/Outbound pill with dept=all must still get the gated render, not
    * the ClickHouse one, because `a`/`m`/`r` below are Service data regardless of what `dept` says. */
-  const serviceMetricsFlagOn = process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
+  // Sumit, 28-Sep: the flag-on Service render below replaced the whole report with a summary that has no
+  // Download menu and no report library, and clients escalated. Reports stays on the full report (its
+  // exports included) until a service-metrics version carries the same downloads. Overview is unaffected.
+  const REPORTS_ON_SERVICE_METRICS = false;
+  const serviceMetricsFlagOn = REPORTS_ON_SERVICE_METRICS && process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
   const serviceMetricsOn = shouldUseServiceMetrics({ flagOn: serviceMetricsFlagOn, deptIsService: dept === "service", agentIsService: agentSvc === "service", hasTeam });
   const svcMetrics = useServiceOverviewOverlay({
     enabled: serviceMetricsOn,
