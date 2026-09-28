@@ -799,7 +799,7 @@ function AgentReportsView() {
         <div className="flex flex-1 flex-col">
           <ReportTopBar
             title="Agent performance"
-            subtitle="Appointments and action items — Service, this rooftop."
+            subtitle="Appointments and action items for this rooftop."
             active="agents"
             teamId={teamId}
             query={navQuery}
@@ -817,11 +817,11 @@ function AgentReportsView() {
           />
           <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Card title="Appointments" sub="AI-booked, this window">
+              <Card title="Appointments" sub="Booked by Spyne, this window">
                 {appt ? (
                   <div className="flex flex-col gap-1 px-1 py-1">
                     <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(appt.total)}</p>
-                    <p className="text-[12px] text-[#6b7280]">{appt.inbound != null || appt.outbound != null ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound` : "AI-booked meetings"}</p>
+                    <p className="text-[12px] text-[#6b7280]">{appt.inbound != null || appt.outbound != null ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound` : "Booked by Spyne"}</p>
                   </div>
                 ) : (
                   <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No appointment data for {periodLabel} yet.</p>
@@ -830,7 +830,7 @@ function AgentReportsView() {
               {/* openNow only — ov-prod's Overview never renders pastSla (it's shown on ov-prod's separate
                   Action Items tab, with its own window-vs-live caveat; this route mirrors Overview's
                   twins only, per the coordinator's own scope for this page). */}
-              <Card title="Action items" sub="Waiting on your team — live count">
+              <Card title="Action items" sub="Waiting on your team, live count">
                 {ai ? (
                   <div className="flex flex-col gap-1 px-1 py-1">
                     <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(ai.openNow)}</p>
@@ -857,7 +857,7 @@ function AgentReportsView() {
                     ))}
                   </div>
                 ) : (
-                  <EmptyState icon="📅" title="No upcoming appointments" body="Ones your AI books from here will appear at the top." />
+                  <EmptyState icon="📅" title="No upcoming appointments" body="New bookings from Spyne show up here." />
                 )}
               </Card>
             </div>
@@ -880,7 +880,7 @@ function AgentReportsView() {
                           <tr key={`${it.customer}-${i}`} className="border-t border-[#f0f0f0]">
                             <Td><span className="font-semibold text-[#111]">{it.customer}</span></Td>
                             <Td><span className="text-[#374151]">{it.what}</span></Td>
-                            <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due) : "—"}</span></Td>
+                            <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due) : ""}</span></Td>
                             <Td>{it.isLate ? <span className="font-semibold text-[#dc2626]">Overdue</span> : <span className="font-semibold text-[#2563eb]">Open</span>}</Td>
                           </tr>
                         ))}

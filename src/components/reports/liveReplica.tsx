@@ -194,7 +194,7 @@ function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOve
   const ai = overlay.actionItems;
   const apptSplit = appt && (appt.inbound != null || appt.outbound != null)
     ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound`
-    : "AI-booked meetings";
+    : "Booked by Spyne";
   type Tile = { icon: string; chipBg: string; headline: React.ReactNode; sub: string; onClick?: () => void };
   const maybeTiles: Array<Tile | null> = [
     ai && { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <><CountUp value={ai.openNow} /> Action Items</>, sub: "open now", onClick: nav?.onActionItems },
@@ -1212,7 +1212,7 @@ export function LiveActionItemsTableService({ overlay, onViewAll }: { overlay: S
                     </div>
                   </td>
                   <td className="max-w-[320px] border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.what}</td>
-                  <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.due ? fmtWhenShort(a.due).split(" · ")[0] : "—"}</td>
+                  <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{a.due ? fmtWhenShort(a.due).split(" · ")[0] : ""}</td>
                   <td className="border-b border-[#e5e7eb] p-[15px] text-center">
                     <span className="whitespace-nowrap rounded px-[15px] py-1 text-[12px] font-medium" style={a.isLate ? { background: C.redBg, color: C.red } : { background: C.blueBg, color: C.blue }}>{a.isLate ? "Past SLA" : "Open"}</span>
                   </td>
@@ -1223,7 +1223,7 @@ export function LiveActionItemsTableService({ overlay, onViewAll }: { overlay: S
         </div>
       )}
       <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
-        <p className="text-[12px] text-[#626f81]">{ai ? `${fmtInt(ai.openNow)} open now` : "—"}</p>
+        <p className="text-[12px] text-[#626f81]">{ai ? `${fmtInt(ai.openNow)} open now` : ""}</p>
         <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View All Action Items →</button>
       </div>
     </div>
@@ -1399,7 +1399,7 @@ export function namedApptsFromServiceMetrics(items: NonNullable<ServiceOverviewO
     customer: it.customer,
     phone: "",
     channel: null,
-    how: "AI-booked",
+    how: "Booked by Spyne",
     vehicle: it.vehicle ?? "",
     when: it.when,
     bookedAt: null,
