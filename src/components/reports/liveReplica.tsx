@@ -247,13 +247,13 @@ export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads =
   const tiles = variant === "new" ? newTiles : oldTiles;
   return (
     <section
-      className="flex flex-col items-center justify-center gap-6 rounded-lg border border-[#e5e7eb] px-10 py-6"
+      className="flex flex-col items-center justify-center gap-6 rounded-lg border border-[#e5e7eb] px-4 py-6 sm:px-10"
       style={{ backgroundImage: "linear-gradient(90deg, rgba(91,109,246,0.1) 1.27%, rgba(127,106,242,0.1) 23.38%, rgba(182,81,215,0.1) 66.65%, rgba(232,62,84,0.1) 85.82%, rgba(237,137,57,0.1) 112.66%), linear-gradient(90deg, #fff, #fff)" }}
     >
       <div className="flex flex-col items-center gap-1.5">
         <Image src="/live-overview/icon-sparkle.svg" alt="" width={18} height={18} />
         <p className="text-[14px] text-[#030712]">{greeting()}</p>
-        <p className="text-[22px] font-bold tracking-[-0.01em] text-[#030712]">{serviceMode ? "Here’s what your Service AI agents handled" : "Here’s what your sales AI handled"}</p>
+        <p className="text-center text-[18px] font-bold tracking-[-0.01em] text-[#030712] sm:text-[22px]">{serviceMode ? "Here’s what your Service AI agents handled" : "Here’s what your sales AI handled"}</p>
       </div>
       {controls && <div className="no-print flex flex-wrap items-center justify-center gap-2.5">{controls}</div>}
       {serviceMode ? (
@@ -731,8 +731,8 @@ export function LiveAgentPerformance({ agents, onOpenAgent }: { agents: AgentDat
 function FunnelCell({ label, value, delta, last, note }: { label: string; value: number; delta: number | null; last?: boolean; note?: string }) {
   const up = (delta ?? 0) >= 0;
   return (
-    <div className={`flex flex-1 basis-0 flex-col items-start gap-2.5 px-4 py-2 ${last ? "" : "border-r border-[#e5e7eb]"}`}>
-      <p className="text-[14px] font-medium text-[#626f81]">{label}</p>
+    <div className={`flex min-w-0 flex-1 basis-0 flex-col items-start gap-2.5 px-3 py-2 sm:px-4 ${last ? "" : "sm:border-r sm:border-[#e5e7eb]"}`}>
+      <p className="text-[13px] font-medium text-[#626f81] sm:text-[14px]">{label}</p>
       <div className="flex w-full items-center justify-between">
         <p className="text-[24px] font-semibold leading-8 text-[#030712]">{fmtInt(value)}</p>
         {delta !== null && (
@@ -757,7 +757,8 @@ export function LiveFunnelCard({ fleet, serviceMode }: { fleet: FleetLive; servi
     <div className="flex w-full flex-col items-start overflow-hidden rounded-[10px] border border-[#e5e7eb] bg-white p-5">
       <div className="flex w-full flex-col items-start gap-[15px]">
         <p className="text-[12px] font-semibold uppercase text-[#030712]">📊 {serviceMode ? "Lead-to-service funnel" : "Lead-to-sale funnel"}</p>
-        <div className="flex w-full items-start">
+        {/* Mobile QA 29-Sep: four cells in one row clipped "Leads touched" on a phone. 2x2 below sm. */}
+        <div className="grid w-full grid-cols-2 gap-y-3 sm:flex sm:items-start">
           <FunnelCell label="Leads touched" value={leads.value} delta={fleet.deltas.leads} />
           <FunnelCell label="Real Conversations" value={conv.value} delta={fleet.deltas.conversations} />
           <FunnelCell label="Qualified Leads" value={qual.value} delta={fleet.deltas.qualified} />

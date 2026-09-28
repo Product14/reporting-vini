@@ -659,7 +659,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // Live stage these render INSIDE the hero (below "…what your sales AI handled"), so the top bar is
   // dropped entirely; on the production report they stay in the top bar.
   const liveControls = hasTeam ? (
-    <div className="no-print flex items-center gap-3">
+    <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
       {liveReady && <CustomizeToggle ctrl={ctrl} />}
       {showPreview && stage === "live" && <CustomizeToggle ctrl={liveCtrl} />}
       <DateFilter
@@ -689,7 +689,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
 
         {!hideTopBar && (
         <ReportTopBar

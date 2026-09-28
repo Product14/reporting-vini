@@ -63,7 +63,7 @@ function CustomersView() {
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ReportTopBar
           title="Customers"
           subtitle="Your lead book — who the AI is working, their CRM status, and who's sold."

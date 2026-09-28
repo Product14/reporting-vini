@@ -173,7 +173,7 @@ function ReportingView() {
 
   return (
     <div className="flex min-h-screen bg-white">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ReportTopBar
           title="Reporting"
           subtitle="A one-page scorecard for this rooftop — print it or save as PDF to share."
@@ -182,7 +182,7 @@ function ReportingView() {
           query={navQuery}
           right={
             teamId ? (
-              <div className="no-print flex items-center gap-3">
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
