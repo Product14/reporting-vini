@@ -95,6 +95,9 @@ export interface AppointmentMetricsResponse {
     // response may not send it at all, which must read exactly like `available: false`.
     workedBySpyne?: ServiceMetric;
     bookingRate: DirectionSplit<ServiceMetricRate>;
+    // Bookings made by text. Texting is Service Outbound only today (Sumit, 28-Sep), so these belong
+    // to the outbound split; the new view does the same (TEXT_BOOKINGS_DIRECTION = 'outbound').
+    bookedByText?: ServiceMetric;
   };
   appointments?: { items: AppointmentListItem[]; total: number; nextCursor?: string | null };
 }
@@ -351,7 +354,12 @@ export async function loadServiceOverviewOverlay(ctx: Ctx, w: ServiceMetricsWind
   const booked = metricValue(appt?.metrics.bookedBySpyne, windowFrom);
   const worked = workedBySpyneValue(appt?.metrics.workedBySpyne, windowFrom);
   const bookInbound = rateNumerator(appt?.metrics.bookingRate.inbound);
-  const bookOutbound = rateNumerator(appt?.metrics.bookingRate.outbound);
+  // Outbound = outbound call bookings + text bookings, so inbound + outbound adds up to the headline
+  // (Honda DTLA 30d, 28-Sep: 88 = 87 inbound + 1 by text, which read "0 outbound" before). A text
+  // booking still counts when the outbound call rate is unavailable (no outbound calls).
+  const outboundCalls = rateNumerator(appt?.metrics.bookingRate.outbound);
+  const bookedText = metricValue(appt?.metrics.bookedByText, windowFrom);
+  const bookOutbound = outboundCalls === null && (bookedText ?? 0) === 0 ? outboundCalls : (outboundCalls ?? 0) + (bookedText ?? 0);
   const openNow = metricValue(ai?.metrics.openNow, windowFrom);
   const pastSla = metricValue(ai?.metrics.pastSla, windowFrom);
 
