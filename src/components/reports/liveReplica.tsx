@@ -184,8 +184,10 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
  * service-metrics instead of the ClickHouse fleet, same rule as everywhere else in this file — a number
  * with no twin on ov-prod hides rather than showing a ClickHouse figure the new page can't back. Only two
  * of the four hero tiles have a sanctioned twin: Appointments (bookedBySpyne, + the inbound/outbound
- * split via bookingRate numerators) and Action Items (openNow, + pastSla when available). Hot Leads and
- * "captured after-hours" have none (Classification / Contact are never called — see
+ * split via bookingRate numerators) and Action Items (openNow only — checker fix, 28-Sep: ov-prod's
+ * Overview never renders pastSla at all, only its separate Action Items tab does, alongside a caveat
+ * about the two disagreeing; that field and caveat live on the Action Items PAGE overlay, not here). Hot
+ * Leads and "captured after-hours" have none (Classification / Contact are never called — see
  * NO_TWIN_ON_OLD_OVERVIEW) and are dropped rather than shown from ClickHouse. */
 function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOverlay; nav?: HeroNav }) {
   const appt = overlay.appointments;
@@ -195,7 +197,7 @@ function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOve
     : "AI-booked meetings";
   type Tile = { icon: string; chipBg: string; headline: React.ReactNode; sub: string; onClick?: () => void };
   const maybeTiles: Array<Tile | null> = [
-    ai && { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <><CountUp value={ai.openNow} /> Action Items</>, sub: ai.pastSla != null ? `${fmtInt(ai.pastSla)} past SLA` : "open now", onClick: nav?.onActionItems },
+    ai && { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <><CountUp value={ai.openNow} /> Action Items</>, sub: "open now", onClick: nav?.onActionItems },
     appt && { icon: "/live-overview/icon-appointments.svg", chipBg: "#e8f0ff", headline: <><CountUp value={appt.total} /> Appointments</>, sub: apptSplit, onClick: nav?.onAppointments },
   ];
   const tiles: Tile[] = maybeTiles.filter((t): t is Tile => t !== null);
@@ -1146,18 +1148,41 @@ export function LiveActionItemsTable({ items, stats, onViewAll }: { items: Actio
   );
 }
 
-/* Service + flag on: openNow/pastSla + the list are the sanctioned twins (coordinator, 28-Sep); no
+/* Service + flag on: openNow + the list are the sanctioned twins (coordinator, 28-Sep); no
  * `created`/`dueToday` field exists on service-metrics, so those tabs and the Created/Due-Today counts
- * this table shows for Sales/flag-off just don't exist here — Open and Past SLA only. */
+ * this table shows for Sales/flag-off just don't exist here — Open and Past SLA only.
+ *
+ * Checker fix, 28-Sep: "Past SLA" here is a CLIENT-SIDE filter on the `isLate` flag each fetched row
+ * already carries — never the aggregate `pastSla` metric (which ov-prod's Overview doesn't render at
+ * all; see ServiceOverviewOverlay's doc comment). Its tab badge is the count of rows the filter actually
+ * produced (capped the same as what's shown), so the badge can never disagree with what's listed below
+ * it — unlike ov-prod's Action Items tab, this table has no "See all N" reconciliation for a live metric
+ * that can legitimately differ from a loaded-row count, so it never claims one. */
+type ServiceActionItem = { customer: string; what: string; due: string | null; isLate: boolean };
+
+/** Pure — extracted for testability (checker fix, 28-Sep). `openNow` is a real metric with a genuine
+ * Overview twin, so its badge stays the API value even though only `sampleSize` rows are listed (same
+ * "live count + short sample" convention ov-prod itself uses elsewhere). `pastSla` has none here — its
+ * badge MUST equal the rows the table actually lists, never the aggregate metric, so the two can never
+ * disagree on screen. */
+export function buildServiceActionItemsTabs(items: ServiceActionItem[], openNow: number | null | undefined, sampleSize = 5) {
+  const openRows = items.slice(0, sampleSize);
+  const pastSlaRows = items.filter((i) => i.isLate).slice(0, sampleSize);
+  return {
+    openRows,
+    pastSlaRows,
+    tabs: [
+      { key: "open" as const, label: "Open", count: openNow ?? undefined },
+      { key: "pastSla" as const, label: "Past SLA", count: pastSlaRows.length },
+    ],
+  };
+}
+
 export function LiveActionItemsTableService({ overlay, onViewAll }: { overlay: ServiceOverviewOverlay; onViewAll: () => void }) {
   const ai = overlay.actionItems;
   const [tab, setTab] = React.useState<"open" | "pastSla">("open");
-  const items = ai?.items ?? [];
-  const rows = (tab === "pastSla" ? items.filter((i) => i.isLate) : items).slice(0, 5);
-  const tabs = [
-    { key: "open", label: "Open", count: ai?.openNow },
-    { key: "pastSla", label: "Past SLA", count: ai?.pastSla ?? undefined },
-  ];
+  const { openRows, pastSlaRows, tabs } = buildServiceActionItemsTabs(ai?.items ?? [], ai?.openNow);
+  const rows = tab === "pastSla" ? pastSlaRows : openRows;
   return (
     <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
       <div className="flex min-h-[60px] w-full flex-wrap items-center justify-between gap-3 border-b border-[#e5e7eb] px-5 py-[15px]">
@@ -1449,8 +1474,9 @@ export function LiveOverview({
       : variant === "new"
         ? <LiveUpcomingApptsCard items={namedAppts} onViewAll={onViewAppointments} />
         : <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
-    // Service + the flag on: openNow/pastSla + the list are the sanctioned twins (no Created/Due-Today —
-    // service-metrics has no such fields), via LiveActionItemsTableService.
+    // Service + the flag on: openNow + the list are the sanctioned twins (no Created/Due-Today —
+    // service-metrics has no such fields); "Past SLA" is a client-side isLate filter, not the pastSla
+    // metric (see LiveActionItemsTableService's own doc comment) — via LiveActionItemsTableService.
     "live.actions": svc
       ? <LiveActionItemsTableService overlay={svc} onViewAll={onViewActionItems} />
       : <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,

@@ -44,7 +44,7 @@ import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, CANONICAL_DEFINITION_ROWS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
-import { useServiceOverviewOverlay } from "@/lib/serviceMetrics";
+import { useServiceOverviewOverlay, shouldUseServiceMetrics } from "@/lib/serviceMetrics";
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
 const MISSED_LABELS: Record<string, string> = {
@@ -237,13 +237,18 @@ function AgentReportsView() {
    * on this whole per-agent drill-down is dealer-facing and in scope for the same rule as Overview: a
    * service-metrics twin or hidden. The page's own report library ships nothing new yet, so the only
    * twins available today are the same three already used on Overview — Appointments (bookedBySpyne +
-   * bookingRate split), Action Items (openNow/pastSla + list) and the upcoming-appointments list — none
-   * of the per-agent funnel/calls/conversations/outcomes/highlights/missed/library numbers below have one.
+   * bookingRate split), Action Items (openNow + list) and the upcoming-appointments list — none of the
+   * per-agent funnel/calls/conversations/outcomes/highlights/missed/library numbers below have one.
    * Called unconditionally (rules of hooks) even though the early return below is the only path that
    * reads it — Sales and flag-off Service never construct this fetch's request (enabled: false → EMPTY,
-   * no network call, see serviceMetrics.ts). */
+   * no network call, see serviceMetrics.ts).
+   *
+   * Checker fix, 28-Sep: gate on the agent ACTUALLY SHOWN too, not only the top-level dept scope. This
+   * route can be opened with dept="all" (unlike Overview, which is host-locked to one department) — a
+   * dealer viewing the Service Inbound/Outbound pill with dept=all must still get the gated render, not
+   * the ClickHouse one, because `a`/`m`/`r` below are Service data regardless of what `dept` says. */
   const serviceMetricsFlagOn = process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
-  const serviceMetricsOn = serviceMetricsFlagOn && dept === "service" && hasTeam;
+  const serviceMetricsOn = shouldUseServiceMetrics({ flagOn: serviceMetricsFlagOn, deptIsService: dept === "service", agentIsService: agentSvc === "service", hasTeam });
   const svcMetrics = useServiceOverviewOverlay({
     enabled: serviceMetricsOn,
     enterpriseId,
@@ -822,11 +827,14 @@ function AgentReportsView() {
                   <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No appointment data for {periodLabel} yet.</p>
                 )}
               </Card>
+              {/* openNow only — ov-prod's Overview never renders pastSla (it's shown on ov-prod's separate
+                  Action Items tab, with its own window-vs-live caveat; this route mirrors Overview's
+                  twins only, per the coordinator's own scope for this page). */}
               <Card title="Action items" sub="Waiting on your team — live count">
                 {ai ? (
                   <div className="flex flex-col gap-1 px-1 py-1">
                     <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(ai.openNow)}</p>
-                    <p className="text-[12px] text-[#6b7280]">{ai.pastSla != null ? `${fmtInt(ai.pastSla)} past SLA` : "open now"}</p>
+                    <p className="text-[12px] text-[#6b7280]">open now</p>
                   </div>
                 ) : (
                   <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No action-item data for {periodLabel} yet.</p>

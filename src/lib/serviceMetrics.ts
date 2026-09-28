@@ -295,12 +295,14 @@ export interface ServiceOverviewOverlay {
   loading: boolean;
   appointments: { total: number; inbound: number | null; outbound: number | null; assisted: number | null } | null;
   namedAppointments: Array<{ customer: string; vehicle?: string; when: string | null }> | null;
-  // openNow always; pastSla tags along when available (coordinator, 28-Sep RETCONVAI-5066 live-overview
-  // pass: openNow/pastSla + the list are the sanctioned twins for the LIVE Overview's action-items card
-  // and hero tile — ov-prod's static Overview page itself only renders openNow + the list, so `cleared`
-  // still has no home here; that stays on the Action Items PAGE overlay below). `pastSla` is a genuine
-  // available metric when present, never a guess, so a real 0 is shown as 0, not hidden.
-  actionItems: { openNow: number; pastSla: number | null; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
+  // openNow + the list only. Checker fix, 28-Sep: pastSla was added here in the live-overview pass, but
+  // ov-prod's Overview (model.ts / service-overview.tsx) never renders `pastSla` at all — only ov-prod's
+  // SEPARATE Action Items tab does (vini-action-items-queue.tsx's Overdue band, alongside
+  // VINI_METRICS_WINDOW_CAVEAT because it documents that pastSla is live-state while the loaded rows are
+  // window-scoped and the two can legitimately disagree). "Mirror ov-prod exactly" means pastSla has no
+  // home on the Overview overlay — it stays on ServiceActionItemsPageOverlay below, the actual analog of
+  // ov-prod's Action Items tab, WITH the caveat.
+  actionItems: { openNow: number; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
 }
 
 const OVERVIEW_EMPTY: ServiceOverviewOverlay = { loading: false, appointments: null, namedAppointments: null, actionItems: null };
@@ -317,14 +319,30 @@ export async function loadServiceOverviewOverlay(ctx: Ctx, w: ServiceMetricsWind
   const bookInbound = rateNumerator(appt?.metrics.bookingRate.inbound);
   const bookOutbound = rateNumerator(appt?.metrics.bookingRate.outbound);
   const openNow = metricValue(ai?.metrics.openNow, windowFrom);
-  const pastSla = metricValue(ai?.metrics.pastSla, windowFrom);
 
   return {
     loading: false,
     appointments: booked !== null ? { total: booked, inbound: bookInbound, outbound: bookOutbound, assisted: worked } : null,
     namedAppointments: (appt?.appointments?.items?.length ?? 0) > 0 ? mapAppointmentItems(appt) : null,
-    actionItems: openNow !== null ? { openNow, pastSla, items: mapActionItemItems(ai) } : null,
+    actionItems: openNow !== null ? { openNow, items: mapActionItemItems(ai) } : null,
   };
+}
+
+/* ov-prod's own caveat text (vini-action-items-data.ts's VINI_METRICS_WINDOW_CAVEAT), verbatim — shown
+ * alongside pastSla wherever THIS app shows it (only the Action Items PAGE overlay below), exactly as
+ * ov-prod's Action Items tab shows it next to the same field. Two open backend defects, not this app's
+ * bug: `open` is window-scoped while `pastSla` is live-state (so a window can read more overdue than
+ * open), and the ClickHouse mirror can double count a row that changed within the window. */
+export const VINI_METRICS_WINDOW_CAVEAT =
+  "Open is counted over the window, past SLA is counted live, so the two can disagree. Backend defect open with Om Thakare, 21-Sep.";
+
+/** Pure — extracted for testability (checker fix, 28-Sep, /reports/agents ~246). A page can be opened
+ * with a top-level `dept` of "all" (unlike Overview, which is host-locked to one department) while the
+ * AGENT actually shown/selected is Service — that combination must still gate, because the numbers on
+ * screen are Service data regardless of what the page-level dept scope says. Shared here rather than
+ * inlined per call site so every page uses the identical rule. */
+export function shouldUseServiceMetrics(params: { flagOn: boolean; deptIsService: boolean; agentIsService: boolean; hasTeam: boolean }): boolean {
+  return params.flagOn && (params.deptIsService || params.agentIsService) && params.hasTeam;
 }
 
 /* Map this app's Bucket (+ optional custom range) onto the service-metrics API's own window vocabulary
