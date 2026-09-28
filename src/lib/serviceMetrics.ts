@@ -268,6 +268,42 @@ async function fetchAppointmentAllPages(ctx: Ctx, params: Record<string, string 
   return { ...first, appointments: first.appointments ? { ...first.appointments, items } : undefined };
 }
 
+/* Action Items PAGE ceiling — separate from MAX_LIST_PAGES's per-request page cap. The API rejects
+ * `limit` above 50 (400 "limit must not be greater than 50"), so this page has to cursor-paginate at
+ * limit=50 just to stay under that ceiling, then stop accumulating once it has enough rows to keep the
+ * page light — 200 is the same "full count without an unbounded fetch" cap the appointments list uses,
+ * just expressed as a row count instead of a page count. */
+const MAX_ACTION_ITEM_ROWS = 200;
+
+/** Cursor-paginate GET /action-item at the API's real limit (50), same pattern as
+ * `fetchAppointmentAllPages`: the first page's `metrics` block is the window total and does not change
+ * page to page, only `actionItems.items` accumulate. Stops once `MAX_ACTION_ITEM_ROWS` rows are loaded, on
+ * a repeated cursor (backend bug guard), or on `MAX_LIST_PAGES`. A later page failing keeps whatever
+ * loaded so far rather than discarding it. */
+async function fetchActionItemAllPages(ctx: Ctx, params: Record<string, string | undefined>): Promise<ActionItemMetricsResponse | null> {
+  const first = await fetchActionItem(ctx, params);
+  if (!first) return null;
+
+  const items = [...(first.actionItems?.items ?? [])];
+  let cursor = first.actionItems?.nextCursor ?? null;
+  let pages = 1;
+  while (cursor && pages < MAX_LIST_PAGES && items.length < MAX_ACTION_ITEM_ROWS) {
+    const page = await fetchActionItem(ctx, { ...params, cursor });
+    if (!page) break; // a later page failing is not the whole list failing — keep what loaded
+    items.push(...(page.actionItems?.items ?? []));
+    const nextCursor = page.actionItems?.nextCursor ?? null;
+    if (nextCursor && nextCursor === cursor) break; // guard against a backend bug echoing the same cursor
+    cursor = nextCursor;
+    pages += 1;
+  }
+
+  const capped = items.slice(0, MAX_ACTION_ITEM_ROWS);
+  return {
+    ...first,
+    actionItems: first.actionItems ? { ...first.actionItems, items: capped } : { items: capped, total: capped.length },
+  };
+}
+
 /* ── mapping helpers, shared by every page ─────────────────────────────────────────────────────────── */
 
 function mapAppointmentItems(appt: AppointmentMetricsResponse | null): Array<{ customer: string; vehicle?: string; when: string | null }> {
@@ -295,10 +331,12 @@ export interface ServiceOverviewOverlay {
   loading: boolean;
   appointments: { total: number; inbound: number | null; outbound: number | null; assisted: number | null } | null;
   namedAppointments: Array<{ customer: string; vehicle?: string; when: string | null }> | null;
-  // openNow + the list only. Checker fix, 28-Sep: pastSla was added here in the live-overview pass, but
-  // ov-prod's Overview (model.ts / service-overview.tsx) never renders `pastSla` at all — that stays on
-  // ServiceActionItemsPageOverlay below, derived from rows (isLate), never a separate metric.
-  actionItems: { openNow: number; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
+  // openNow for the hero tile's own count, plus pastSla so the Overview's Action Items table can badge
+  // its "Past SLA" tab with the real metric instead of a sampled-row count (coordinator correction,
+  // 28-Sep: the new page's dueBandHeadlineCount reads the live `pastSla` metric for its Overdue band
+  // header, never a client row count — vini-action-items-queue.tsx ~547-556 — so this overlay carries the
+  // same field through). `pastSla` is `null` when the metric is unavailable or stale — never a guess.
+  actionItems: { openNow: number; pastSla: number | null; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
 }
 
 const OVERVIEW_EMPTY: ServiceOverviewOverlay = { loading: false, appointments: null, namedAppointments: null, actionItems: null };
@@ -315,12 +353,13 @@ export async function loadServiceOverviewOverlay(ctx: Ctx, w: ServiceMetricsWind
   const bookInbound = rateNumerator(appt?.metrics.bookingRate.inbound);
   const bookOutbound = rateNumerator(appt?.metrics.bookingRate.outbound);
   const openNow = metricValue(ai?.metrics.openNow, windowFrom);
+  const pastSla = metricValue(ai?.metrics.pastSla, windowFrom);
 
   return {
     loading: false,
     appointments: booked !== null ? { total: booked, inbound: bookInbound, outbound: bookOutbound, assisted: worked } : null,
     namedAppointments: (appt?.appointments?.items?.length ?? 0) > 0 ? mapAppointmentItems(appt) : null,
-    actionItems: openNow !== null ? { openNow, items: mapActionItemItems(ai) } : null,
+    actionItems: openNow !== null ? { openNow, pastSla, items: mapActionItemItems(ai) } : null,
   };
 }
 
@@ -427,10 +466,13 @@ export interface ServiceActionItemsPageOverlay {
   // scoreboard stat and tab this app shows for Sales has no Service twin and is dropped entirely.
   openNow: number | null;
   cleared: number | null;
-  // Checker fix, 28-Sep: NEVER read from `metrics.pastSla`. ov-prod's own Action Items page does not
-  // read that field for its "Overdue" band either (re-checked vini-action-items-queue.tsx /
-  // vini-action-items-data.ts) — it counts past-SLA from the loaded rows' own `isLate`/due-date state,
-  // same as this app's LiveActionItemsTableService. Derived below from `items`, never the raw metric.
+  // Correction, 28-Sep: the earlier comment here ("never read metrics.pastSla, derive from isLate rows")
+  // was wrong. ov-prod's own Overdue band (vini-action-items-queue.tsx's `dueBandHeadlineCount`,
+  // ~547-556) reads the live `pastSla` metric for its headline count and shows nothing (never a row
+  // count) when that metric isn't live — it does NOT derive the count from loaded rows. This scoreboard
+  // stat matches that: the real metric via `metricValue`, `null` (never a guess) when unavailable. The
+  // rows listed under the "Past SLA" tab stay a client-side `isLate` sample regardless — see
+  // buildServiceActionItemsTabs in liveReplica.tsx.
   pastSla: number | null;
   items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> | null;
 }
@@ -438,15 +480,16 @@ export interface ServiceActionItemsPageOverlay {
 const ACTION_ITEMS_PAGE_EMPTY: ServiceActionItemsPageOverlay = { loading: false, openNow: null, cleared: null, pastSla: null, items: null };
 
 export async function loadServiceActionItemsPageOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceActionItemsPageOverlay> {
-  const ai = await fetchActionItem(ctx, actionItemParams(w, 200));
+  // limit=50 — the API 400s above that ("limit must not be greater than 50") — cursor-paginated up to
+  // MAX_ACTION_ITEM_ROWS so the page still gets the full count without an unbounded fetch.
+  const ai = await fetchActionItemAllPages(ctx, actionItemParams(w, 50));
   const windowFrom = ai?.window.from ?? null;
   const items = (ai?.actionItems?.items?.length ?? 0) > 0 ? mapActionItemItems(ai) : null;
   return {
     loading: false,
     openNow: metricValue(ai?.metrics.openNow, windowFrom),
     cleared: metricValue(ai?.metrics.cleared, windowFrom),
-    // Rows-based count, exactly like LiveActionItemsTableService's "Past SLA" tab — never metrics.pastSla.
-    pastSla: items ? items.filter((it) => it.isLate).length : null,
+    pastSla: metricValue(ai?.metrics.pastSla, windowFrom),
     items,
   };
 }

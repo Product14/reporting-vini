@@ -1152,20 +1152,21 @@ export function LiveActionItemsTable({ items, stats, onViewAll }: { items: Actio
  * `created`/`dueToday` field exists on service-metrics, so those tabs and the Created/Due-Today counts
  * this table shows for Sales/flag-off just don't exist here — Open and Past SLA only.
  *
- * Checker fix, 28-Sep: "Past SLA" here is a CLIENT-SIDE filter on the `isLate` flag each fetched row
- * already carries — never the aggregate `pastSla` metric (which ov-prod's Overview doesn't render at
- * all; see ServiceOverviewOverlay's doc comment). Its tab badge is the count of rows the filter actually
- * produced (capped the same as what's shown), so the badge can never disagree with what's listed below
- * it — unlike ov-prod's Action Items tab, this table has no "See all N" reconciliation for a live metric
- * that can legitimately differ from a loaded-row count, so it never claims one. */
+ * Correction, 28-Sep: the earlier comment here — "Past SLA is a client-side isLate filter, never the
+ * aggregate pastSla metric" — was wrong. ov-prod's own Overdue band (`dueBandHeadlineCount` in
+ * vini-action-items-queue.tsx, ~547-556) badges its headline with the live `pastSla` metric, and hides
+ * the count entirely rather than fall back to a row count when the metric isn't live. This tab now does
+ * the same: the badge is `pastSla` from the overlay (undefined, never a guess, when unavailable); the
+ * ROWS listed under the tab stay the `isLate` sample (there is no full past-SLA row list from this
+ * endpoint), so the badge and the sample can legitimately disagree — same as ov-prod's own "See all N". */
 type ServiceActionItem = { customer: string; what: string; due: string | null; isLate: boolean };
 
-/** Pure — extracted for testability (checker fix, 28-Sep). `openNow` is a real metric with a genuine
- * Overview twin, so its badge stays the API value even though only `sampleSize` rows are listed (same
- * "live count + short sample" convention ov-prod itself uses elsewhere). `pastSla` has none here — its
- * badge MUST equal the rows the table actually lists, never the aggregate metric, so the two can never
- * disagree on screen. */
-export function buildServiceActionItemsTabs(items: ServiceActionItem[], openNow: number | null | undefined, sampleSize = 5) {
+/** Pure — extracted for testability (checker fix, 28-Sep). Both `openNow` and `pastSla` are real metrics
+ * with genuine Overview twins, so their badges stay the API values even though only `sampleSize` rows are
+ * listed for each (same "live count + short sample" convention ov-prod itself uses elsewhere). Neither
+ * ever falls back to a loaded-row count — that would risk showing a number the metric itself disagrees
+ * with. */
+export function buildServiceActionItemsTabs(items: ServiceActionItem[], openNow: number | null | undefined, pastSla?: number | null, sampleSize = 5) {
   const openRows = items.slice(0, sampleSize);
   const pastSlaRows = items.filter((i) => i.isLate).slice(0, sampleSize);
   return {
@@ -1173,7 +1174,7 @@ export function buildServiceActionItemsTabs(items: ServiceActionItem[], openNow:
     pastSlaRows,
     tabs: [
       { key: "open" as const, label: "Open", count: openNow ?? undefined },
-      { key: "pastSla" as const, label: "Past SLA", count: pastSlaRows.length },
+      { key: "pastSla" as const, label: "Past SLA", count: pastSla ?? undefined },
     ],
   };
 }
@@ -1181,7 +1182,7 @@ export function buildServiceActionItemsTabs(items: ServiceActionItem[], openNow:
 export function LiveActionItemsTableService({ overlay, onViewAll }: { overlay: ServiceOverviewOverlay; onViewAll: () => void }) {
   const ai = overlay.actionItems;
   const [tab, setTab] = React.useState<"open" | "pastSla">("open");
-  const { openRows, pastSlaRows, tabs } = buildServiceActionItemsTabs(ai?.items ?? [], ai?.openNow);
+  const { openRows, pastSlaRows, tabs } = buildServiceActionItemsTabs(ai?.items ?? [], ai?.openNow, ai?.pastSla);
   const rows = tab === "pastSla" ? pastSlaRows : openRows;
   return (
     <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
