@@ -125,7 +125,7 @@ function AppointmentsView() {
         <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {serviceMetricsOn ? (
-              <StatTile label="AI-booked" value={svcMetrics.bookedBySpyne != null ? fmtInt(svcMetrics.bookedBySpyne) : "—"} sub="the AI created the meeting" accent="#059669" />
+              <StatTile label="Booked by Spyne" value={svcMetrics.bookedBySpyne != null ? fmtInt(svcMetrics.bookedBySpyne) : "—"} sub="Spyne booked it" accent="#059669" />
             ) : (
               <StatTile label="AI-booked" value={fmtInt(fleet.appointments)} sub="the AI created the meeting" accent="#059669" onClick={fleet.appointments > 0 ? () => { setModalOpen(true); track("appointments_drilldown_opened", { tab: "appointments", team_id: teamId }); } : undefined} />
             )}
@@ -159,7 +159,7 @@ function AppointmentsView() {
             </div>
             <Card
               title="On the books"
-              sub={serviceMetricsOn ? "AI-booked = the AI created the meeting" : "AI-booked = the AI created the meeting · AI-assisted = flagged AI-assisted in your CRM (never counted in the headline)"}
+              sub={serviceMetricsOn ? "Booked by Spyne = Spyne booked it" : "AI-booked = the AI created the meeting · AI-assisted = flagged AI-assisted in your CRM (never counted in the headline)"}
               pad={serviceMetricsOn ? (svcMetrics.items?.length ?? 0) === 0 : filtered.length === 0}
             >
               {serviceMetricsOn ? (
