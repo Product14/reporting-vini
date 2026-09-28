@@ -25,7 +25,7 @@ import {
   type ActionItemCloser,
 } from "@/components/reports/liveData";
 import { track } from "@/lib/analytics";
-import { useServiceActionItemsPageOverlay, VINI_METRICS_WINDOW_CAVEAT } from "@/lib/serviceMetrics";
+import { useServiceActionItemsPageOverlay } from "@/lib/serviceMetrics";
 
 type Scope = "open" | "overdue";
 
@@ -129,16 +129,13 @@ function ActionItemsView() {
             <SectionLabel hint={periodLabel}>The scoreboard</SectionLabel>
             <Card title="Follow-up tasks the AI logged" sub={serviceMetricsOn ? "Open, past-SLA and cleared — live counts" : "Created & closed for the selected window · open, overdue and due-today are live counts"}>
               {serviceMetricsOn ? (
-                <div className="flex flex-col gap-2">
-                  <div className="grid grid-cols-3 gap-4">
-                    <ScoreTile label="Open now" value={svcMetrics.openNow} />
-                    <ScoreTile label="Past SLA" value={svcMetrics.pastSla} />
-                    <ScoreTile label="Cleared" value={svcMetrics.cleared} />
-                  </div>
-                  {/* ov-prod's own caveat (VINI_METRICS_WINDOW_CAVEAT), shown verbatim wherever it shows
-                      Past SLA — this is the one place in the app that does, so this is the one place that
-                      needs it. */}
-                  <p className="text-[10.5px] leading-snug text-[#9ca3af]">{VINI_METRICS_WINDOW_CAVEAT}</p>
+                <div className="grid grid-cols-3 gap-4">
+                  <ScoreTile label="Open now" value={svcMetrics.openNow} />
+                  {/* Past SLA is a count of the loaded rows' own isLate flag, same as the Overview table
+                      — never a separate live metric, so there is nothing that can disagree with the rows
+                      below it and no caveat is needed (checker fix, 28-Sep). */}
+                  <ScoreTile label="Past SLA" value={svcMetrics.pastSla} />
+                  <ScoreTile label="Cleared" value={svcMetrics.cleared} />
                 </div>
               ) : stats ? (
                 <ActionItemsScoreboard stats={stats.stats} closers={stats.closers} periodLabel={periodLabel} />
