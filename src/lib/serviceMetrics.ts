@@ -1,21 +1,54 @@
-/* RETCONVAI-5066. Old Service Overview, wired to Om Thakare's service-metrics API so a dealer on the
- * OLD console page (this repo) sees the SAME numbers as the NEW page (spyne-ai-agentic-dev/overview),
- * because both now read the same backend. Sales is untouched — see the flag gate in OverviewView.tsx.
+/* RETCONVAI-5066. OLD Service reports (Overview, Appointments, Action items), wired to Om Thakare's
+ * service-metrics API so a dealer on the OLD console pages (this repo) sees the SAME numbers as the NEW
+ * page (spyne-ai-agentic-dev/overview), because both now read the same backend. Sales is untouched — see
+ * the flag gate at each page's call site.
  *
  * Behind NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW ('on' enables). Flag off → this module is never called.
  *
- * ONE HIDE RULE (mirrors the new page's data-layer rule, availability.ts): a number with no trustworthy
- * source HIDES. Never a 0, never "—", never "Coming soon" in its place. `metricValue()`/`rateNumerator()`
- * below are the only places that turn the API's `{available, value}` contract into "show or hide" — every
- * caller reads through them, never `metric.value` directly.
+ * ONE HIDE RULE, and it is stricter than "the API returned available:true":
+ *
+ *   A Service number is only sourced from service-metrics here if the NEW page (ov-prod's
+ *   src/components/service-overview/model.ts + service-overview.tsx) ACTUALLY RENDERS that same field,
+ *   in the same shape, today. The API's response shape is not the contract — what ov-prod puts on screen
+ *   is. (Coordinator correction, 28-Sep: an earlier pass of this file read `leadsReached`,
+ *   `realConversations`, `talkTimeMinutes`, `smsSent` and `afterHoursLeads` off the Contact endpoint and
+ *   showed them as Overview tiles. Re-reading ov-prod's model.ts: it reads `leadsReached` and `calls`
+ *   ONLY as per-agent, per-direction intake rows (never summed into a rooftop total — no tile there ever
+ *   shows a combined ib+ob "Leads touched"), and it does not read `realConversations`, `talkTimeMinutes`,
+ *   `afterHoursLeads`, `smsSent`, `connectRate` or `optedOut` AT ALL. None of those five old tiles has a
+ *   true twin, so the Contact endpoint is never called from here — see NO_TWIN_ON_OLD_OVERVIEW below,
+ *   the single place that decision lives; nothing downstream re-decides it per tile.)
+ *
+ * A field that DOES have a twin can still be under an explicit HOLD (mirrors availability.ts's
+ * HOLD_ATTRIBUTION_UNTIL_BACKFILL): `workedBySpyne` (AI-assisted appointments) and the whole Opportunity
+ * endpoint stay hidden pending the attribution backfill, exactly like the new page.
+ *
+ * `metricValue()`/`rateNumerator()` are the only places a `{available, value}` row becomes a
+ * number-or-null — every caller reads through them, never `metric.value` directly.
  *
  * Client-side fetch (browser → api.spyne.ai), same pattern as the new page's service-metrics-api.ts: the
- * bearer token already lives on this page (spyneToken, host-forwarded from the iframe URL), so there is
- * no need to round-trip through this app's own Next.js API routes. Never logs the token or dealer PII.
+ * bearer token already lives on each page (spyneToken, host-forwarded from the iframe URL). Never logs
+ * the token or dealer PII.
  */
 
 import { useEffect, useState } from "react";
 import type { Bucket } from "@/components/reports/data";
+
+/* ── fields with no twin on the OLD Overview, and why — single source of truth ─────────────────────── */
+export const NO_TWIN_ON_OLD_OVERVIEW = {
+  leadsReached_total: "ov-prod reads leadsReached per-agent/per-direction only; never summed into a rooftop total",
+  realConversations: "ov-prod's Service Overview (model.ts) never reads this field",
+  talkTimeMinutes: "ov-prod's Service Overview (model.ts) never reads this field",
+  smsSent: "ov-prod's Service Overview (model.ts) never reads this field",
+  afterHoursLeads: "ov-prod's Service Overview (model.ts) never reads this field",
+  connectRate: "ov-prod's Service Overview (model.ts) never reads this field",
+  optedOut: "ov-prod's Service Overview (model.ts) never reads this field",
+  calls_combined: "ov-prod reads calls only as a per-outbound-agent dial count ('contacted'); never a rooftop calls+sms total",
+} as const;
+// The Contact endpoint (/service-metrics/contact) is never called anywhere in this file: every one of
+// its fields is either in the table above (no twin) or, for `leadsReached`/`calls`, only rendered by
+// ov-prod in a shape (per-agent, per-direction, never summed) this app's OLD Overview does not have a
+// tile for. Calling it would fetch data nothing here is allowed to show.
 
 export type ServiceMetricsDirection = "inbound" | "outbound";
 
@@ -46,19 +79,7 @@ interface ServiceMetricsWindowInfo {
   timezone: string;
 }
 
-interface ContactMetricsResponse {
-  window: ServiceMetricsWindowInfo;
-  metrics: {
-    calls: ServiceMetric;
-    smsSent: ServiceMetric;
-    talkTimeMinutes: ServiceMetric;
-    afterHoursLeads: ServiceMetric;
-    leadsReached: ServiceMetric;
-    realConversations: ServiceMetric;
-  };
-}
-
-interface AppointmentListItem {
+export interface AppointmentListItem {
   meetingId: string;
   customerName: string | null;
   vehicle: { year?: string; make?: string; model?: string } | null;
@@ -66,7 +87,7 @@ interface AppointmentListItem {
   scheduledStart: string | null;
 }
 
-interface AppointmentMetricsResponse {
+export interface AppointmentMetricsResponse {
   window: ServiceMetricsWindowInfo;
   metrics: {
     bookedBySpyne: ServiceMetric;
@@ -75,10 +96,10 @@ interface AppointmentMetricsResponse {
     workedBySpyne?: ServiceMetric;
     bookingRate: DirectionSplit<ServiceMetricRate>;
   };
-  appointments?: { items: AppointmentListItem[]; total: number };
+  appointments?: { items: AppointmentListItem[]; total: number; nextCursor?: string | null };
 }
 
-interface ActionItemListItem {
+export interface ActionItemListItem {
   actionItemId: string;
   customerName: string | null;
   whatNeedsDoing: string;
@@ -87,18 +108,22 @@ interface ActionItemListItem {
   isLate: boolean;
 }
 
-interface ActionItemMetricsResponse {
+export interface ActionItemMetricsResponse {
   window: ServiceMetricsWindowInfo;
   metrics: {
     openNow: ServiceMetric;
+    pastSla: ServiceMetric;
     cleared: ServiceMetric;
   };
-  actionItems: { items: ActionItemListItem[]; total: number };
+  actionItems: { items: ActionItemListItem[]; total: number; nextCursor?: string | null };
 }
 
-/* Sumit, 26-Sep-2026: Worked by Spyne stays hidden until the attribution backfill (planned Monday).
- * Mirrors HOLD_ATTRIBUTION_UNTIL_BACKFILL in the new page's availability.ts — flip both together. */
-const HOLD_WORKED_BY_SPYNE = true;
+/* Sumit, 26-Sep-2026: Worked by Spyne (AI-assisted appointments) stays hidden until the attribution
+ * backfill (planned Monday). Mirrors HOLD_ATTRIBUTION_UNTIL_BACKFILL in the new page's availability.ts —
+ * flip both together. The whole Opportunity endpoint is under the same hold on the new page
+ * (RETCONVAI-5150 isn't shipped at all yet); this file never calls Opportunity, for the same reason it
+ * never calls Contact — see NO_TWIN_ON_OLD_OVERVIEW. */
+export const HOLD_WORKED_BY_SPYNE = true;
 
 function coversWindow(coverageFrom: string | undefined, windowFrom: string | undefined | null): boolean {
   if (!coverageFrom || !windowFrom) return true;
@@ -117,6 +142,13 @@ export function metricValue(metric: ServiceMetric | undefined | null, windowFrom
 
 export function rateNumerator(rate: ServiceMetricRate | undefined | null): number | null {
   return rate && rate.available && typeof rate.numerator === "number" ? rate.numerator : null;
+}
+
+/** `workedBySpyne`, gated through the hold above (never just `metricValue` alone) — the one place that
+ * hold is applied, so a caller can never accidentally read it unheld. */
+export function workedBySpyneValue(metric: ServiceMetric | undefined | null, windowFrom?: string | null): number | null {
+  if (HOLD_WORKED_BY_SPYNE) return null;
+  return metricValue(metric, windowFrom);
 }
 
 // env → API base URL, same map the rest of this app uses server-side (src/lib/spyne/client.ts) —
@@ -177,118 +209,88 @@ async function fetchServiceMetric<T>(ctx: Ctx, path: string, params: Record<stri
   return second.ok ? second.data : null;
 }
 
-function fetchContact(ctx: Ctx, w: ServiceMetricsWindowParams, direction: ServiceMetricsDirection) {
-  return fetchServiceMetric<ContactMetricsResponse>(ctx, "contact", { direction, window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone });
-}
-function fetchAppointment(ctx: Ctx, w: ServiceMetricsWindowParams) {
-  return fetchServiceMetric<AppointmentMetricsResponse>(ctx, "appointment", { direction: "both", listAnchor: "both", limit: "10", window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone });
-}
-function fetchActionItem(ctx: Ctx, w: ServiceMetricsWindowParams) {
-  return fetchServiceMetric<ActionItemMetricsResponse>(ctx, "action-item", { limit: "10", sort: "due:asc", window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone });
+/* ── param builders — pure, exported so tests can assert the exact query without a network call ─────── */
+
+/** Rooftop-wide (`direction=both`), `listAnchor=upcoming` — matches ov-prod's Overview EXACTLY
+ * (service-metrics-api.ts's `fetchAppointmentMetrics`: "the Upcoming card's rows"). Never `both` here;
+ * the OLD Overview's "Appointments" card is the same upcoming-only card. */
+export function appointmentParamsForOverview(w: ServiceMetricsWindowParams): Record<string, string | undefined> {
+  return { direction: "both", listAnchor: "upcoming", limit: "10", window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
 }
 
-// ── Overlay shape the Overview reads. Every field is null when there is no trustworthy twin on the
-// new page (or the fetch failed) — callers must treat null as "hide this tile/card", never as 0.
-export interface ServiceMetricsOverlay {
+/** The Appointments PAGE ("every appointment on the books") wants past + future, so `listAnchor=both` —
+ * per the brief, default BOTH, limit up to 50. Single page only today (no cursor loop yet — the response
+ * carries `nextCursor` for a follow-up if a rooftop's window ever exceeds 50). */
+export function appointmentParamsForAppointmentsPage(w: ServiceMetricsWindowParams, limit = 50): Record<string, string | undefined> {
+  return { direction: "both", listAnchor: "both", limit: String(limit), window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
+}
+
+export function actionItemParams(w: ServiceMetricsWindowParams, limit = 10): Record<string, string | undefined> {
+  return { limit: String(limit), sort: "due:asc", window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
+}
+
+function fetchAppointment(ctx: Ctx, params: Record<string, string | undefined>) {
+  return fetchServiceMetric<AppointmentMetricsResponse>(ctx, "appointment", params);
+}
+function fetchActionItem(ctx: Ctx, params: Record<string, string | undefined>) {
+  return fetchServiceMetric<ActionItemMetricsResponse>(ctx, "action-item", params);
+}
+
+/* ── mapping helpers, shared by every page ─────────────────────────────────────────────────────────── */
+
+function mapAppointmentItems(appt: AppointmentMetricsResponse | null): Array<{ customer: string; vehicle?: string; when: string | null }> {
+  return (appt?.appointments?.items ?? []).map((it) => ({
+    customer: it.customerName || "Customer",
+    vehicle: it.vehicle ? [it.vehicle.year, it.vehicle.make, it.vehicle.model].filter(Boolean).join(" ") || undefined : undefined,
+    when: it.scheduledStart,
+  }));
+}
+
+function mapActionItemItems(ai: ActionItemMetricsResponse | null): Array<{ customer: string; what: string; due: string | null; isLate: boolean }> {
+  return (ai?.actionItems?.items ?? []).map((it) => ({
+    customer: it.customerName || "Customer",
+    what: it.title || it.whatNeedsDoing,
+    due: it.due,
+    isLate: it.isLate,
+  }));
+}
+
+/* ── OVERVIEW ──────────────────────────────────────────────────────────────────────────────────────── */
+
+// Every field here has a real twin on ov-prod's Overview today. Nothing about Contact (leads,
+// conversations, calls & texts, talk time, after-hours) belongs on this type — see NO_TWIN_ON_OLD_OVERVIEW.
+export interface ServiceOverviewOverlay {
   loading: boolean;
-  leads: { total: number; inbound: number | null; outbound: number | null } | null;
-  conversations: { total: number; inbound: number | null; outbound: number | null } | null;
   appointments: { total: number; inbound: number | null; outbound: number | null; assisted: number | null } | null;
-  callsTexts: { calls: number; sms: number } | null;
-  talkMinutes: number | null;
-  afterHours: number | null;
   namedAppointments: Array<{ customer: string; vehicle?: string; when: string | null }> | null;
-  actionItems: { openNow: number; cleared: number; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
+  // openNow only — ov-prod's Overview ("Waiting on your team") never renders `cleared` or `pastSla`,
+  // only the live open count + the waiting-tasks list. `cleared` has a twin on the Action Items PAGE
+  // (see ServiceActionItemsPageOverlay below), just not here.
+  actionItems: { openNow: number; items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> } | null;
 }
 
-const EMPTY: ServiceMetricsOverlay = {
-  loading: false,
-  leads: null,
-  conversations: null,
-  appointments: null,
-  callsTexts: null,
-  talkMinutes: null,
-  afterHours: null,
-  namedAppointments: null,
-  actionItems: null,
-};
+const OVERVIEW_EMPTY: ServiceOverviewOverlay = { loading: false, appointments: null, namedAppointments: null, actionItems: null };
 
-/** Fetch the four service-metrics reads and shape them into the Overview's overlay. Never throws —
- * a failed/partial fetch resolves with the fields it could not back left `null` (hidden). */
-export async function loadServiceMetricsOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceMetricsOverlay> {
-  const [ib, ob, appt, ai] = await Promise.all([
-    fetchContact(ctx, w, "inbound"),
-    fetchContact(ctx, w, "outbound"),
-    fetchAppointment(ctx, w),
-    fetchActionItem(ctx, w),
+export async function loadServiceOverviewOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceOverviewOverlay> {
+  const [appt, ai] = await Promise.all([
+    fetchAppointment(ctx, appointmentParamsForOverview(w)),
+    fetchActionItem(ctx, actionItemParams(w)),
   ]);
-
-  const windowFrom = ib?.window.from ?? ob?.window.from ?? appt?.window.from ?? null;
-
-  const sumOrNull = (a: number | null, b: number | null): number | null => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
-
-  const ibLeads = metricValue(ib?.metrics.leadsReached, windowFrom);
-  const obLeads = metricValue(ob?.metrics.leadsReached, windowFrom);
-  const leadsTotal = sumOrNull(ibLeads, obLeads);
-
-  const ibConv = metricValue(ib?.metrics.realConversations, windowFrom);
-  const obConv = metricValue(ob?.metrics.realConversations, windowFrom);
-  const convTotal = sumOrNull(ibConv, obConv);
+  const windowFrom = appt?.window.from ?? ai?.window.from ?? null;
 
   const booked = metricValue(appt?.metrics.bookedBySpyne, windowFrom);
-  const workedRaw = HOLD_WORKED_BY_SPYNE ? null : metricValue(appt?.metrics.workedBySpyne, windowFrom);
+  const worked = workedBySpyneValue(appt?.metrics.workedBySpyne, windowFrom);
   const bookInbound = rateNumerator(appt?.metrics.bookingRate.inbound);
   const bookOutbound = rateNumerator(appt?.metrics.bookingRate.outbound);
-
-  const ibCalls = metricValue(ib?.metrics.calls, windowFrom);
-  const obCalls = metricValue(ob?.metrics.calls, windowFrom);
-  const callsTotal = sumOrNull(ibCalls, obCalls);
-  const ibSms = metricValue(ib?.metrics.smsSent, windowFrom);
-  const obSms = metricValue(ob?.metrics.smsSent, windowFrom);
-  const smsTotal = sumOrNull(ibSms, obSms);
-
-  const ibTalk = metricValue(ib?.metrics.talkTimeMinutes, windowFrom);
-  const obTalk = metricValue(ob?.metrics.talkTimeMinutes, windowFrom);
-  const talkTotal = sumOrNull(ibTalk, obTalk);
-
-  const ibAfter = metricValue(ib?.metrics.afterHoursLeads, windowFrom);
-  const obAfter = metricValue(ob?.metrics.afterHoursLeads, windowFrom);
-  const afterTotal = sumOrNull(ibAfter, obAfter);
-
   const openNow = metricValue(ai?.metrics.openNow, windowFrom);
-  const cleared = metricValue(ai?.metrics.cleared, windowFrom);
 
   return {
     loading: false,
-    leads: leadsTotal !== null ? { total: leadsTotal, inbound: ibLeads, outbound: obLeads } : null,
-    conversations: convTotal !== null ? { total: convTotal, inbound: ibConv, outbound: obConv } : null,
-    appointments: booked !== null ? { total: booked, inbound: bookInbound, outbound: bookOutbound, assisted: workedRaw } : null,
-    callsTexts: callsTotal !== null && smsTotal !== null ? { calls: callsTotal, sms: smsTotal } : null,
-    talkMinutes: talkTotal,
-    afterHours: afterTotal,
-    namedAppointments: appt?.appointments?.items?.length
-      ? appt.appointments.items.map((it) => ({
-          customer: it.customerName || "Customer",
-          vehicle: it.vehicle ? [it.vehicle.year, it.vehicle.make, it.vehicle.model].filter(Boolean).join(" ") : undefined,
-          when: it.scheduledStart,
-        }))
-      : null,
-    actionItems: openNow !== null || cleared !== null
-      ? {
-          openNow: openNow ?? 0,
-          cleared: cleared ?? 0,
-          items: (ai?.actionItems?.items ?? []).map((it) => ({
-            customer: it.customerName || "Customer",
-            what: it.title || it.whatNeedsDoing,
-            due: it.due,
-            isLate: it.isLate,
-          })),
-        }
-      : null,
+    appointments: booked !== null ? { total: booked, inbound: bookInbound, outbound: bookOutbound, assisted: worked } : null,
+    namedAppointments: (appt?.appointments?.items?.length ?? 0) > 0 ? mapAppointmentItems(appt) : null,
+    actionItems: openNow !== null ? { openNow, items: mapActionItemItems(ai) } : null,
   };
 }
-
-export { EMPTY as EMPTY_SERVICE_METRICS_OVERLAY };
 
 /* Map this app's Bucket (+ optional custom range) onto the service-metrics API's own window vocabulary
  * (today | 7d | 30d | mtd | custom). A bucket the API has no exact preset for (yesterday, last14,
@@ -308,11 +310,7 @@ export function serviceMetricsWindowFor(bucket: Bucket, custom: { start: string;
   }
 }
 
-/** Fetches the overlay whenever `enabled` and the scope/window change. Returns `EMPTY` (all null,
- * `loading: true`) while a fetch is in flight or before the first one starts, so callers never have to
- * special-case `undefined`. Disabled (`enabled: false`, e.g. Sales, or the flag off) always returns
- * `EMPTY` with `loading: false` and fetches nothing. */
-export function useServiceMetricsOverlay(params: {
+interface OverlayHookParams {
   enabled: boolean;
   enterpriseId: string;
   teamId: string;
@@ -323,28 +321,89 @@ export function useServiceMetricsOverlay(params: {
   rangeStart?: string;
   rangeEndExclusive?: string;
   timezone?: string;
-}): ServiceMetricsOverlay {
+}
+
+/** Generic "fetch whenever the scope/window changes" state machine, shared by all three hooks below.
+ * `loading` is derived by comparing the request signature to the signature of the last RESOLVED fetch,
+ * so nothing calls setState synchronously inside the effect body (only the async `.then`/`.catch` do —
+ * the pattern this repo's react-hooks/set-state-in-effect lint rule requires). */
+function useOverlay<T>(params: OverlayHookParams, empty: T, load: (ctx: Ctx, w: ServiceMetricsWindowParams) => Promise<T>): T & { loading: boolean } {
   const { enabled, enterpriseId, teamId, spyneToken, spyneEnv, bucket, custom, rangeStart, rangeEndExclusive, timezone } = params;
-  // Derived, not stored: disabled (Sales, the flag off, or scope not resolved yet) always reads as EMPTY
-  // with no state update needed.
   const canFetch = enabled && !!teamId && !!enterpriseId && !!spyneToken;
-  // Request signature — changes whenever anything the fetch depends on changes. `loading` is derived by
-  // comparing it to the signature of the last RESOLVED fetch (`state.key`), so nothing has to set a
-  // "loading" flag synchronously inside the effect below; only the async `.then`/`.catch` ever call
-  // `setState`, which is the pattern this repo's own lint rule (react-hooks/set-state-in-effect) requires.
   const key = canFetch ? JSON.stringify([enterpriseId, teamId, spyneEnv ?? "", bucket, custom, rangeStart ?? "", rangeEndExclusive ?? "", timezone ?? ""]) : "";
-  const [state, setState] = useState<{ key: string; data: ServiceMetricsOverlay }>({ key: "", data: EMPTY });
+  const [state, setState] = useState<{ key: string; data: T }>({ key: "", data: empty });
 
   useEffect(() => {
     if (!canFetch) return;
     let on = true;
     const w = serviceMetricsWindowFor(bucket, custom, rangeStart, rangeEndExclusive, timezone);
-    loadServiceMetricsOverlay({ enterpriseId, teamId, spyneToken, spyneEnv }, w)
+    load({ enterpriseId, teamId, spyneToken, spyneEnv }, w)
       .then((res) => { if (on) setState({ key, data: res }); })
-      .catch(() => { if (on) setState({ key, data: EMPTY }); });
+      .catch(() => { if (on) setState({ key, data: empty }); });
     return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canFetch, key, enterpriseId, teamId, spyneToken, spyneEnv, bucket, custom, rangeStart, rangeEndExclusive, timezone]);
 
-  if (!canFetch) return EMPTY;
+  if (!canFetch) return { ...empty, loading: false };
   return { ...state.data, loading: state.key !== key };
+}
+
+/** Fetches the Overview overlay whenever `enabled` and the scope/window change. Disabled (Sales, the
+ * flag off, or scope not resolved yet) always returns the empty shape and fetches nothing. */
+export function useServiceOverviewOverlay(params: OverlayHookParams): ServiceOverviewOverlay {
+  return useOverlay(params, OVERVIEW_EMPTY, loadServiceOverviewOverlay);
+}
+
+/* ── APPOINTMENTS PAGE ─────────────────────────────────────────────────────────────────────────────── */
+
+export interface ServiceAppointmentsPageOverlay {
+  loading: boolean;
+  bookedBySpyne: number | null; // no twin for "AI-assisted (CRM)" (held) or "Close rate" (Classification) — hide those tiles
+  items: Array<{ customer: string; vehicle?: string; when: string | null }> | null;
+}
+
+const APPOINTMENTS_PAGE_EMPTY: ServiceAppointmentsPageOverlay = { loading: false, bookedBySpyne: null, items: null };
+
+export async function loadServiceAppointmentsPageOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceAppointmentsPageOverlay> {
+  const appt = await fetchAppointment(ctx, appointmentParamsForAppointmentsPage(w));
+  const windowFrom = appt?.window.from ?? null;
+  return {
+    loading: false,
+    bookedBySpyne: metricValue(appt?.metrics.bookedBySpyne, windowFrom),
+    items: (appt?.appointments?.items?.length ?? 0) > 0 ? mapAppointmentItems(appt) : null,
+  };
+}
+
+export function useServiceAppointmentsPageOverlay(params: OverlayHookParams): ServiceAppointmentsPageOverlay {
+  return useOverlay(params, APPOINTMENTS_PAGE_EMPTY, loadServiceAppointmentsPageOverlay);
+}
+
+/* ── ACTION ITEMS PAGE ─────────────────────────────────────────────────────────────────────────────── */
+
+export interface ServiceActionItemsPageOverlay {
+  loading: boolean;
+  // No `created` — Om's endpoint has no such field (only openNow/pastSla/cleared), so the "Created"
+  // scoreboard stat and tab this app shows for Sales has no Service twin and is dropped entirely.
+  openNow: number | null;
+  cleared: number | null;
+  pastSla: number | null;
+  items: Array<{ customer: string; what: string; due: string | null; isLate: boolean }> | null;
+}
+
+const ACTION_ITEMS_PAGE_EMPTY: ServiceActionItemsPageOverlay = { loading: false, openNow: null, cleared: null, pastSla: null, items: null };
+
+export async function loadServiceActionItemsPageOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceActionItemsPageOverlay> {
+  const ai = await fetchActionItem(ctx, actionItemParams(w, 200));
+  const windowFrom = ai?.window.from ?? null;
+  return {
+    loading: false,
+    openNow: metricValue(ai?.metrics.openNow, windowFrom),
+    cleared: metricValue(ai?.metrics.cleared, windowFrom),
+    pastSla: metricValue(ai?.metrics.pastSla, windowFrom),
+    items: (ai?.actionItems?.items?.length ?? 0) > 0 ? mapActionItemItems(ai) : null,
+  };
+}
+
+export function useServiceActionItemsPageOverlay(params: OverlayHookParams): ServiceActionItemsPageOverlay {
+  return useOverlay(params, ACTION_ITEMS_PAGE_EMPTY, loadServiceActionItemsPageOverlay);
 }

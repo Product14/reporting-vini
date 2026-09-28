@@ -42,7 +42,7 @@ import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hidea
 import { useOutcomes, OutcomesSection } from "@/components/reports/outcomes";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { track } from "@/lib/analytics";
-import { useServiceMetricsOverlay } from "@/lib/serviceMetrics";
+import { useServiceOverviewOverlay } from "@/lib/serviceMetrics";
 
 // Customizable section ids for the Overview (stable module constant → identity-stable across renders).
 const OVERVIEW_SECTION_IDS = ["value", "agents", "work", "conversations"];
@@ -219,7 +219,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   // see serviceMetrics.ts and the method note in OLD-VIEW-BRIEF.md.
   const serviceMetricsFlagOn = process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
   const serviceMetricsOn = serviceMetricsFlagOn && dept === "service" && hasTeam && !sampleMode;
-  const svcMetrics = useServiceMetricsOverlay({
+  const svcMetrics = useServiceOverviewOverlay({
     enabled: serviceMetricsOn,
     enterpriseId,
     teamId,
@@ -428,20 +428,18 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           <SectionLabel hint={periodLabel}>The value delivered</SectionLabel>
           {/* MAIN — the outcome story, IB/OB split + period deltas */}
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
-            <Hideable id="tile.leads" ctrl={ctrl}>
-              {serviceMetricsOn ? (
-                svcMetrics.leads && <ValueTile label="Leads touched" total={fmtInt(svcMetrics.leads.total)} inbound={svcMetrics.leads.inbound != null ? fmtInt(svcMetrics.leads.inbound) : undefined} outbound={svcMetrics.leads.outbound != null ? fmtInt(svcMetrics.leads.outbound) : undefined} accent="blue" subtext={<>reached or dialed by the AI</>} />
-              ) : (
-                <ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} />
-              )}
-            </Hideable>
-            <Hideable id="tile.conversations" ctrl={ctrl}>
-              {serviceMetricsOn ? (
-                svcMetrics.conversations && <ValueTile label="Real conversations" total={fmtInt(svcMetrics.conversations.total)} inbound={svcMetrics.conversations.inbound != null ? fmtInt(svcMetrics.conversations.inbound) : undefined} outbound={svcMetrics.conversations.outbound != null ? fmtInt(svcMetrics.conversations.outbound) : undefined} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} />
-              ) : (
-                <ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} />
-              )}
-            </Hideable>
+            {/* Leads touched — NO TWIN. ov-prod reads leadsReached per-agent/per-direction only; it never
+                sums inbound+outbound into one rooftop total, which is what this tile needs. See
+                serviceMetrics.ts's NO_TWIN_ON_OLD_OVERVIEW (single source for this decision — not
+                re-decided here). Hidden on Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
+            )}
+            {/* Real conversations — NO TWIN. ov-prod's Service Overview never reads realConversations at
+                all (see NO_TWIN_ON_OLD_OVERVIEW). Hidden on Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
+            )}
             {/* Qualified leads — no service-metrics twin (Classification stays available:false pending
                 RETCONVAI-5010). Hidden rather than shown from the old ClickHouse source once the flag is on,
                 so this page never shows a number the new page can't back. */}
@@ -474,30 +472,23 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
             {!serviceMetricsOn && (
               <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Customers with follow-ups" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} cleared · {fmtInt(aiStats.stats.open)} still waiting</> : <>syncing…</>} onClick={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)} title="Customers the AI logged a follow-up for this period — someone with several counts once. Click for the full list." /></Hideable>
             )}
-            {/* Web chat is folded in as a third channel, but only shown on rooftops that run it — so the
-                label and sub-line stay "Calls & texts" everywhere else (migration 0021). service-metrics
-                carries no chat count, so the flagged path drops the chat clause rather than guess a number. */}
-            <Hideable id="tile.callstexts" ctrl={ctrl}>
-              {serviceMetricsOn ? (
-                svcMetrics.callsTexts && <MetricTile label="Calls & texts" value={fmtInt(svcMetrics.callsTexts.calls + svcMetrics.callsTexts.sms)} accent="#14b8a6" sub={<>{fmtInt(svcMetrics.callsTexts.calls)} calls · {fmtInt(svcMetrics.callsTexts.sms)} texts</>} title="AI conversations handled across voice and SMS." />
-              ) : (
-                <MetricTile label={(fleet.chats ?? 0) > 0 ? "Calls, texts & chats" : "Calls & texts"} value={fmtInt(fleet.calls + fleet.smsThreads + (fleet.chats ?? 0))} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts{(fleet.chats ?? 0) > 0 ? <> · {fmtInt(fleet.chats)} web chats</> : null}</>} title="AI conversations handled across voice, SMS and web chat — voice calls + SMS threads + chat sessions (conversations, not individual messages)." />
-              )}
-            </Hideable>
-            <Hideable id="tile.talk" ctrl={ctrl}>
-              {serviceMetricsOn ? (
-                svcMetrics.talkMinutes != null && <MetricTile label="Talk time" value={fmtDuration(svcMetrics.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} />
-              ) : (
-                <MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} />
-              )}
-            </Hideable>
-            <Hideable id="tile.afterhours" ctrl={ctrl}>
-              {serviceMetricsOn ? (
-                svcMetrics.afterHours != null && <MetricTile label="After-hours captured" value={fmtInt(svcMetrics.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} />
-              ) : (
-                <MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} />
-              )}
-            </Hideable>
+            {/* Calls & texts — NO TWIN. ov-prod reads `calls` only as a per-outbound-agent dial count
+                ("contacted"); it never renders a rooftop calls+sms total, and smsSent isn't read at all.
+                Web chat is folded in as a third channel on rooftops that run it — irrelevant here, this
+                whole tile is hidden on Service once the flag is on (NO_TWIN_ON_OLD_OVERVIEW). */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label={(fleet.chats ?? 0) > 0 ? "Calls, texts & chats" : "Calls & texts"} value={fmtInt(fleet.calls + fleet.smsThreads + (fleet.chats ?? 0))} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts{(fleet.chats ?? 0) > 0 ? <> · {fmtInt(fleet.chats)} web chats</> : null}</>} title="AI conversations handled across voice, SMS and web chat — voice calls + SMS threads + chat sessions (conversations, not individual messages)." /></Hideable>
+            )}
+            {/* Talk time — NO TWIN. ov-prod's Service Overview never reads talkTimeMinutes. Hidden on
+                Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
+            )}
+            {/* After-hours captured — NO TWIN. ov-prod's Service Overview never reads afterHoursLeads.
+                Hidden on Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
+            )}
           </div>
         </div>
       ),
@@ -563,7 +554,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
         const svcActions = serviceMetricsOn ? svcMetrics.actionItems : null;
         const showWarmCard = !serviceMetricsOn && warmLeads.length > 0;
         const showApptsCard = serviceMetricsOn ? !!(svcAppts && svcAppts.length > 0) : namedAppts.length > 0;
-        const showActionsCard = serviceMetricsOn ? !!svcActions && (svcActions.openNow > 0 || svcActions.cleared > 0) : !!(aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0));
+        const showActionsCard = serviceMetricsOn ? !!svcActions && svcActions.openNow > 0 : !!(aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0));
         if (!showWarmCard && !showApptsCard && !showActionsCard) return false;
         return (
         <div className="flex flex-col gap-3.5">
@@ -606,12 +597,13 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           </div>
           {showActionsCard && (
             <Hideable id="card.actions" ctrl={ctrl}>
-            <Card title="Action items" sub={serviceMetricsOn ? "Open and cleared — live counts" : "Created & closed this window · open, overdue and due-today are live counts"} right={<button onClick={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+            <Card title="Action items" sub={serviceMetricsOn ? "Waiting on your team — live count" : "Created & closed this window · open, overdue and due-today are live counts"} right={<button onClick={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
               {serviceMetricsOn ? (
                 <>
+                  {/* openNow only — ov-prod's Overview ("Waiting on your team") never shows `cleared`, only
+                      this live count + the waiting-tasks list (see serviceMetrics.ts). */}
                   <div className="flex gap-6">
                     <div><p className="text-[9.5px] font-bold uppercase tracking-wider text-[#9ca3af]">Open now</p><p className="mt-0.5 text-[20px] font-extrabold tabular-nums text-[#111]">{fmtInt(svcActions!.openNow)}</p></div>
-                    <div><p className="text-[9.5px] font-bold uppercase tracking-wider text-[#9ca3af]">Cleared</p><p className="mt-0.5 text-[20px] font-extrabold tabular-nums text-[#111]">{fmtInt(svcActions!.cleared)}</p></div>
                   </div>
                   {svcActions!.items.length > 0 && (
                     <div className="mt-4 border-t border-[#f3f4f6] pt-3">
