@@ -219,8 +219,8 @@ export function appointmentParamsForOverview(w: ServiceMetricsWindowParams): Rec
 }
 
 /** The Appointments PAGE ("every appointment on the books") wants past + future, so `listAnchor=both` —
- * per the brief, default BOTH, limit up to 50. Single page only today (no cursor loop yet — the response
- * carries `nextCursor` for a follow-up if a rooftop's window ever exceeds 50). */
+ * per the brief, default BOTH, limit up to 50 per page, fully cursor-paginated (see
+ * `fetchAppointmentAllPages`) so a rooftop with more than one page's worth still gets the full count. */
 export function appointmentParamsForAppointmentsPage(w: ServiceMetricsWindowParams, limit = 50): Record<string, string | undefined> {
   return { direction: "both", listAnchor: "both", limit: String(limit), window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
 }
@@ -234,6 +234,38 @@ function fetchAppointment(ctx: Ctx, params: Record<string, string | undefined>) 
 }
 function fetchActionItem(ctx: Ctx, params: Record<string, string | undefined>) {
   return fetchServiceMetric<ActionItemMetricsResponse>(ctx, "action-item", params);
+}
+
+/* Om's list is window-matched on scheduledStart OR createdAt, so a window's response can carry far more
+ * rows than fit on one page — the caller has to page until done rather than stop at page 1, or a
+ * rooftop with more than one page of appointments undercounts against the new page (ov-prod's
+ * api-appointments.ts pages the exact same way, same cap). 100 is a safety ceiling against a runaway
+ * backlog, not an expected volume. */
+const MAX_LIST_PAGES = 100;
+
+/** Cursor-paginate GET /appointment fully, exactly like ov-prod's `fetchAppointmentMetrics`: the first
+ * page's `metrics` block is the rooftop total for the window and does not change page to page, so only
+ * `appointments.items` accumulate across pages. A later page failing (network/5xx) is NOT the whole list
+ * failing — what loaded so far is returned rather than discarded. A backend bug that echoes the same
+ * cursor back forever stops the loop the moment it repeats, rather than spinning to MAX_LIST_PAGES. */
+async function fetchAppointmentAllPages(ctx: Ctx, params: Record<string, string | undefined>): Promise<AppointmentMetricsResponse | null> {
+  const first = await fetchAppointment(ctx, params);
+  if (!first) return null;
+
+  const items = [...(first.appointments?.items ?? [])];
+  let cursor = first.appointments?.nextCursor ?? null;
+  let pages = 1;
+  while (cursor && pages < MAX_LIST_PAGES) {
+    const page = await fetchAppointment(ctx, { ...params, cursor });
+    if (!page) break; // a later page failing is not the whole list failing — keep what loaded
+    items.push(...(page.appointments?.items ?? []));
+    const nextCursor = page.appointments?.nextCursor ?? null;
+    if (nextCursor && nextCursor === cursor) break; // guard against a backend bug echoing the same cursor
+    cursor = nextCursor;
+    pages += 1;
+  }
+
+  return { ...first, appointments: first.appointments ? { ...first.appointments, items } : undefined };
 }
 
 /* ── mapping helpers, shared by every page ─────────────────────────────────────────────────────────── */
@@ -365,7 +397,7 @@ export interface ServiceAppointmentsPageOverlay {
 const APPOINTMENTS_PAGE_EMPTY: ServiceAppointmentsPageOverlay = { loading: false, bookedBySpyne: null, items: null };
 
 export async function loadServiceAppointmentsPageOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceAppointmentsPageOverlay> {
-  const appt = await fetchAppointment(ctx, appointmentParamsForAppointmentsPage(w));
+  const appt = await fetchAppointmentAllPages(ctx, appointmentParamsForAppointmentsPage(w));
   const windowFrom = appt?.window.from ?? null;
   return {
     loading: false,
