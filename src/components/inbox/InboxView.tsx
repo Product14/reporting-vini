@@ -3482,7 +3482,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
             <RightSection title="Next appointments">
               {appts.map((a, i) => {
                 const b = bookingInfo(a, conv?.conversations ?? []);
-                const om = omBookingLine(a.meeting_id, omMap);
+                const om = omBookingLine(a, omMap);
                 return (
                   <div key={i} className="rounded-xl border p-3" style={{ borderColor: C.border }}>
                     <p className="text-[12px] font-semibold" style={{ color: C.dark }}>{apptLabel(a)}</p>
@@ -3638,7 +3638,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
                     </div>
                     {Array.isArray(appt.tags) && appt.tags.length > 0 && <p className="mt-2 text-[12px]" style={{ color: C.sub }}>{appt.tags.join(", ")}</p>}
                     {(() => {
-                      const om = omBookingLine(appt.meeting_id, omMap);
+                      const om = omBookingLine(appt, omMap);
                       if (om !== undefined) return om ? <p className="mt-1 text-[12px]" style={{ color: C.primary }}>{om}</p> : null;
                       const b = bookingInfo(appt, conv?.conversations ?? []);
                       return b && (b.agent || b.dir !== "unknown") ? (
