@@ -247,7 +247,7 @@ function ReportingView() {
           {namedAppts.length > 0 && (
             <div className="flex flex-col gap-3.5">
               <SectionLabel hint={`${fmtInt(namedAppts.length)} on the books`}>Appointments — named</SectionLabel>
-              <Card title="On the books" sub="AI-booked = the AI created the meeting · AI-assisted = flagged AI-assisted in your CRM" pad={false}>
+              <Card title="On the books" sub="AI-booked = the AI created the meeting · AI-assisted = you booked it, on a lead the AI had already spoken to" pad={false}>
                 <NamedApptsTable items={namedAppts.slice(0, 20)} teamId={teamId} />
               </Card>
             </div>

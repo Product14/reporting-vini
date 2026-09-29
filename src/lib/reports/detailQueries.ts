@@ -445,8 +445,15 @@ LIMIT 50 BY team_id
 SETTINGS join_use_nulls = 1`.trim();
 }
 
+/* How far back a CRM booking may reach to find the AI conversation that earns it "assisted". 90d covers
+ * every qualifying booking measured at Covina Kia (33 within 30 days, 5 at 61-90, none beyond) and sits
+ * inside the 120-day meetings floor these queries already scan, so it adds no new scan range. */
+export const ASSIST_LOOKBACK_DAYS = 90;
+
 export interface AppointmentsOpts {
   teamId?: string;
+  /** Days a CRM booking may look back for the AI conversation that earns it "assisted". */
+  assistLookbackDays?: number;
   startFloor?: string; // ClickHouse date expr; floors the meetings scan (booked_at). Default -120d.
 }
 
@@ -462,24 +469,94 @@ export interface AppointmentsOpts {
 // (see notPulledInHistory).
 // Test/demo/reseller enterprises excluded (same predicate as the other detail queries). booked_at floored
 // by ${startFloor} so a full run stays bounded (covers the daily window + the 30d top-vehicles window).
-export function appointmentsSql({ teamId, startFloor = "addDays(today(), -120)" }: AppointmentsOpts = {}): string {
+export function appointmentsSql({ teamId, startFloor = "addDays(today(), -120)", assistLookbackDays = ASSIST_LOOKBACK_DAYS }: AppointmentsOpts = {}): string {
   return `
-WITH meet AS (
+WITH assist_hit AS (
+    /* AI-ASSISTED, by the rule the dealer is told (redefined 2026-09-24, second pass): a booking the store
+     * made in its own CRM on a lead THIS AI HAD ALREADY SPOKEN TO. Per meeting, the most recent AI
+     * conversation on that lead that happened BEFORE the booking, within ${assistLookbackDays} days of it.
+     *
+     * WHY NOT meetings.ai_assisted. The column carries the right idea — where it is populated it agrees
+     * with "the AI spoke to this lead" on 108 of 109 rows — but it is barely written: it starts in
+     * Sep-2026 and covers ~23% of CRM bookings even there. Reading it literally reported 4 assists for
+     * Covina Kia over 30 days where this rule finds 38, i.e. ~9x under. A number that low is worse than
+     * no number, because the dealer's own CRM shows the bookings and the report appears to miss them.
+     *
+     * BEFORE the booking, not merely "ever": 8 of Covina Kia's in-window CRM bookings had their only AI
+     * conversation AFTER the appointment already existed. A conversation that post-dates a booking cannot
+     * have contributed to it, and crediting it is the first thing a skeptical GM would pull on.
+     *
+     * The ${assistLookbackDays}-day lookback is what makes this reportable at all: HALF the qualifying
+     * bookings (19 of 38) had their last prior conversation BEFORE the report window, so a window-bounded
+     * touch test drops them. All 38 fall inside 90 days (33 within 30, 5 at 61-90).
+     */
+    SELECT m.meeting_id AS meeting_id, max(c.createdAt) AS last_touch
+    FROM dealer_leads.meetings AS m FINAL
+    INNER JOIN dealer_leads.conversations AS c FINAL
+        ON c.leadId = m.lead_id
+    WHERE m.__deleted = 0 AND m.is_active = 1
+      AND ifNull(m.source, '') != 'spyne'
+      AND ${notPulledInHistory("m")}
+      AND m.service_type IN ('sales','service')
+      AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
+      AND toDate(m.created_at) >= ${startFloor}
+      AND c.__deleted = 0 AND ifNull(c.isTest, 0) = 0 AND ifNull(c.status, '') != 'failed'
+      AND c.createdAt <= m.created_at
+      AND c.createdAt >= m.created_at - INTERVAL ${assistLookbackDays} DAY
+      ${teamPred("m.team_id", teamId)}
+      ${teamPred("c.teamId", teamId)}
+    GROUP BY m.meeting_id
+),
+assist_agent AS (
+    /* WHICH AGENT an assist is credited to: the LAST AI conversation before the booking that resolves to
+     * a direction, inside the same lookback that decides the assist itself.
+     *
+     * Deliberately NOT window-bounded, and that is the whole point of this CTE. Inclusion already looks
+     * back 90 days; attribution used to look only inside the report window, and the mismatch is what left
+     * 19 of Covina Kia's 38 assists on no agent card at all — their last conversation averaged 28 days
+     * before the booking, inside the lookback but outside a 30-day window.
+     *
+     * The direction chain (conversations.teamAgentMappingId -> teamAgentMappings -> agentTypes
+     * .agentCallType) is a property of the conversation and the lead, never of the reporting period, so a
+     * conversation from two months ago resolves to "Sales Outbound" exactly as well as one from today.
+     * Same chain the spine uses, so both sides name the agent identically.
+     *
+     * Conversations that resolve to no direction are skipped rather than guessed: argMax then picks the
+     * most recent one that DOES resolve, so a booking is credited to a real agent or to none at all. */
+    SELECT m.meeting_id AS meeting_id, argMax(lower(at.agentCallType), c.createdAt) AS assist_direction
+    FROM dealer_leads.meetings AS m FINAL
+    INNER JOIN dealer_leads.conversations AS c FINAL
+        ON c.leadId = m.lead_id
+    INNER JOIN dealer_leads.teamAgentMappings AS tam FINAL
+        ON c.teamAgentMappingId = tam.teamAgentMappingId AND tam.__deleted = 0
+    INNER JOIN dealer_leads.agentTypes AS at FINAL
+        ON tam.agentTypeId = at.agentTypeId AND at.__deleted = 0
+    WHERE m.__deleted = 0 AND m.is_active = 1
+      AND ifNull(m.source, '') != 'spyne'
+      AND ${notPulledInHistory("m")}
+      AND m.service_type IN ('sales','service')
+      AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
+      AND toDate(m.created_at) >= ${startFloor}
+      AND c.__deleted = 0 AND ifNull(c.isTest, 0) = 0 AND ifNull(c.status, '') != 'failed'
+      AND c.createdAt <= m.created_at
+      AND c.createdAt >= m.created_at - INTERVAL ${assistLookbackDays} DAY
+      AND lower(at.agentCallType) IN ('inbound', 'outbound')
+      ${teamPred("m.team_id", teamId)}
+      ${teamPred("c.teamId", teamId)}
+    GROUP BY m.meeting_id
+),
+meet AS (
     SELECT
         m.team_id AS team_id, m.enterprise_id AS enterprise_id, m.service_type AS service_type,
         m.lead_id AS lead_id, m.meeting_id AS meeting_id, m.customer_id AS customer_id,
         m.conversation_id AS conversation_id, m.call_id AS call_id,
         m.intent AS intent, m.meeting_start_time AS meeting_start, m.created_at AS booked_at,
         m.status AS status,
-        /* canonical (CHANGED 2026-09-24): AI-assisted is now the meetings table's OWN ai_assisted flag,
-         * not "any CRM meeting on an outbound-enrolled, AI-worked lead". The old rule was a derivation
-         * this query reconstructed; ai_assisted is the upstream system's own answer, so it is read
-         * directly and no enrollment / AI-touch gate is applied to it any more.
-         * source='spyne' still WINS: the two halves must stay mutually exclusive or a meeting flagged
-         * both ways would leave the AI-booked headline and reappear in the secondary counter. No such
-         * row exists today (every ai_assisted=1 row fleet-wide is source='bdc'), so this only guards
-         * the case where upstream starts setting the flag on its own bookings. */
-        if(ifNull(m.source,'') != 'spyne' AND ifNull(m.ai_assisted, 0) = 1, 1, 0) AS assisted,
+        /* Every non-spyne row that survives the gate below is an assist by construction (it is in
+           assist_hit), so the source alone separates the two halves. source='spyne' WINS, keeping them
+           mutually exclusive — a meeting counted in both would leave the AI-booked headline and
+           reappear in the secondary counter. */
+        if(ifNull(m.source,'') = 'spyne', 0, 1) AS assisted,
         JSONExtractString(ifNull(m.proposed_vins, ''), 1) AS tok
     -- ★ FINAL added 2026-09-09. This was the ONE meetings read in this file without it (campaignsSql's
     -- has always had it), so meet saw every CDC version of a row and any()/argMax() could mix fields
@@ -492,12 +569,11 @@ WITH meet AS (
     JOIN eventila.enterprise_details ed FINAL ON ed.enterprise_id = m.enterprise_id
     WHERE m.__deleted = 0 AND m.is_active = 1
       /* The two halves this list is made of: AI-booked (the AI created the meeting) and AI-assisted
-       * (upstream flagged it). Widened from the old "spyne OR outbound-enrolled lead" gate, which
-       * dropped 73 of the 96 ai_assisted=1 meetings fleet-wide because their lead was never enrolled
-       * in an outbound campaign. Anything else in the CRM is not ours and must stay out — without the
-       * ai_assisted arm this reads as an unfiltered CRM meetings dump (1,826 rows on Covina Kia
-       * alone), every one of which would land in the list as an AI-booked appointment. */
-      AND (m.source = 'spyne' OR ifNull(m.ai_assisted, 0) = 1)
+       * (the AI had spoken to the lead before the store booked it — see assist_hit). Anything else in
+       * the CRM is not ours and must stay out: without the assist_hit arm this is an unfiltered CRM
+       * meetings dump (565 rows on Covina Kia in 30 days against 38 genuine assists), every one of
+       * which would land in the list as an appointment we take credit for. */
+      AND (m.source = 'spyne' OR m.meeting_id IN (SELECT meeting_id FROM assist_hit))
       -- never list a warm_transfer/callback row: we didn't create it (see notPulledInHistory)
       AND ${notPulledInHistory("m")}
       AND m.service_type IN ('sales','service')
@@ -618,7 +694,12 @@ SELECT
     meet.assisted AS assisted,
     -- cd1/cd2 resolve a call- or chat-anchored booking; cl is the anchorless web-chat case (see chat_link),
     -- which is inbound by construction because a web chat is always customer-initiated.
-    any(if(meet.assisted = 1, NULL,
+    /* For an AI-BOOKED row this is the direction that booked it. For an AI-ASSISTED row it is the agent
+       whose conversation earned the assist (assist_agent) — the same question, "which agent does this
+       appointment belong to", answered from the only evidence each half has. Consumers that mean strictly
+       "how was it booked" already skip assisted rows (build.ts nulls their channel; the reports route
+       skips them before reading this). */
+    any(if(meet.assisted = 1, aa.assist_direction,
            coalesce(cd1.direction, cd2.direction, if(cl.conv_id != '', 'inbound', NULL)))) AS direction,
     any(if(meet.assisted = 1, NULL,
            coalesce(cd1.conv_type, cd2.conv_type, if(cl.conv_id != '', 'chat', NULL)))) AS booked_via
@@ -630,6 +711,7 @@ LEFT JOIN vm AS vm2 ON vm2.vin = dvm.vin
 LEFT JOIN conv_dir AS cd1 ON cd1.conv_id = meet.conversation_id
 LEFT JOIN conv_dir AS cd2 ON cd2.call_id = meet.call_id
 LEFT JOIN chat_link AS cl ON cl.meeting_id = meet.meeting_id
+LEFT JOIN assist_agent AS aa ON aa.meeting_id = meet.meeting_id
 -- No assisted-side filter any more: \`meet\` is already exactly the two halves we list (see its gate), so
 -- every row it returns belongs here. The old \`meet.assisted = 0 OR lead IN worked\` line enforced the
 -- retired AI-touch rule.

@@ -511,7 +511,7 @@ export const REPORTS: ReportDef[] = [
           <Stats
             items={[
               { label: "Booked by the AI", value: fmtInt(c.fleet.appointments), sub: "confirmed in your CRM", accent: "#15803d" },
-              { label: "Flagged AI-assisted in the CRM", value: fmtInt(c.fleet.appointmentsAssisted), sub: "your team closed these" },
+              { label: "Booked after an AI conversation", value: fmtInt(c.fleet.appointmentsAssisted), sub: "your team closed these" },
               { label: "Qualified leads", value: fmtInt(c.fleet.qualified), sub: "showed buying intent" },
               { label: "Close rate", value: fmtRate(c.fleet.appointments, c.fleet.qualified), sub: "appointments ÷ qualified leads", accent: "#813fed" },
             ]}
@@ -1860,7 +1860,7 @@ export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
   switch (report.id) {
     case "appointments":
       sheets.push({ name: "Summary", rows: [["Measure", "Value"],
-        ["Booked by the AI", c.fleet.appointments], ["Flagged AI-assisted in the CRM", c.fleet.appointmentsAssisted],
+        ["Booked by the AI", c.fleet.appointments], ["Booked after an AI conversation", c.fleet.appointmentsAssisted],
         ["Qualified leads", c.fleet.qualified]] });
       sheets.push({ name: "By agent", rows: [["Agent", "Direction", "Appointments"],
         ...scopedAgents(c).map((a) => [a.report.summary.person || a.name, a.dir, a.metrics.appointments])] });

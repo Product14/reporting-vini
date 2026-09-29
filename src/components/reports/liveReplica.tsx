@@ -244,7 +244,7 @@ export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads =
   const newTiles = [
     stlTile,
     { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSubSales(fleet), onClick: nav?.onAppointments },
-    { icon: "/live-overview/icon-resolved.svg", value: <CountUp value={fleet.appointmentsAssisted} />, label: "AI-assisted appointments", sub: "flagged AI-assisted in your CRM", onClick: nav?.onAppointments },
+    { icon: "/live-overview/icon-resolved.svg", value: <CountUp value={fleet.appointmentsAssisted} />, label: "AI-assisted appointments", sub: "you booked, after the AI worked the lead", onClick: nav?.onAppointments },
     { icon: "/live-overview/icon-actionitems.svg", value: <CountUp value={extraQualified(fleet)} />, label: "Additional qualified leads", sub: "qualified, not yet booked", onClick: nav?.onConversations },
   ];
   const tiles = variant === "new" ? newTiles : oldTiles;

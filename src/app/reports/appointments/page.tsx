@@ -132,7 +132,7 @@ function AppointmentsView() {
             {/* AI-assisted (CRM) — needs workedBySpyne, held pending the attribution backfill (see
                 serviceMetrics.ts). No twin today; hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <StatTile label="AI-assisted (CRM)" value={fmtInt(fleet.appointmentsAssisted)} sub="flagged AI-assisted in your CRM" accent="#6d28d9" />
+              <StatTile label="AI-assisted (CRM)" value={fmtInt(fleet.appointmentsAssisted)} sub="you booked it, on a lead the AI had spoken to" accent="#6d28d9" />
             )}
             {/* Close rate — needs qualified leads, which Classification stays available:false for
                 (RETCONVAI-5010). No twin today; hidden on Service once the flag is on. */}
@@ -159,8 +159,14 @@ function AppointmentsView() {
             </div>
             <Card
               title="On the books"
-              sub={serviceMetricsOn ? "Booked by Spyne = Spyne booked it" : "AI-booked = the AI created the meeting · AI-assisted = flagged AI-assisted in your CRM (never counted in the headline)"}
+              sub={serviceMetricsOn ? "Booked by Spyne = Spyne booked it" : "AI-booked = the AI created the meeting · AI-assisted = you booked it, on a lead the AI had already spoken to (never counted in the headline)"}
               pad={serviceMetricsOn ? (svcMetrics.items?.length ?? 0) === 0 : filtered.length === 0}
+              right={fleet.appointments > 0 ? (
+                <button onClick={() => { setModalOpen(true); track("appointments_drilldown_opened", { tab: "appointments", team_id: teamId }); }}
+                  className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">
+                  Live drill-down →
+                </button>
+              ) : undefined}
             >
               {serviceMetricsOn ? (
                 (svcMetrics.items?.length ?? 0) > 0 ? (
