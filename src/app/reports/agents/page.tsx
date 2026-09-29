@@ -382,7 +382,14 @@ function AgentReportsView() {
   const svcOm = serviceOmOn && agentSvc === "service" && !!(inbound ? svcAgents.inbound : svcAgents.outbound);
   const qualLabel = svcOm ? "Wanted service" : "Qualified leads";
   const entryStageRaw = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
-  const entryStage = svcOm && !inbound ? { label: "Calls dialed", value: m.calls } : entryStageRaw;
+  // Om, 29-Sep: the funnel's top has to count conversations, like the bar under it. Customers reached
+  // (leadsReached) and calls dialed (voice only) are different units, which is how Honda DTLA read 569
+  // conversations out of 545 reached (104%). conversationsReached = calls connected + SMS threads replied.
+  const svcNums = svcOm ? (inbound ? svcAgents.inbound : svcAgents.outbound) : null;
+  const entryStage = svcNums && svcNums.conversationsReached !== null
+    ? { label: "Conversations reached", value: svcNums.conversationsReached }
+    : svcOm && !inbound ? { label: "Calls dialed", value: m.calls } : entryStageRaw;
+  const funnelCountHeader = svcOm ? "Count" : "Leads (distinct)";
   const funnelStages = [
     { label: entryStage.label, value: scale(entryStage.value) },
     { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
@@ -444,7 +451,7 @@ function AgentReportsView() {
     const funnel: ExportSheet = {
       name: "Funnel",
       rows: [
-        ["Stage", "Leads (distinct)", "Conversion from prior stage"],
+        ["Stage", funnelCountHeader, "Conversion from prior stage"],
         ...funnelStages.map((s, i) => {
           const prev = i > 0 ? funnelStages[i - 1].value : null;
           const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "";
@@ -657,7 +664,7 @@ function AgentReportsView() {
       },
       {
         heading: "Lead-to-appointment funnel",
-        blocks: [{ kind: "rows", columns: ["Stage", "Leads (distinct)", "Conversion from prior stage"], rows: funnelStages.map((s, i) => {
+        blocks: [{ kind: "rows", columns: ["Stage", funnelCountHeader, "Conversion from prior stage"], rows: funnelStages.map((s, i) => {
           const prev = i > 0 ? funnelStages[i - 1].value : null;
           const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "—";
           return [s.label, fmtInt(s.value), conv];
