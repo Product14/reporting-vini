@@ -103,8 +103,9 @@ export function omBookingLine(
     return map.complete && inside ? "Your team" : undefined;
   }
   if (hit.tag === "worked_by_spyne") return held ? null : "Spyne-assisted";
+  // Text bookings count as outbound (Sumit, 28-Sep; the new design's TEXT_BOOKINGS_DIRECTION does the same).
   const how =
-    hit.channel === "text" ? "by text" : hit.direction === "inbound" ? "Inbound" : hit.direction === "outbound" ? "Outbound" : "";
+    hit.channel === "text" ? "Outbound, by text" : hit.direction === "inbound" ? "Inbound" : hit.direction === "outbound" ? "Outbound" : "";
   const who = hit.agentName ? ` (${hit.agentName})` : "";
   return `Booked by Spyne${who}${how ? ` · ${how}` : ""}`;
 }
