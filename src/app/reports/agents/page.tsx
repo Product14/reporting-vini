@@ -44,7 +44,8 @@ import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, CANONICAL_DEFINITION_ROWS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
-import { useServiceOverviewOverlay, shouldUseServiceMetrics } from "@/lib/serviceMetrics";
+import { useServiceOverviewOverlay, useServiceAgentsOverlay, shouldUseServiceMetrics } from "@/lib/serviceMetrics";
+import { applyServiceAgentsOverlay, serviceReportsOmOn } from "@/lib/reports/serviceAgentsOverlay";
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
 const MISSED_LABELS: Record<string, string> = {
@@ -144,7 +145,26 @@ function AgentReportsView() {
       .catch(() => { track("report_load_failed", { tab: "agents", team_id: teamId }); setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
   };
   // Scope the live feed (and the no-crash mock skeleton) to the agents this rooftop actually runs.
-  const AGENTS = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
+  // Sumit, 29-Sep: Service agents' headline numbers read Om's service-metrics API, same source as the
+  // Overview, for the rooftops on NEXT_PUBLIC_SERVICE_REPORTS_OM_TEAMS. The full report is untouched.
+  const serviceOmOn = serviceReportsOmOn(teamId) && dept !== "sales";
+  const svcAgents = useServiceAgentsOverlay({
+    enabled: serviceOmOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: feed?.start,
+    rangeEndExclusive: feed?.end,
+    timezone: feed?.timezone ?? undefined,
+  });
+  const AGENTS = useMemo(
+    () => applyServiceAgentsOverlay(agentsForAccount(feed?.agents ?? [], account), { loading: false, inbound: svcAgents.inbound, outbound: svcAgents.outbound }),
+    // The overlay's two blocks are stable state references; the wrapper object is not.
+    [feed, account, svcAgents.inbound, svcAgents.outbound],
+  );
   const hasTeam = teamId !== "";
   // Carries team scope + the selected window into the tab links and the back arrow, so the window
   // survives navigation back to the Overview tab.
@@ -357,16 +377,21 @@ function AgentReportsView() {
   // appointments) and never double-counts a lead touched on multiple days. Falls back to event counts
   // only if leadFunnel is absent. Canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) ·
   // "Real conversations" · "Qualified leads" · "Appointments — AI-booked".
-  const entryStage = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
+  // Om's API numbers on a Service agent (see serviceAgentsOverlay.ts). Sumit 29-Sep: Service has no
+  // "qualified" field, it reads "Wanted service"; outbound's entry is a dial count, so it says so.
+  const svcOm = serviceOmOn && agentSvc === "service" && !!(inbound ? svcAgents.inbound : svcAgents.outbound);
+  const qualLabel = svcOm ? "Wanted service" : "Qualified leads";
+  const entryStageRaw = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
+  const entryStage = svcOm && !inbound ? { label: "Calls dialed", value: m.calls } : entryStageRaw;
   const funnelStages = [
     { label: entryStage.label, value: scale(entryStage.value) },
     { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
-    { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified) },
+    { label: qualLabel, value: scale(a.leadFunnel?.qualified ?? m.qualified) },
     { label: "Appointments — AI-booked", value: scale(m.appointments) },
   ];
   const outcomeTiles = [
     { label: "Real conversations", value: scale(leadConnected), accent: "#2563eb" },
-    { label: "Qualified leads", value: scale(leadQualified), accent: "#813fed" },
+    { label: qualLabel, value: scale(leadQualified), accent: "#813fed" },
     ...(inbound
       ? [
           { label: "Transferred", value: scale(r.callFlow.transferred), accent: "#059669" },
@@ -1102,9 +1127,9 @@ function AgentReportsView() {
               <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} />
               {/* web chat — the third channel; shown only on rooftops that actually run it (migration 0021) */}
               {scale(m.chats ?? 0) > 0 ? <ActivityStat label="Web chats" value={fmtInt(scale(m.chats ?? 0))} hint="sessions" /> : null}
-              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint="qualified ÷ conversations" accent="#813fed" />
+              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint={svcOm ? "wanted service ÷ conversations" : "qualified ÷ conversations"} accent="#813fed" />
               {inbound
-                ? <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint="AI-booked ÷ qualified" accent="#059669" />
+                ? <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint={svcOm ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
                 : <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="buying intent across campaigns" accent="#059669" />}
             </div>
 
