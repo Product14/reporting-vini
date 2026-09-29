@@ -177,14 +177,27 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
 
   // ── building blocks ─────────────────────────────────────────────────────────────────────────────
   let sectionNo = 0;
+  /* Sections are separated by a RULE and a numbered chip, not by whitespace alone. Spacing on its own
+     read as one continuous document — the eye had nothing to catch on, so "What it took", "Speed to
+     lead" and "Where the month went" ran together. The rule gives a hard edge, the filled chip gives the
+     number weight, and the leading space above is larger than any gap inside a section so the hierarchy
+     is unambiguous. */
   function section(kicker: string, title: string, sub?: string) {
     sectionNo += 1;
-    need(76);
-    doc.setFont("helvetica", "bold").setFontSize(7.5); setText(CYAN);
+    /* Reserve room for the heading AND the block that follows it, not just the heading. Reserving only
+       the heading let "02 Speed to lead" render at the foot of page 1 while its stat strip broke to
+       page 2 — an orphaned title, which in a document a dealer is handed reads as a printing fault. */
+    need(190);
+    y += 10;
+    setDraw(LINE); doc.setLineWidth(0.8); doc.line(M, y, W - M, y);
+    y += 20;
     const n = String(sectionNo).padStart(2, "0");
-    doc.text(n, M, y);
-    setText(MUTED); tracked(kicker.toUpperCase(), M + 18, y, 1.3);
-    y += 16;
+    doc.setFont("helvetica", "bold").setFontSize(7.2);
+    const chipW = doc.getTextWidth(n) + 11;
+    setFill(CYAN); doc.roundedRect(M, y - 8.5, chipW, 12.5, 3, 3, "F");
+    setText(NAVY); doc.text(n, M + 5.5, y);
+    setText(MUTED); tracked(kicker.toUpperCase(), M + chipW + 8, y, 1.3);
+    y += 18;
     doc.setFont("helvetica", "bold").setFontSize(15); setText(INK);
     const t: string[] = doc.splitTextToSize(title, W - M * 2);
     doc.text(t, M, y); y += t.length * 17 + 2;

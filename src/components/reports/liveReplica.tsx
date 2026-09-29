@@ -104,17 +104,26 @@ function HeroTile({ icon, value, label, sub, missing, onClick }: { icon: string;
       </div>
     );
   }
+  /* THE NUMBER IS THE TILE. It used to be 16px sitting under a 28px icon with a 15px gap either side, so
+     the icon outweighed the figure and the card was mostly empty space. The icon is now a small chip on
+     the same line as the label, which frees the whole width for the value at 30px — the tile reads at a
+     glance from across a desk, which is the only way a metric strip earns its place at the top of a page. */
   const inner = (
     <>
-      {icon.startsWith("/") ? <Image src={icon} alt="" width={28} height={28} /> : <span className="text-[24px] leading-none">{icon}</span>}
-      <div className="flex flex-col items-start gap-1">
-        <p className="text-[16px] font-bold leading-[20px] text-[#030712]">{value}</p>
-        <p className="flex items-center gap-1 text-[12px] font-semibold text-[#030712]">{label}{onClick && <span className="text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
-        <p className="text-[12px] text-[#626f81]">{sub}</p>
+      <p className="text-[30px] font-bold leading-none tracking-[-1px] text-[#030712]">{value}</p>
+      <div className="flex flex-col items-start gap-0.5">
+        <p className="flex items-center gap-1.5 text-[12.5px] font-semibold leading-tight text-[#030712]">
+          {icon.startsWith("/")
+            ? <Image src={icon} alt="" width={15} height={15} className="flex-none" />
+            : <span className="text-[13px] leading-none">{icon}</span>}
+          {label}
+          {onClick && <span className="text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}
+        </p>
+        <p className="text-[11.5px] leading-snug text-[#626f81]">{sub}</p>
       </div>
     </>
   );
-  const base = "flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-[#e5e7eb] bg-white p-[15px]";
+  const base = "flex flex-1 basis-0 min-w-[170px] flex-col items-start justify-center gap-2.5 rounded-lg border border-[#e5e7eb] bg-white px-[15px] py-[16px]";
   return onClick
     ? <button onClick={onClick} className={`group ${base} text-left transition-colors hover:border-[#d8caff] hover:bg-[#faf8ff]`}>{inner}</button>
     : <div className={base}>{inner}</div>;
