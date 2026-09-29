@@ -380,7 +380,10 @@ function AgentReportsView() {
   // Om's API numbers on a Service agent (see serviceAgentsOverlay.ts). Sumit 29-Sep: Service has no
   // "qualified" field, it reads "Wanted service"; outbound's entry is a dial count, so it says so.
   const svcOm = serviceOmOn && agentSvc === "service" && !!(inbound ? svcAgents.inbound : svcAgents.outbound);
-  const qualLabel = svcOm ? "Wanted service" : "Qualified leads";
+  // Overnight audit 30-Sep: Om returns neededService unavailable for outbound (under half of connected calls
+  // carry an intent), so the overlay keeps the legacy qualified count. Label it by what is shown, not by the flag.
+  const svcWanted = svcOm && (inbound ? svcAgents.inbound : svcAgents.outbound)?.wantedService != null;
+  const qualLabel = svcWanted ? "Wanted service" : "Qualified leads";
   const entryStageRaw = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
   // Om, 29-Sep: the funnel's top has to count conversations, like the bar under it. Customers reached
   // (leadsReached) and calls dialed (voice only) are different units, which is how Honda DTLA read 569
@@ -1134,9 +1137,9 @@ function AgentReportsView() {
               <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} />
               {/* web chat — the third channel; shown only on rooftops that actually run it (migration 0021) */}
               {scale(m.chats ?? 0) > 0 ? <ActivityStat label="Web chats" value={fmtInt(scale(m.chats ?? 0))} hint="sessions" /> : null}
-              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint={svcOm ? "wanted service ÷ conversations" : "qualified ÷ conversations"} accent="#813fed" />
+              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint={svcWanted ? "wanted service ÷ conversations" : "qualified ÷ conversations"} accent="#813fed" />
               {inbound
-                ? <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint={svcOm ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
+                ? <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint={svcWanted ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
                 : <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="buying intent across campaigns" accent="#059669" />}
             </div>
 
