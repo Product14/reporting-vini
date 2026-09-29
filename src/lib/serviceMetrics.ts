@@ -505,3 +505,82 @@ export async function loadServiceActionItemsPageOverlay(ctx: Ctx, w: ServiceMetr
 export function useServiceActionItemsPageOverlay(params: OverlayHookParams): ServiceActionItemsPageOverlay {
   return useOverlay(params, ACTION_ITEMS_PAGE_EMPTY, loadServiceActionItemsPageOverlay);
 }
+
+/* ── REPORTS > AGENTS, SERVICE (29-Sep) ────────────────────────────────────────────────────────────
+ * Sumit, 29-Sep: every Service number reads Om's API, old page or new, so Reports matches Overview.
+ * The full report stays (library, downloads, every card). Only the Service agents' headline numbers
+ * are replaced, at the AgentData the page and its exports both read, so screen and download agree.
+ * Two decisions, Sumit 29-Sep: "Qualified leads" becomes "Wanted service" (contact.neededService),
+ * and direction is Om's rule, the direction of the call that booked. */
+
+interface ContactMetricsResponse {
+  window: ServiceMetricsWindowInfo;
+  metrics: {
+    calls?: ServiceMetric;
+    smsSent?: ServiceMetric;
+    talkTimeMinutes?: ServiceMetric;
+    leadsReached?: ServiceMetric;
+    realConversations?: ServiceMetric;
+    neededService?: DirectionSplit<ServiceMetric>;
+  };
+}
+
+export interface ServiceAgentNumbers {
+  reached: number | null;
+  conversations: number | null;
+  wantedService: number | null;
+  calls: number | null;
+  smsSent: number | null;
+  talkMinutes: number | null;
+  booked: number | null;
+}
+
+export interface ServiceAgentsOverlay {
+  loading: boolean;
+  inbound: ServiceAgentNumbers | null;
+  outbound: ServiceAgentNumbers | null;
+}
+
+const AGENTS_EMPTY: ServiceAgentsOverlay = { loading: false, inbound: null, outbound: null };
+
+function windowParams(w: ServiceMetricsWindowParams): Record<string, string | undefined> {
+  return { window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
+}
+
+function contactNumbers(c: ContactMetricsResponse | null, dir: ServiceMetricsDirection, booked: number | null): ServiceAgentNumbers | null {
+  if (!c) return null;
+  const from = c.window?.from ?? null;
+  return {
+    reached: metricValue(c.metrics.leadsReached, from),
+    conversations: metricValue(c.metrics.realConversations, from),
+    wantedService: metricValue(c.metrics.neededService?.[dir], from),
+    calls: metricValue(c.metrics.calls, from),
+    smsSent: metricValue(c.metrics.smsSent, from),
+    talkMinutes: metricValue(c.metrics.talkTimeMinutes, from),
+    booked,
+  };
+}
+
+export async function loadServiceAgentsOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceAgentsOverlay> {
+  const [cin, cout, appt] = await Promise.all([
+    fetchServiceMetric<ContactMetricsResponse>(ctx, "contact", { ...windowParams(w), direction: "inbound" }),
+    fetchServiceMetric<ContactMetricsResponse>(ctx, "contact", { ...windowParams(w), direction: "outbound" }),
+    fetchAppointment(ctx, { ...windowParams(w), direction: "both", limit: "1" }),
+  ]);
+  // Same split as the Overview hero: inbound = inbound call bookings; outbound = outbound call
+  // bookings + text bookings (texting is Service Outbound only today).
+  const windowFrom = appt?.window.from ?? null;
+  const bookInbound = rateNumerator(appt?.metrics.bookingRate?.inbound);
+  const outboundCalls = rateNumerator(appt?.metrics.bookingRate?.outbound);
+  const bookedText = metricValue(appt?.metrics.bookedByText, windowFrom);
+  const bookOutbound = outboundCalls === null && (bookedText ?? 0) === 0 ? outboundCalls : (outboundCalls ?? 0) + (bookedText ?? 0);
+  return {
+    loading: false,
+    inbound: contactNumbers(cin, "inbound", bookInbound),
+    outbound: contactNumbers(cout, "outbound", bookOutbound),
+  };
+}
+
+export function useServiceAgentsOverlay(params: OverlayHookParams): ServiceAgentsOverlay {
+  return useOverlay(params, AGENTS_EMPTY, loadServiceAgentsOverlay);
+}
