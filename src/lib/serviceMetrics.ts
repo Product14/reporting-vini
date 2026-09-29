@@ -32,7 +32,7 @@
  */
 
 import { useEffect, useState } from "react";
-import type { Bucket } from "@/components/reports/data";
+import type { Bucket, Meeting } from "@/components/reports/data";
 
 /* ── fields with no twin on the OLD Overview, and why — single source of truth ─────────────────────── */
 export const NO_TWIN_ON_OLD_OVERVIEW = {
@@ -85,6 +85,13 @@ export interface AppointmentListItem {
   vehicle: { year?: string; make?: string; model?: string } | null;
   services: string | null;
   scheduledStart: string | null;
+  // Read by the Reports > Agents drill-down only. Optional: older responses omit them.
+  phone?: string | null;
+  bookedOn?: string | null;
+  tag?: string | null;
+  channel?: "call" | "text" | null;
+  direction?: "inbound" | "outbound" | null;
+  status?: string | null; // not sent yet, asked of Om 29-Sep; the drill-down waits for it
 }
 
 export interface AppointmentMetricsResponse {
@@ -226,6 +233,12 @@ export function appointmentParamsForOverview(w: ServiceMetricsWindowParams): Rec
  * `fetchAppointmentAllPages`) so a rooftop with more than one page's worth still gets the full count. */
 export function appointmentParamsForAppointmentsPage(w: ServiceMetricsWindowParams, limit = 50): Record<string, string | undefined> {
   return { direction: "both", listAnchor: "both", limit: String(limit), window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
+}
+
+/** Reports > Agents drill-down: the rows bookedBySpyne counts, and only those. Created in the window
+ * (the tile's anchor), tagged booked_by_spyne, both directions (split client-side, see agentListSide). */
+export function appointmentParamsForAgentList(w: ServiceMetricsWindowParams, limit = 50): Record<string, string | undefined> {
+  return { direction: "both", listAnchor: "created", tag: "booked_by_spyne", limit: String(limit), window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
 }
 
 export function actionItemParams(w: ServiceMetricsWindowParams, limit = 10): Record<string, string | undefined> {
@@ -539,9 +552,43 @@ export interface ServiceAgentsOverlay {
   loading: boolean;
   inbound: ServiceAgentNumbers | null;
   outbound: ServiceAgentNumbers | null;
+  // The rows behind each side's AI-booked tile, from Om's list. null = keep the old drill-down.
+  inboundList?: Meeting[] | null;
+  outboundList?: Meeting[] | null;
 }
 
-const AGENTS_EMPTY: ServiceAgentsOverlay = { loading: false, inbound: null, outbound: null };
+const AGENTS_EMPTY: ServiceAgentsOverlay = { loading: false, inbound: null, outbound: null, inboundList: null, outboundList: null };
+
+/** Pure. Which agent a booked row belongs to, by the same rule as the tiles: inbound = inbound call
+ * bookings; outbound = outbound call bookings + text bookings. A row with neither is on no tile. */
+export function agentListSide(it: AppointmentListItem): "inbound" | "outbound" | null {
+  if (it.channel === "text" || it.direction === "outbound") return "outbound";
+  if (it.channel === "call" && it.direction === "inbound") return "inbound";
+  return null;
+}
+
+/** Pure. Om's list becomes the drill-down only when every row says what it is: tagged booked_by_spyne
+ * (an API that ignored the tag filter would list dealer bookings too) and carrying a status (without it
+ * a cancelled row would look live, which is the 29-Sep WolfChase escalation). Otherwise null, and the
+ * page keeps the old list rather than show a worse one. */
+export function agentDrilldownLists(items: AppointmentListItem[] | undefined | null): { inbound: Meeting[]; outbound: Meeting[] } | null {
+  if (!items) return null;
+  if (!items.every((it) => it.tag === "booked_by_spyne" && typeof it.status === "string" && it.status !== "")) return null;
+  const toMeeting = (it: AppointmentListItem): Meeting => ({
+    id: it.meetingId, leadId: null,
+    customer: it.customerName || "Customer",
+    phone: it.phone ?? null,
+    vehicle: it.vehicle ? [it.vehicle.year, it.vehicle.make, it.vehicle.model].filter(Boolean).join(" ") : "",
+    when: it.scheduledStart ?? "", tz: null,
+    status: it.status as string,
+    serviceType: "service", assignedTo: null, intent: null,
+    bookedAt: it.bookedOn ?? null,
+  });
+  return {
+    inbound: items.filter((it) => agentListSide(it) === "inbound").map(toMeeting),
+    outbound: items.filter((it) => agentListSide(it) === "outbound").map(toMeeting),
+  };
+}
 
 function windowParams(w: ServiceMetricsWindowParams): Record<string, string | undefined> {
   return { window: w.window, startDate: w.startDate, endDate: w.endDate, timezone: w.timezone };
@@ -562,11 +609,13 @@ function contactNumbers(c: ContactMetricsResponse | null, dir: ServiceMetricsDir
 }
 
 export async function loadServiceAgentsOverlay(ctx: Ctx, w: ServiceMetricsWindowParams): Promise<ServiceAgentsOverlay> {
-  const [cin, cout, appt] = await Promise.all([
+  const [cin, cout, appt, list] = await Promise.all([
     fetchServiceMetric<ContactMetricsResponse>(ctx, "contact", { ...windowParams(w), direction: "inbound" }),
     fetchServiceMetric<ContactMetricsResponse>(ctx, "contact", { ...windowParams(w), direction: "outbound" }),
     fetchAppointment(ctx, { ...windowParams(w), direction: "both", limit: "1" }),
+    fetchAppointmentAllPages(ctx, appointmentParamsForAgentList(w)),
   ]);
+  const lists = agentDrilldownLists(list?.appointments?.items);
   // Same split as the Overview hero: inbound = inbound call bookings; outbound = outbound call
   // bookings + text bookings (texting is Service Outbound only today).
   const windowFrom = appt?.window.from ?? null;
@@ -578,6 +627,8 @@ export async function loadServiceAgentsOverlay(ctx: Ctx, w: ServiceMetricsWindow
     loading: false,
     inbound: contactNumbers(cin, "inbound", bookInbound),
     outbound: contactNumbers(cout, "outbound", bookOutbound),
+    inboundList: lists?.inbound ?? null,
+    outboundList: lists?.outbound ?? null,
   };
 }
 
