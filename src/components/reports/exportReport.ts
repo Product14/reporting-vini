@@ -14,7 +14,11 @@ export interface ExportSheet {
 // sub-label drawn above just this block (e.g. two tables — "Wins" and "Missed" — inside one section).
 export type PdfBlock =
   | { kind: "rows"; title?: string; columns?: string[]; rows: (string | number)[][] }
-  | { kind: "note"; text: string };
+  | { kind: "note"; text: string }
+  /* A headline strip: two to four big figures side by side, the way the report opens on screen. Exists
+     so a dealer-facing export leads with the outcome instead of a table — the first thing on the page
+     should be the number they care about, not a column header. */
+  | { kind: "stats"; stats: { value: string; label: string; sub?: string }[] };
 export interface PdfSection {
   heading: string;
   blocks: PdfBlock[];
@@ -32,7 +36,7 @@ export const CANONICAL_DEFINITION_ROWS: [string, string][] = [
   ["Real conversation", "The customer actually spoke on a non-voicemail call, or replied to a text. Voicemail is excluded."],
   ["Qualified", "Concrete buying intent — vehicle, availability, price, financing, trade-in, test-drive or booking. Same rule for calls and texts. A bare reply counts as Engaged, not Qualified."],
   ["Appointments — AI-booked", "The AI created the meeting record. This is the headline appointment number."],
-  ["AI-assisted (CRM)", "Flagged AI-assisted in your CRM (meetings.ai_assisted). Reported separately and never folded into the AI-booked total."],
+  ["AI-assisted (CRM)", "Booked by your team in your CRM, on a lead the AI had already spoken to within the previous 90 days. Reported separately and never folded into the AI-booked total."],
   ["Hand-offs", "Completed transfers plus requested callbacks. Failed transfers are reported separately."],
   ["Turn rate", "Qualified leads ÷ real conversations."],
   ["Close rate", "AI-booked appointments ÷ qualified leads."],
@@ -44,7 +48,7 @@ export const CANONICAL_DEFINITIONS =
   "(voicemail excluded). Qualified = concrete buying intent (vehicle / availability / price / financing " +
   "/ trade-in / test-drive / booking) — same rule for calls and texts; a bare reply counts as Engaged, " +
   "not Qualified. Appointments — AI-booked = the AI created the meeting record; AI-assisted (CRM) = " +
-  "flagged AI-assisted in your CRM, shown separately and never folded into that total. " +
+  "booked by your team on a lead the AI had already spoken to, shown separately and never folded into that total. " +
   "Hand-offs = completed transfers plus requested callbacks; failed transfers are reported separately. " +
   "Turn rate = qualified leads ÷ real conversations. Close rate = AI-booked appointments ÷ qualified leads.\n\n" +
   "All figures are de-duplicated and consistent with the live report, the Vini console, and your " +

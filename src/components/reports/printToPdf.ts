@@ -97,6 +97,30 @@ function renderBlock(
 ): number {
   let y = startY;
 
+  if (block.kind === "stats") {
+    // Equal columns, a hairline rule between them — the print equivalent of the on-screen stat card.
+    const n = Math.max(1, block.stats.length);
+    const colW = contentWidth / n;
+    const top = y;
+    block.stats.forEach((st, i) => {
+      const x = MARGIN_X + i * colW;
+      doc.setFont("helvetica", "bold").setFontSize(20).setTextColor(...INK);
+      doc.text(st.value, x, y + 16);
+      doc.setFont("helvetica", "bold").setFontSize(8.5).setTextColor(55, 65, 81);
+      const lab: string[] = doc.splitTextToSize(st.label, colW - 12);
+      doc.text(lab, x, y + 30);
+      if (st.sub) {
+        doc.setFont("helvetica", "normal").setFontSize(7.5).setTextColor(...MUTED);
+        doc.text(doc.splitTextToSize(st.sub, colW - 12) as string[], x, y + 30 + lab.length * 9.5 + 3);
+      }
+      if (i) {
+        doc.setDrawColor(229, 231, 235);
+        doc.line(x - 8, top - 2, x - 8, top + 44);
+      }
+    });
+    return y + 58;
+  }
+
   if (block.kind === "note") {
     doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(...MUTED);
     const lines: string[] = doc.splitTextToSize(block.text, contentWidth);

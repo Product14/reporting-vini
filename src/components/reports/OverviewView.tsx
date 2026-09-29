@@ -38,6 +38,8 @@ import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
 import { useDateRange, useVariant, reportNavQuery, type Dept } from "@/components/reports/dateRange";
+import { exportRoiPdf } from "@/components/reports/roiExport";
+import type { QualifiedLead } from "@/app/api/reports/qualified-leads/route";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { useOutcomes, OutcomesSection } from "@/components/reports/outcomes";
 import { goCrossPage } from "@/components/reports/parentNav";
@@ -655,11 +657,61 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     },
   ];
 
+  /* EXPORT PDF — the ROI report a CSM sends a dealer, built from exactly what this page is showing:
+     same window, same department, same figures. The one thing the page does NOT already hold is the
+     NAMED "qualified but not booked" list, so that is fetched on click rather than on every render —
+     it is a PII read nobody needs until they ask for the document. */
+  const [exporting, setExporting] = useState(false);
+  const onExportPdf = async () => {
+    if (exporting || !feed) return;
+    setExporting(true);
+    track("report_exported", { tab: "overview", team_id: teamId, format: "pdf", range: custom ? "custom" : bucket });
+    try {
+      const qs = new URLSearchParams({ team_id: teamId, serviceType: dept === "all" ? "both" : dept });
+      // Send the window the way the page resolved it, so the export cannot drift from the tiles by a day.
+      if (feed.start && feed.end) { qs.set("start", feed.start); qs.set("end", feed.end); }
+      else if (custom) { qs.set("start", custom.start); qs.set("end", addDay(custom.end)); }
+      else qs.set("bucket", bucket);
+      if (spyneToken) qs.set("auth_key", spyneToken);
+      if (spyneEnv) qs.set("env", spyneEnv);
+
+      let qualified: QualifiedLead[] = [];
+      let qualifiedTotal = fleet.qualified;
+      try {
+        const r = await fetch(`/api/reports/qualified-leads?${qs}`);
+        if (r.ok) {
+          const j = await r.json();
+          qualified = Array.isArray(j.leads) ? j.leads : [];
+          if (typeof j.total === "number") qualifiedTotal = j.total;
+        }
+      } catch { /* the document is still worth having without the third list — see below */ }
+
+      await exportRoiPdf({
+        accountName: account.name, periodLabel, dept, fleet,
+        namedAppts, qualified, qualifiedTotal,
+        tzLabel: feed.timezone ? tzShortLabel(feed.timezone) : undefined,
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Date filter + Customize + refresh — the only report controls kept in the live flow. In the preview
   // Live stage these render INSIDE the hero (below "…what your sales AI handled"), so the top bar is
   // dropped entirely; on the production report they stay in the top bar.
   const liveControls = hasTeam ? (
     <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
+      <button
+        onClick={onExportPdf}
+        disabled={exporting || feed === null}
+        title="Download this report as a PDF for the selected period"
+        className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#813fed] px-3 text-[12px] font-bold text-white transition-colors hover:bg-[#6d28d9] disabled:opacity-50"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 3v12M7 11l5 5 5-5M5 21h14" />
+        </svg>
+        {exporting ? "Preparing…" : "Export PDF"}
+      </button>
       {liveReady && <CustomizeToggle ctrl={ctrl} />}
       {showPreview && stage === "live" && <CustomizeToggle ctrl={liveCtrl} />}
       <DateFilter
