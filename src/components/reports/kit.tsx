@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
 import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
-import { useDept, useVariant, type Dept, type ReportVariant } from "./dateRange";
+import { useDept, type Dept, type ReportVariant } from "./dateRange";
 import { track } from "@/lib/analytics";
 
 export * from "./data";
@@ -115,9 +115,9 @@ export function ReportTopBar({
   }, []);
   // top-level department scope — shared across every tab (persisted in the URL via useDept).
   const { dept, setDept, locked } = useDept();
-  // Staged rollout: Old (today's production report) vs New (the 2026-09-24 changes). URL-persisted so the
-  // choice carries across tabs; default "old" so nobody sees the redesign until they ask for it.
-  const { variant, setVariant } = useVariant();
+  // (The Old/New variant hook was dropped here with the switcher below — the new Overview is the default
+  //  for every rooftop now. Restoring the control means restoring `const { variant, setVariant } =
+  //  useVariant();` alongside it, and re-adding useVariant to the dateRange import above.)
 
   return (
     <div
@@ -148,12 +148,11 @@ export function ReportTopBar({
         </div>
         )}
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          {/* Sits FIRST, left of every other control: it changes what the rest of the header is describing,
-              so it reads as a scope on the page rather than one more filter among the filters.
-              SALES ONLY — every change behind the New variant is a sales-report change (the service hero
-              is a separate component, and the outcomes cards are already gated to sales), so offering the
-              switch on a Service report would promise a difference that variant cannot produce. */}
-          {teamId && dept !== "service" && <VariantSwitcher variant={variant} setVariant={setVariant} />}
+          {/* OLD/NEW SWITCHER — not rendered since 2026-09-29: the new Overview is now the default for
+              every rooftop, so there is nothing to choose between. VariantSwitcher and useVariant are
+              both still here and `?view=old` still resolves, so this is one line to put back if the
+              rollout needs a visible escape hatch again.
+          {teamId && dept !== "service" && <VariantSwitcher variant={variant} setVariant={setVariant} />} */}
           {teamId && !locked && !hideDept && <DeptSwitcher dept={dept} setDept={setDept} />}
           {right}
         </div>
