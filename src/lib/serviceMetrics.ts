@@ -20,8 +20,8 @@
  *   the single place that decision lives; nothing downstream re-decides it per tile.)
  *
  * A field that DOES have a twin can still be under an explicit HOLD (mirrors availability.ts's
- * HOLD_ATTRIBUTION_UNTIL_BACKFILL): `workedBySpyne` (AI-assisted appointments) and the whole Opportunity
- * endpoint stay hidden pending the attribution backfill, exactly like the new page.
+ * HOLD_ATTRIBUTION_UNTIL_BACKFILL): the whole Opportunity endpoint stays hidden pending the attribution
+ * backfill. `workedBySpyne` was under the same hold until 29-Sep, see HOLD_WORKED_BY_SPYNE.
  *
  * `metricValue()`/`rateNumerator()` are the only places a `{available, value}` row becomes a
  * number-or-null — every caller reads through them, never `metric.value` directly.
@@ -121,12 +121,12 @@ export interface ActionItemMetricsResponse {
   actionItems: { items: ActionItemListItem[]; total: number; nextCursor?: string | null };
 }
 
-/* Sumit, 26-Sep-2026: Worked by Spyne (AI-assisted appointments) stays hidden until the attribution
- * backfill (planned Monday). Mirrors HOLD_ATTRIBUTION_UNTIL_BACKFILL in the new page's availability.ts —
- * flip both together. The whole Opportunity endpoint is under the same hold on the new page
+/* Sumit, 29-Sep-2026: Worked by Spyne (AI-assisted appointments) shows on the old Overview too, matching
+ * the new design. Was held from 26-Sep pending the attribution backfill (HOLD_ATTRIBUTION_UNTIL_BACKFILL
+ * in the new page's availability.ts). The whole Opportunity endpoint is under the same hold on the new page
  * (RETCONVAI-5150 isn't shipped at all yet); this file never calls Opportunity, for the same reason it
  * never calls Contact — see NO_TWIN_ON_OLD_OVERVIEW. */
-export const HOLD_WORKED_BY_SPYNE = true;
+export const HOLD_WORKED_BY_SPYNE = false;
 
 function coversWindow(coverageFrom: string | undefined, windowFrom: string | undefined | null): boolean {
   if (!coverageFrom || !windowFrom) return true;
