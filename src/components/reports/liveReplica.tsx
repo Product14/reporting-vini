@@ -192,9 +192,12 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
 function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOverlay; nav?: HeroNav }) {
   const appt = overlay.appointments;
   const ai = overlay.actionItems;
-  const apptSplit = appt && (appt.inbound != null || appt.outbound != null)
+  const apptSplitBase = appt && (appt.inbound != null || appt.outbound != null)
     ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound`
     : "Booked by Spyne";
+  // Same "+N assisted" tail the flag-off sub-line carries (apptSub above), so the number doesn't vanish when
+  // the rooftop moves onto the service-metrics API. Not added into the headline: total is booked by Spyne.
+  const apptSplit = appt?.assisted ? `${apptSplitBase} · +${fmtInt(appt.assisted)} Spyne-assisted` : apptSplitBase;
   type Tile = { icon: string; chipBg: string; headline: React.ReactNode; sub: string; onClick?: () => void };
   const maybeTiles: Array<Tile | null> = [
     ai && { icon: "/live-overview/icon-actionitems.svg", chipBg: "#e7f6ec", headline: <><CountUp value={ai.openNow} /> Action Items</>, sub: "open now", onClick: nav?.onActionItems },
