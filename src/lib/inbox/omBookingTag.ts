@@ -12,14 +12,18 @@
  *
  * Mechanics: two tag-filtered requests (`tag=booked_by_spyne`, `tag=worked_by_spyne`, `listAnchor=created`)
  * over the last LOOKBACK_DAYS, cached per rooftop for the page session, then looked up by meetingId. The
- * dealer's own bookings are never fetched (Honda DTLA: about 3,350 a month), so a meeting in neither set is
- * treated as unknown and keeps the old line, never relabelled "your team" on a guess.
+ * dealer's own bookings are never fetched (Honda DTLA: about 3,350 a month). Both tag lists are complete for
+ * appointments created inside the lookback, so a meeting created inside it and in neither list is Om's
+ * booked_by_dealer and reads "Your team", same words as the new design. That inference is made only when
+ * every page of both lists loaded, and only for a meeting created at least a day after the lookback opens
+ * (the range is cut in UTC, Om cuts it in rooftop time). Anything else keeps the old line.
  */
 
-/** Mirrors HOLD_WORKED_BY_SPYNE in src/lib/serviceMetrics.ts. Kept local so this file has no imports and
- * lands cleanly on the vini-conversations deploy, which is older than serviceMetrics.ts. While true, a
- * Spyne-assisted appointment shows no "Booked by" line at all rather than a wrong one. */
-export const HOLD_SPYNE_ASSISTED = true;
+/** Sumit, 29-Sep: the Inbox shows Spyne-assisted, same as the new design (overview APPT_TAG_LABEL).
+ * Deliberately NOT tied to HOLD_WORKED_BY_SPYNE in src/lib/serviceMetrics.ts, which still hides it on the
+ * old Overview. Kept local so this file has no imports and lands cleanly on the vini-conversations deploy.
+ * Set true to show no line at all on a Spyne-assisted appointment. */
+export const HOLD_SPYNE_ASSISTED = false;
 
 export const LOOKBACK_DAYS = 60;
 const MAX_PAGES = 20; // 20 x 50 rows per tag; far above a rooftop's 60-day Spyne bookings
@@ -32,7 +36,13 @@ export interface OmBooking {
   channel: "call" | "text" | null;
   agentName: string | null;
 }
-export type OmBookingMap = Map<string, OmBooking>;
+export interface OmBookingMap {
+  byMeeting: Map<string, OmBooking>;
+  /** Both lists fully loaded, so absence means booked_by_dealer for a meeting created after `safeFrom`. */
+  complete: boolean;
+  /** ISO date. Meetings created on or after it can be read as "Your team" when absent. */
+  safeFrom: string;
+}
 
 export interface OmCtx {
   enterpriseId: string;
@@ -61,6 +71,15 @@ export function lookbackRange(now = Date.now(), days = LOOKBACK_DAYS): { startDa
   return { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) };
 }
 
+/** The raw meeting fields the Inbox already receives (conversations v2 `nextAppointments` are lean
+ * meetings documents, the same collection and fields Om reads). */
+export interface InboxMeetingLike {
+  meeting_id?: unknown;
+  createdAt?: unknown;
+  service_type?: unknown;
+  is_demo_meeting?: unknown;
+}
+
 /**
  * The line to show under a Service appointment, from Om's tag.
  *   undefined -> no Om answer for this row, caller keeps its old line
@@ -68,13 +87,21 @@ export function lookbackRange(now = Date.now(), days = LOOKBACK_DAYS): { startDa
  *   string    -> show this
  */
 export function omBookingLine(
-  meetingId: string | undefined,
+  appt: InboxMeetingLike | null | undefined,
   map: OmBookingMap | null,
   held = HOLD_SPYNE_ASSISTED,
 ): string | null | undefined {
+  const meetingId = typeof appt?.meeting_id === "string" ? appt.meeting_id : "";
   if (!map || !meetingId) return undefined;
-  const hit = map.get(meetingId);
-  if (!hit) return undefined;
+  const hit = map.byMeeting.get(meetingId);
+  if (!hit) {
+    // Om's lists only ever hold service_type=service, non-demo meetings (appointment-metrics.service.ts
+    // meetingMatch). Outside that, absence says nothing.
+    if (appt?.service_type !== "service" || appt?.is_demo_meeting === true) return undefined;
+    const created = typeof appt?.createdAt === "string" ? Date.parse(appt.createdAt) : NaN;
+    const inside = Number.isFinite(created) && created >= Date.parse(map.safeFrom);
+    return map.complete && inside ? "Your team" : undefined;
+  }
   if (hit.tag === "worked_by_spyne") return held ? null : "Spyne-assisted";
   const how =
     hit.channel === "text" ? "by text" : hit.direction === "inbound" ? "Inbound" : hit.direction === "outbound" ? "Outbound" : "";
@@ -86,8 +113,10 @@ export function omBookingLine(
 export function buildOmBookingMap(
   booked: Array<Record<string, unknown>>,
   worked: Array<Record<string, unknown>>,
+  complete = false,
+  safeFrom = "9999-12-31",
 ): OmBookingMap {
-  const map: OmBookingMap = new Map();
+  const map = new Map<string, OmBooking>();
   const put = (rows: Array<Record<string, unknown>>, tag: OmTag) => {
     for (const r of rows) {
       const id = typeof r.meetingId === "string" ? r.meetingId : "";
@@ -103,7 +132,7 @@ export function buildOmBookingMap(
   };
   put(worked, "worked_by_spyne");
   put(booked, "booked_by_spyne");
-  return map;
+  return { byMeeting: map, complete, safeFrom };
 }
 
 function apiBaseForEnv(env?: string | null): string {
@@ -143,14 +172,16 @@ async function fetchTagRows(ctx: OmCtx, tag: OmTag, range: { startDate: string; 
   let cursor: string | null = null;
   for (let page = 0; page < MAX_PAGES; page++) {
     const body = await fetchPage(ctx, cursor ? { ...base, cursor } : base);
-    if (!body) return page === 0 ? null : rows;
+    if (!body) return page === 0 ? null : { rows, complete: false };
     const list = body.appointments as { items?: Array<Record<string, unknown>>; nextCursor?: string | null } | undefined;
-    rows.push(...(list?.items ?? []));
-    const next = list?.nextCursor ?? null;
-    if (!next || next === cursor) break;
+    if (!list || !Array.isArray(list.items)) return page === 0 ? null : { rows, complete: false };
+    rows.push(...list.items);
+    const next = list.nextCursor ?? null;
+    if (!next) return { rows, complete: true };
+    if (next === cursor) return { rows, complete: false };
     cursor = next;
   }
-  return rows;
+  return { rows, complete: false }; // hit MAX_PAGES: more rows exist than were read
 }
 
 const cache = new Map<string, Promise<OmBookingMap | null>>();
@@ -170,7 +201,8 @@ export function fetchOmBookingMap(ctx: OmCtx, timezone?: string): Promise<OmBook
       cache.delete(key);
       return null;
     }
-    return buildOmBookingMap(booked, worked);
+    const safeFrom = new Date(Date.parse(range.startDate) + 86_400_000).toISOString();
+    return buildOmBookingMap(booked.rows, worked.rows, booked.complete && worked.complete, safeFrom);
   });
   cache.set(key, pending);
   return pending;
