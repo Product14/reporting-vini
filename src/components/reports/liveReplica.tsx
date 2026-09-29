@@ -684,8 +684,12 @@ function FunnelBody({ f }: { f: AgentFacts }) {
   );
 }
 
-const AGENT_VIEWS = [["headline", "Headline"], ["funnel", "Funnel"], ["impact", "Impact"], ["compact", "Compact"]] as const;
-type AgentView = (typeof AGENT_VIEWS)[number][0];
+/* Headline and Compact are hidden for now (2026-09-29) — Funnel and Impact are the two being trialled.
+   Their bodies are left in place below so restoring either is a one-line change to this list. */
+const AGENT_VIEWS = [["funnel", "Funnel"], ["impact", "Impact"]] as const;
+/* The union stays wider than the visible list on purpose: HeadlineBody and CompactBody are still here and
+   still compile, so putting either tab back is one entry in AGENT_VIEWS above. */
+type AgentView = "headline" | "funnel" | "impact" | "compact";
 
 export function LiveAgentPerformance({ agents, onOpenAgent }: { agents: AgentData[]; onOpenAgent: (id: string) => void }) {
   /* Funnel is the default for now (2026-09-24 product decision) — the drop-off shape is what this card

@@ -38,7 +38,7 @@ import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
 import { useDateRange, useVariant, reportNavQuery, type Dept } from "@/components/reports/dateRange";
-import { exportRoiPdf } from "@/components/reports/roiExport";
+import { exportRoiPdf } from "@/components/reports/roiPdf";
 import type { QualifiedLead } from "@/app/api/reports/qualified-leads/route";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { useOutcomes, OutcomesSection } from "@/components/reports/outcomes";
