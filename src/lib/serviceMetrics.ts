@@ -147,6 +147,12 @@ export function rateNumerator(rate: ServiceMetricRate | undefined | null): numbe
   return rate && rate.available && typeof rate.numerator === "number" ? rate.numerator : null;
 }
 
+/** A rate's denominator as a count. Unlike the numerator this is read even when `available` is false,
+ * because Om marks a rate unavailable exactly when its denominator is 0, and 0 is a real count. */
+export function rateDenominator(rate: ServiceMetricRate | undefined | null): number | null {
+  return rate && typeof rate.denominator === "number" ? rate.denominator : null;
+}
+
 /** `workedBySpyne`, gated through the hold above (never just `metricValue` alone) — the one place that
  * hold is applied, so a caller can never accidentally read it unheld. */
 export function workedBySpyneValue(metric: ServiceMetric | undefined | null, windowFrom?: string | null): number | null {
@@ -522,11 +528,15 @@ interface ContactMetricsResponse {
     leadsReached?: ServiceMetric;
     realConversations?: ServiceMetric;
     neededService?: DirectionSplit<ServiceMetric>;
+    // Om, 29-Sep: real conversations over conversations reached (calls connected + SMS threads
+    // replied), per direction. Same unit on both sides, so it never goes over 100%.
+    engagementRate?: DirectionSplit<ServiceMetricRate>;
   };
 }
 
 export interface ServiceAgentNumbers {
-  reached: number | null;
+  reached: number | null; // distinct customers (phone-deduped), not conversations
+  conversationsReached: number | null; // the funnel's entry: engagementRate's denominator
   conversations: number | null;
   wantedService: number | null;
   calls: number | null;
@@ -552,6 +562,7 @@ function contactNumbers(c: ContactMetricsResponse | null, dir: ServiceMetricsDir
   const from = c.window?.from ?? null;
   return {
     reached: metricValue(c.metrics.leadsReached, from),
+    conversationsReached: rateDenominator(c.metrics.engagementRate?.[dir]),
     conversations: metricValue(c.metrics.realConversations, from),
     wantedService: metricValue(c.metrics.neededService?.[dir], from),
     calls: metricValue(c.metrics.calls, from),
