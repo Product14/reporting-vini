@@ -329,6 +329,12 @@ function AgentReportsView() {
   const apptModalItems = useMemo(() => {
     if (!apptModal) return null;
     const dir = apptModal.agentType.endsWith("_ob") ? "Outbound" : "Inbound";
+    // Om's rooftops: the rows Om's bookedBySpyne counted, so list and tile share one source. Falls
+    // through to the old rows while Om's list can't be trusted (see agentDrilldownLists).
+    if (apptModal.service === "service") {
+      const om = dir === "Inbound" ? svcAgents.inboundList : svcAgents.outboundList;
+      if (om) return om;
+    }
     return (feed?.namedAppointments ?? [])
       .filter((a) => !a.assisted && a.serviceType === apptModal.service && a.channel === dir)
       .map((a) => ({
@@ -337,7 +343,7 @@ function AgentReportsView() {
         when: a.when ?? "", tz: null, status: a.status,
         serviceType: a.serviceType, assignedTo: null, intent: null, bookedAt: a.bookedAt,
       }));
-  }, [apptModal, feed?.namedAppointments]);
+  }, [apptModal, feed?.namedAppointments, svcAgents.inboundList, svcAgents.outboundList]);
 
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
