@@ -400,8 +400,17 @@ export function serviceMetricsWindowFor(bucket: Bucket, custom: { start: string;
     default:
       // yesterday / last14 / lifetime — no matching preset; fall back to the resolved [start, end) window
       // this page already computed (rangeFor()), sent as explicit dates.
-      return { window: "custom", startDate: rangeStart, endDate: rangeEndExclusive, timezone };
+      // The API's custom endDate is INCLUSIVE (window.util.ts endOf('day')), rangeFor()'s end is exclusive.
+      // Sending it as is made "Yesterday" count yesterday + today (overnight audit, 30-Sep).
+      return { window: "custom", startDate: rangeStart, endDate: rangeEndExclusive ? inclusiveEnd(rangeEndExclusive) : rangeEndExclusive, timezone };
   }
+}
+
+/** "2026-09-30" (exclusive) -> "2026-09-29" (inclusive). */
+export function inclusiveEnd(exclusiveIso: string): string {
+  const d = new Date(`${exclusiveIso.slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }
 
 interface OverlayHookParams {
