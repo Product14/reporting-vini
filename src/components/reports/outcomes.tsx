@@ -36,7 +36,20 @@ export const OUTCOME_RUNGS: { key: string; label: string; color: string }[] = [
   { key: "Transfer", label: "Transferred", color: "#2563eb" },
   { key: "Callback", label: "Callback", color: "#d97706" },
   { key: "Query Resolved", label: "Query resolved", color: "#7c3aed" },
-  { key: "Qualified Lead", label: "Qualified lead", color: "#0891b2" },
+  /* NAMED "Interested, nothing arranged", not "Qualified lead" — same reason as "Booking agreed" above,
+     and a worse collision. These six answer ONE question: what was arranged at the end of the call?
+     Every conversation gets exactly one. This rung is the LEFTOVER — the customer is worth chasing but
+     nothing was set: no booking, no transfer, no callback, no answered question.
+
+     It is NOT the funnel's "Qualified leads", which is rule V12 at LEAD grain and is independent of how
+     the call ended. Measured on 3d3deabc98 (inbound, 30d): 218 V12-qualified conversations across 202
+     leads, of which only 72 ended in THIS rung — 48 ended Transferred, 45 Query Resolved, 20
+     Appointment, 14 Callback, 19 None. Sharing the word put 123 in this legend beneath an agent card
+     reading 193 and invited the reader to treat one as wrong.
+
+     Do NOT re-point this at V12. These rungs must stay mutually exclusive or the row stops summing to
+     its own total and the shares cross 100%. */
+  { key: "Qualified Lead", label: "Interested, nothing arranged", color: "#0891b2" },
   { key: "Voicemail", label: "Voicemail", color: "#cbd2db" },
   { key: "None", label: "No next step", color: "#adb5c0" },
 ];
