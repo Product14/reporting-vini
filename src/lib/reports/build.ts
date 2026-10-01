@@ -9,6 +9,8 @@
 
 import { AGENTS as MOCK_AGENTS, type AgentData, type NamedAppt, type WarmLeadItem } from "@/components/reports/data";
 import type { FetchResult, Basis } from "@/components/reports/liveData";
+import type { CanonicalOverview, CanonicalHotLeads, CanonicalLeadSources } from "@/lib/spyne/consoleReports";
+import { toLeadsBySource } from "@/lib/spyne/consoleReports";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "./schema";
 
 /** Report agent id → agent_type label. Exported so the route can map live per-agent numbers back. */
@@ -79,6 +81,15 @@ const REPLY_LABEL: Record<string, string> = { "0": "Same day", "1": "Day 1", "2"
 const REPLY_ORDER = ["0", "1", "2", "3+"];
 
 export interface BuildInput {
+  /* THE CANONICAL RUNGS, from conversational-ai-backend (`/conversation/reports/overview`).
+   * Optional on purpose: absent (API down, no token, service dept) → every overlay below is skipped
+   * and the aggregate's own numbers render, which is the pre-existing behaviour. */
+  canonical?: CanonicalOverview | null;
+  /* Qualified-minus-booked, from the same backend. Replaces the report_warm_leads snapshot, which was
+   * built from CAMPAIGN OUTCOMES and carried its own hot/warm vocabulary. */
+  canonicalHotLeads?: CanonicalHotLeads | null;
+  /* Keyed by DIRECTION: the card is per agent, and the canonical endpoint is direction-scoped. */
+  canonicalLeadSources?: Partial<Record<"inbound" | "outbound", CanonicalLeadSources | null>>;
   daily: AgentDailyRow[]; // current window, this team
   breakdown: BreakdownRow[]; // current window, this team
   priorDaily: AgentDailyRow[]; // prior equal-length window, this team (basis for deltas)
@@ -150,8 +161,16 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, apptDayCounts, warmLeads, onboardedSlots, onboardedNames, onboardedPhotos, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
-  const hasData = daily.length > 0;
+export function buildResult({ canonical, canonicalHotLeads, canonicalLeadSources, daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, apptDayCounts, warmLeads, onboardedSlots, onboardedNames, onboardedPhotos, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
+  /* "Do we have numbers for this window?" — NOT "does the aggregate have rows?".
+   *
+   * Once the canonical API supplies the rungs, a rooftop can be fully populated with an empty
+   * aggregate. Left as `daily.length > 0` the UI read that as an empty window: it rendered zeros and
+   * re-fetched on the self-heal timer (42 requests on one page load) over data it already had. */
+  const canonHasActivity = Boolean(
+    canonical?.agents.some((a) => a.leadsAttempted || a.engaged || a.calls || a.texts || a.chats),
+  );
+  const hasData = daily.length > 0 || canonHasActivity;
 
   // Keep service_type so each agent shows only its department's callbacks (sales agents → sales leads,
   // service → service) — a service-heavy rooftop's callbacks must not leak onto the Sales cards.
@@ -227,6 +246,38 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     }))
     .sort((x, y) => (x.tier === y.tier ? (y.lastActivity ?? "").localeCompare(x.lastActivity ?? "") : x.tier === "hot" ? -1 : 1));
 
+  /* ── CANONICAL HOT LEADS ──────────────────────────────────────────────────────────────────────
+   * ONE LIST, ONE RULE: qualified and not yet booked. The snapshot above came from campaign outcomes
+   * and split the list into hot/warm on outcome strings like "customer considering" — a second
+   * vocabulary, from the same universe whose booked count said 77 against a calendar holding 9.
+   *
+   * Decision (Ishan, 2026-09-29): warm leads ARE qualified leads, so the tier goes and every row is
+   * "hot". `interest`, `campaign` and `lastActivity` have no canonical source and are left empty
+   * rather than invented — the modal already falls back to "Engaged" for a blank interest.
+   */
+  const canonHot: WarmLeadItem[] = (canonicalHotLeads?.leads ?? []).map((l) => ({
+    customer: l.customer?.trim() || "—",
+    phone: l.phone ?? "",
+    tier: "hot" as const,
+    interest: "",
+    campaign: "",
+    lastActivity: null,
+    // The dept this list was fetched for; the Overview filters its chips on it.
+    serviceType: "sales",
+    /* Not rendered anywhere — the canonical list is rooftop-wide and carries no per-lead direction.
+       Typed as a union, so a value is required. */
+    source: "ob" as const,
+    leadId: l.leadId,
+  }));
+  /* SALES ONLY. The canonical hot-leads call is made with dept:"sales", so every row above is stamped
+     serviceType:"sales". Replacing the whole list wholesale therefore DELETED the service department's
+     warm leads: OverviewView filters these chips on `w.serviceType === dept`, so the Service tab matched
+     nothing and rendered "0 Hot Leads" with an empty card — a regression against the aggregate, not
+     merely an unmigrated surface. Swap out only the sales rows and leave service on the snapshot. */
+  const warmLeadsOut = canonicalHotLeads
+    ? [...canonHot, ...warmLeadItems.filter((w) => w.serviceType !== "sales")]
+    : warmLeadItems;
+
   // prior-window per-agent basis (drives report.deltas + fleet deltas)
   const prior: Record<string, Basis> = {};
   for (const base of MOCK_AGENTS) {
@@ -250,6 +301,31 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
       talkMinutes: Math.round(sum(pr, (r) => r.talk_seconds) / 60),
       afterHours: sum(pr, (r) => r.after_hours),
     };
+  }
+
+  /* PRIOR WINDOW, canonical. The API resolves its own prior window: the SAME length, adjacent, and
+   * END-EXCLUSIVE, so the two never share a boundary day — an inclusive end double-counts it and
+   * reports growth that is really one day counted twice.
+   *
+   * Only the four rungs are overlaid. calls / sms / transfers / talk / afterHours keep the aggregate's
+   * prior, because the API's `previous` block does not carry them and a half-canonical Basis would
+   * make some delta chips canonical and others not. */
+  if (canonical?.previous) {
+    const idByType = Object.fromEntries(
+      Object.entries(AGENT_TYPE_BY_ID).map(([id, t]) => [t, id as AgentData["id"]]),
+    ) as Record<string, AgentData["id"]>;
+    for (const pv of canonical.previous.agents) {
+      const id = idByType[pv.agentType];
+      if (!id || !prior[id]) continue;
+      prior[id] = {
+        ...prior[id],
+        leads: pv.leadsAttempted,
+        conversations: pv.engaged,
+        qualified: pv.qualified,
+        // null only when the meetings API failed — keep the aggregate rather than invent a 0 base.
+        ...(pv.bookedRecords !== null ? { appointments: pv.bookedRecords } : {}),
+      };
+    }
   }
 
   // Which slots to render: the onboarded ones (when the dealer's list is known) UNION any agent_type
@@ -342,6 +418,46 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     //    → qualified → appointment" funnels. Every stage is window-distinct, so no lead is counted twice. ──
     a.leadFunnel = { contacted: leadsAttempted, dialed: leadDialed, connected: leadConnected, qualified: leadQualified, appt: appointments };
 
+    /* ── CANONICAL OVERLAY ────────────────────────────────────────────────────────────────────
+     * Reached → Engaged → Qualified → Booked now come from conversational-ai-backend, which owns
+     * the definitions. Everything above stays as the fallback: when the API is unreachable this
+     * block simply does not run and the aggregate's own numbers render, exactly as before.
+     *
+     * WHY OVERWRITE RATHER THAN REPLACE THE MATH ABOVE: the aggregate still feeds a dozen things the
+     * API does not serve (hourly buckets, trend7, quality, the report blocks). Overlaying only the
+     * rungs keeps those alive while making the four numbers that appear on five different cards
+     * agree — which is the entire point of the exercise.
+     *
+     * `engaged` is LEAD grain, so it is deliberately a different number from `connected` (event
+     * grain) that the quality block above still uses. Appointments stay record grain and assisted
+     * stays OUT of the headline, both matching the API.
+     */
+    const canon = canonical?.agents.find((x) => x.agentType === type);
+    if (canon) {
+      a.metrics = {
+        ...a.metrics,
+        calls: canon.calls,
+        conversations: canon.engaged,
+        qualified: canon.qualified,
+        // null only when the meetings API itself failed — keep the aggregate rather than show 0.
+        appointments: canon.bookedRecords ?? a.metrics.appointments,
+        appointmentsAssisted: canon.assistedAppointments ?? a.metrics.appointmentsAssisted,
+        talkMinutes: canon.talkMinutes,
+        smsSent: canon.texts,
+        chats: canon.chats,
+        // The API returns BOTH halves of the day. The console used to derive during-hours by
+        // subtracting an all-channel after-hours count from the call count, which floored it at 0.
+        afterHours: canon.callsAfterHours,
+      };
+      a.leadFunnel = {
+        contacted: canon.leadsAttempted,
+        dialed: canon.leadsDialed,
+        connected: canon.engaged,
+        qualified: canon.qualified,
+        appt: canon.bookedRecords ?? 0,
+      };
+    }
+
     // ── quality: only the live-backed bits. csat/sentiment have no Q12227 column → zeroed (the UI
     //    hides them); handleTime is "—" when there's no talk time, never a mock value. ──
     a.quality = {
@@ -372,7 +488,14 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     const replies = rollupDim(bd, "reply_offset");
     a.report = {
       ...a.report,
-      leadsAttempted,
+      /* Take the CANONICAL figure when the overlay above ran. a.leadFunnel.contacted is
+         canon.leadsAttempted at this point; the bare `leadsAttempted` const is the pre-overlay
+         aggregate value, and assigning it here silently un-did the overlay for every consumer that
+         reads report.leadsAttempted rather than leadFunnel.contacted. The agent-selector chip on
+         /reports/agents does exactly that, and rendered "0 leads attempted" beside a funnel reading
+         630 for the same agent. Mirrors the `leadFunnel?.contacted ?? report.leadsAttempted`
+         precedence every other caller already applies. */
+      leadsAttempted: a.leadFunnel?.contacted ?? leadsAttempted,
       // conversion rates on a consistent unique-lead basis (appt-leads / qualified-leads / connected-leads)
       abr: leadQualified ? Math.round((appointments / leadQualified) * 100) : 0,
       qualifiedPct: leadConnected ? Math.round((leadQualified / leadConnected) * 100) : 0,
@@ -445,11 +568,25 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     const srcRows = sourceCounts?.[type];
     // Leads by source — shown for BOTH inbound (where leads came from) and outbound (which list/source
     // the dialed leads came from). Prefer the window-distinct RPC; fall back to the breakdown rollup.
-    a.report.leadsBySource = srcRows && srcRows.length
-      ? srcRows.slice(0, 8).map((s) => ({ source: s.source, interacted: s.interacted, engaged: s.interacted, total: s.total, handoffs: 0, appts: s.booked }))
-      : sources.length
-        ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.qualified, engaged: r.qualified, total: r.count, handoffs: 0, appts: r.appts }))
-        : undefined;
+    /* CANONICAL FIRST. Every stage here is the same windowed, lead-grain rule as the funnel above, so
+       the card's "contacted" column equals the agent's Leads reached instead of being a second count
+       of the same thing. The two fallbacks below are untouched. */
+    /* GATED ON DEPARTMENT, not direction alone. The only producer fetches dept:"sales"
+       (api/reports/route.ts), so keying on base.dir by itself handed the SALES lead-source table to
+       Service Inbound / Service Outbound — a source table contradicting the funnel printed directly
+       above it on the same card, and carried into that agent's CSV/XLSX/PDF export. The rung overlay
+       above is dept-safe because it matches on agentType; this one has to say so explicitly. */
+    const canonSrc =
+      base.dept === "Service"
+        ? undefined
+        : canonicalLeadSources?.[base.dir === "Inbound" ? "inbound" : "outbound"]?.leadSources;
+    a.report.leadsBySource = canonSrc && canonSrc.length
+      ? toLeadsBySource(canonSrc).slice(0, 8)
+      : srcRows && srcRows.length
+        ? srcRows.slice(0, 8).map((s) => ({ source: s.source, interacted: s.interacted, engaged: s.interacted, total: s.total, handoffs: 0, appts: s.booked }))
+        : sources.length
+          ? sources.slice(0, 8).map((r) => ({ source: r.value, interacted: r.qualified, engaged: r.qualified, total: r.count, handoffs: 0, appts: r.appts }))
+          : undefined;
     // Speed-to-lead is a SALES INBOUND concept only — service inbound has no new-CRM-lead funnel,
     // so it never shows the card (base.id gate, not just `inbound`).
     if (base.id === "sales_ib") {
@@ -503,7 +640,21 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
       a.trend7 = a.trend7.map(() => 0);
       a.hourly = a.hourly.map(() => 0);
       a.channelSplit = { voice: 0, sms: 0 };
-      a.report = { ...a.report, intent: [], queries: [], multiDayReply: [], leadsBySource: undefined, speedToLead: undefined, outcomes: undefined, intentOutcomes: undefined };
+      a.report = {
+        ...a.report,
+        intent: [],
+        queries: [],
+        multiDayReply: [],
+        /* KEPT when the canonical API supplied it. This block exists to stop the cloned MOCK leaking
+           on an agent with no rows — but an empty aggregate no longer means no activity, and wiping a
+           real canonical list here left the card blank on exactly the rooftops the migration fixes.
+           trend7 / hourly / channelSplit above stay zeroed: we do not serve those, so mock values
+           there would be fabricated. */
+        leadsBySource: canonSrc && canonSrc.length ? a.report.leadsBySource : undefined,
+        speedToLead: undefined,
+        outcomes: undefined,
+        intentOutcomes: undefined,
+      };
     }
 
     // Rooftop-level detail, attached after the zeroing above so it survives for quiet agents (a warm
@@ -551,6 +702,69 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
         : undefined;
     }
 
+
+    /* ── CANONICAL OVERLAY, PART 2 ────────────────────────────────────────────────────────────
+     * Runs AFTER a.report is assembled, because these three live on it.
+     *
+     * The deltas are the important one. Part 1 replaced the current-window numbers and the prior
+     * basis with canonical ones, but the delta block above still divides the AGGREGATE's current by
+     * the canonical prior — two different definitions on either side of one division, which is worse
+     * than either alone. Recomputed here from a.metrics / a.leadFunnel, both already canonical.
+     *
+     * pctDelta returns null (not 0) when the prior window is empty, so "new rooftop" renders as a dash
+     * rather than as fabricated growth. That matches the API's own deltaPct contract exactly.
+     */
+    if (canon) {
+      a.report.callFlow = {
+        ...a.report.callFlow,
+        // Lead grain, matching the funnel — not the call-level count the aggregate sums.
+        transferred: canon.transfers,
+        transfersFailed: canon.transfersFailed,
+      };
+
+      const pbc = prior[base.id];
+      if (pbc) {
+        const abrNow = a.leadFunnel?.qualified
+          ? Math.round((a.metrics.appointments / a.leadFunnel.qualified) * 100)
+          : 0;
+        const abrPrevC = pbc.qualified ? Math.round((pbc.appointments / pbc.qualified) * 100) : 0;
+        a.report.deltas = {
+          leadsAttempted: pctDelta(a.leadFunnel?.contacted ?? 0, pbc.leads),
+          leadsQualified: pctDelta(a.leadFunnel?.qualified ?? 0, pbc.qualified),
+          appointments: pctDelta(a.metrics.appointments, pbc.appointments),
+          totalCalls: pctDelta(a.metrics.calls, pbc.calls),
+          totalSms: pctDelta(a.metrics.smsSent, pbc.sms),
+          abr: pctDelta(abrNow, abrPrevC),
+        };
+      }
+
+      /* Speed to lead, Sales Inbound only — the API returns it for no one else, which matches the
+         card's own `base.id === "sales_ib"` gate above. `medianUnderMin` reads the real median here
+         instead of the aggregate's within1*2 >= count proxy. */
+      const stl = canon.speedToLead;
+      if (stl && base.id === "sales_ib") {
+        a.report.speedToLead = {
+          ...a.report.speedToLead,
+          /* Explicit rather than only spread: a.report.speedToLead is optional, so on a rooftop with
+             no aggregate rows the spread contributes nothing and these would be missing. */
+          missedCalledBack: a.report.speedToLead?.missedCalledBack ?? 0,
+          pctTouched: a.report.speedToLead?.pctTouched ?? 0,
+          note: a.report.speedToLead?.note ?? "",
+          avg: stl.newLeads ? fmtHandle(stl.avgSec) : "—",
+          avgSec: stl.newLeads ? stl.avgSec : null,
+          pctWithin5: stl.pctWithin5,
+          crmLeadsNew: stl.newLeads,
+          instantlyTouched: stl.instantlyTouched,
+          afterHoursInstant: stl.afterHoursInstant,
+          // Composed server-side against the MEETINGS set, not the warehouse — same rule as every
+          // other appointment number on the page.
+          instantAppts: stl.bookedFromAnInstantTouch ?? 0,
+          instantApptRate: Math.round(stl.instantToAppointmentRate ?? 0),
+          medianUnderMin: stl.newLeads > 0 && stl.medianSec <= 60,
+        };
+      }
+    }
+
     return a;
   });
 
@@ -560,8 +774,9 @@ export function buildResult({ daily, breakdown, priorDaily, callbacks, campaigns
     agents,
     hasData,
     fetchedAt: Date.now(),
+    capturedAfterHours: canonical?.rooftop.capturedAfterHours,
     prior,
     namedAppointments: namedApptsOut.length ? namedApptsOut : undefined,
-    warmLeads: warmLeadItems.length ? warmLeadItems : undefined,
+    warmLeads: warmLeadsOut.length ? warmLeadsOut : undefined,
   };
 }

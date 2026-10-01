@@ -6,6 +6,9 @@ import { fetchLiveAppointments, countByAgent } from "@/lib/reports/liveAppointme
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
+import { fetchCanonicalOverview, fetchCanonicalHotLeads, fetchCanonicalLeadSources } from "@/lib/spyne/consoleReports";
+import { cached as cachedSpyne } from "@/lib/spyne/client";
+import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 // Same helper the ETL buckets agent_daily / agent_lead_days with, so the appointment LIST is windowed
 // in the identical day space as the COUNTS shown above it.
@@ -25,7 +28,10 @@ export const dynamic = "force-dynamic";
 // sequential round-trips (readFacts → detail + lead-counts + source-counts + ever-live). Under Vercel's
 // short default timeout that cold path can 504, which the client can't distinguish from "never live" and
 // shows "report is on its way". Give the cold path room to finish so the first load succeeds.
-export const maxDuration = 30;
+/* 60s while the canonical endpoints are slow. The four upstream calls now run SERIALLY (see the gate
+   in consoleReports.ts) because overlapping them tripped the gateway's timeout; ~14s on the reference
+   rooftop, and the 30s budget left no headroom for a cold start on top. */
+export const maxDuration = 60;
 
 // Equal-length window immediately before [start, end) — basis for period deltas.
 function priorWindow(start: string, end: string): { start: string; end: string } {
@@ -266,10 +272,62 @@ export async function GET(request: Request): Promise<Response> {
   const prior = priorWindow(start, end);
   const meta = { start, end, timezone };
 
+  /* THE CANONICAL RUNGS. Started HERE, not awaited until buildResult, so it overlaps the Supabase
+   * reads below and costs no extra wall-clock.
+   *
+   * SALES ONLY, deliberately. The canonical definitions were agreed for Sales Inbound/Outbound;
+   * service agents keep the aggregate's own numbers until the same exercise is done for them, and the
+   * overlay in buildResult is keyed by agentType so they are simply not matched.
+   *
+   * Never throws and never rejects the request: `spyneGet` returns null on any failure, the overlay is
+   * skipped, and the report renders from the aggregate exactly as it did before. */
+  const canonicalP = cachedSpyne(
+    `canon-overview:${spyneEnv ?? "prod"}:${teamId}:${start}:${end}`,
+    async () => {
+      const enterpriseId = enterpriseIdFromToken(spyneToken);
+      if (!enterpriseId) return null;
+      return fetchCanonicalOverview(
+        { enterpriseId, teamId, dept: "sales", start, end },
+        spyneToken,
+        spyneEnv,
+      );
+    },
+  ).catch(() => null);
+
+  /* Leads by type and source, per DIRECTION — the card is per agent. Two calls, both memoised, both
+     fired now so they overlap the Supabase reads rather than adding to the critical path. */
+  const leadSourcesP = Promise.all(
+    (["inbound", "outbound"] as const).map((direction) =>
+      cachedSpyne(`canon-src:${spyneEnv ?? "prod"}:${teamId}:${direction}:${start}:${end}`, async () => {
+        const enterpriseId = enterpriseIdFromToken(spyneToken);
+        if (!enterpriseId) return null;
+        return fetchCanonicalLeadSources({ enterpriseId, teamId, dept: "sales", direction, start, end }, spyneToken, spyneEnv);
+      }).catch(() => null),
+    ),
+  ).then(([inbound, outbound]) => ({ inbound, outbound }));
+
+  /* Qualified-minus-booked, for "Hot & warm leads". Same memo treatment and the same never-throws
+     contract: null simply leaves the Supabase snapshot in place. */
+  const hotLeadsP = cachedSpyne(
+    `canon-hot:${spyneEnv ?? "prod"}:${teamId}:${start}:${end}`,
+    async () => {
+      const enterpriseId = enterpriseIdFromToken(spyneToken);
+      if (!enterpriseId) return null;
+      return fetchCanonicalHotLeads({ enterpriseId, teamId, dept: "sales", start, end }, spyneToken, spyneEnv);
+    },
+  ).catch(() => null);
+
   const sb = getSupabase();
   if (!sb) {
-    // No backend configured → return mock-shaped result so the UI still renders.
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }), ...meta });
+    /* No aggregate configured → mock-shaped result so the UI still renders, BUT the canonical rungs
+       are still overlaid. That is what makes local dev (and, as the migration completes, prod) show
+       real Reached/Engaged/Qualified/Booked with no Supabase at all. */
+    const canonNow = await canonicalP;
+    const built = buildResult({ canonical: canonNow, canonicalHotLeads: await hotLeadsP, canonicalLeadSources: await leadSourcesP, daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos });
+    /* NO AGGREGATE AND NO CANONICAL ANSWER IS AN OUTAGE, NOT AN EMPTY ROOFTOP. Returning a confident
+       200 full of zeros is how a slow upstream ends up telling a dealer they booked nothing. degraded
+       keeps the UI in its syncing state and lets the client retry. */
+    return Response.json({ ...built, ...meta, ...(canonNow ? {} : { degraded: true }) });
   }
 
   // agent_daily is read ONCE across the combined [prior.start, end) range and split in-memory into the
@@ -302,7 +360,11 @@ export async function GET(request: Request): Promise<Response> {
     // from a genuinely quiet day and SUPPRESS the email instead of sending all-zeros. HTTP stays 200 so
     // existing healthy callers that rely on 200 don't break.
     console.error(`[/api/reports] Supabase read failed for team ${teamId}: ${err.message}`);
-    return Response.json({ ...buildResult({ daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }), ...meta, degraded: true }, {
+    return Response.json({
+      ...buildResult({ canonical: await canonicalP, canonicalHotLeads: await hotLeadsP, canonicalLeadSources: await leadSourcesP, daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }),
+      ...meta,
+      degraded: true,
+    }, {
       headers: { "X-Reports-Degraded": "supabase-read-error" },
     });
   }
@@ -419,7 +481,6 @@ export async function GET(request: Request): Promise<Response> {
   // Invariant: a rooftop that returned real rows in THIS request can't be "never live" — don't let a
   // separate probe (even a clean-but-stale empty read) demote it. The probe still gates brand-new
   // rooftops whose selected window AND lifetime are both empty.
-  const everLiveResolved = everLive || allDaily.length > 0;
 
   /* Per-agent, per-store-local-day counts from the same rows, so the day-on-day chart plots the
    * bookings the funnel counts rather than agent_daily's separate appointment column. */
@@ -437,6 +498,9 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const result = buildResult({
+    canonical: await canonicalP,
+    canonicalHotLeads: await hotLeadsP,
+    canonicalLeadSources: await leadSourcesP,
     daily: cur,
     breakdown: (bd.data ?? []) as BreakdownRow[],
     priorDaily: pri,
@@ -453,6 +517,17 @@ export async function GET(request: Request): Promise<Response> {
     priorLeadCounts: lc.prior,
     sourceCounts,
   });
+
+  /* Same rule as the no-aggregate path above: an empty window WITH no canonical answer is an outage,
+     not a finding. Only flagged when the aggregate is empty too — a rooftop with real rows still
+     renders them if the canonical call happens to fail. */
+  const canonicalResolved = await canonicalP;
+
+  /* Resolved AFTER buildResult because it reads result.hasData, which is now true when the CANONICAL
+     API supplied numbers even with an empty aggregate — a rooftop serving real rungs is self-evidently
+     live, and letting the lifetime probe demote it would show the "report is on its way" gate over a
+     working rooftop. */
+  const everLiveResolved = everLive || allDaily.length > 0 || result.hasData;
 
   /* syncedAt = when the AGGREGATE was last rebuilt, not when this request ran. The header used to say
    * "Synced just now" off the client's own fetch time, over data that can be hours old: the sync
@@ -520,7 +595,11 @@ export async function GET(request: Request): Promise<Response> {
     if (priByAgent && basis && typeof basis.appointments === "number") basis.appointments = priByAgent[type] ?? 0;
   }
 
-  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved }, {
-    headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
+  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved, ...(!canonicalResolved && !result.hasData ? { degraded: true } : {}) }, {
+    /* PRIVATE, not shared: this body carries customer names and phone numbers, so it must never sit in
+       a shared CDN cache. `max-age` lets a reload inside 60s come straight from the browser — the
+       canonical endpoints are multi-second warehouse queries and a refresh should not pay for them
+       twice — and `stale-while-revalidate` keeps the numbers on screen while the refresh runs. */
+    headers: { "Cache-Control": "private, max-age=60, stale-while-revalidate=300" },
   });
 }

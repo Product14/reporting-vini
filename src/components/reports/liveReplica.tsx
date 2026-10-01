@@ -21,9 +21,9 @@ import Image from "next/image";
 import type { Account } from "./accounts";
 import type { AgentData, WarmLeadItem, NamedAppt } from "./data";
 import { fmtInt } from "./data";
-import type { ActionItem, ActionItemStats, Conversation } from "./liveData";
+import type { ActionItem, ActionItemStats } from "./liveData";
 import type { FleetLive } from "./liveData";
-import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, agentDisplayName, ConversationDrawer, Modal } from "./kitV3";
+import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, Modal } from "./kitV3";
 import { UnlockPotentialBanner } from "./valueStory";
 import { InterestForm } from "./upsell";
 import { CountUp, useInView } from "./anim";
@@ -86,7 +86,10 @@ function greeting(): string {
 /* ══════════════════════════ 1. Hero — greeting + value-prop strip ══════════════════════════ */
 // Where each hero metric tile navigates on click — to the matching parent console tab (or a drill modal).
 interface HeroNav { onAppointments?: () => void; onActionItems?: () => void; onConversations?: () => void; onHotLeads?: () => void }
-function HeroTile({ icon, value, label, sub, missing, onClick }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; onClick?: () => void }) {
+/** A number still in flight renders as a shimmer bar, never as 0. A zero is a FINDING — "nobody booked
+ *  anything this period" — and showing one while the query is still running tells the dealer something
+ *  untrue, then silently corrects itself a few seconds later. */
+function HeroTile({ icon, value, label, sub, missing, loading, onClick }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; loading?: boolean; onClick?: () => void }) {
   // A metric with no data isn't a dead "—" — it's a feature that isn't switched on. Turn it into an
   // upsell that hands the dealer to Training to enable it.
   if (missing) {
@@ -107,7 +110,11 @@ function HeroTile({ icon, value, label, sub, missing, onClick }: { icon: string;
     <>
       {icon.startsWith("/") ? <Image src={icon} alt="" width={28} height={28} /> : <span className="text-[24px] leading-none">{icon}</span>}
       <div className="flex flex-col items-start gap-1">
-        <p className="text-[16px] font-bold leading-[20px] text-[#030712]">{value}</p>
+        {loading ? (
+          <span className="my-[3px] block h-[14px] w-[52px] animate-pulse rounded bg-[#e6e8ec]" />
+        ) : (
+          <p className="text-[16px] font-bold leading-[20px] text-[#030712]">{value}</p>
+        )}
         <p className="flex items-center gap-1 text-[12px] font-semibold text-[#030712]">{label}{onClick && <span className="text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
         <p className="text-[12px] text-[#626f81]">{sub}</p>
       </div>
@@ -179,7 +186,7 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
   );
 }
 
-export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, variant = "old", nav }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; variant?: ReportVariant; nav?: HeroNav }) {
+export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, variant = "old", nav, loading }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; variant?: ReportVariant; nav?: HeroNav; loading?: boolean }) {
   // Speed-to-lead leads both sets and is identical in both — only tiles 2-4 differ.
   const stlTile = { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled };
   // OLD — production today. Keep this arm byte-for-byte as it shipped: it is the control the New arm is
@@ -214,7 +221,7 @@ export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads =
         <ServiceHeroTiles fleet={fleet} actionStats={actionStats} hotLeads={hotLeads} nav={nav} />
       ) : (
         <div className="flex w-full flex-wrap items-stretch justify-center gap-[15px]">
-          {tiles.map((t) => <HeroTile key={t.label} {...t} />)}
+          {tiles.map((t) => <HeroTile key={t.label} {...t} loading={loading} />)}
         </div>
       )}
     </section>
@@ -1100,118 +1107,25 @@ export function LiveActionItemsTable({ items, stats, onViewAll }: { items: Actio
   );
 }
 
-/* ══════════════════════════ 6. Recent conversations table ══════════════════════════ */
-function convStatus(c: Conversation): { text: string; ok: boolean } {
-  if (c.appointmentScheduled) return { text: "Appointment", ok: true };
-  if (c.queryResolved || c.outcome === "Resolved") return { text: "Resolved", ok: true };
-  return { text: "Unresolved", ok: false };
-}
-export function LiveConversationsTable({
-  items, agentNames, onViewAll,
-}: {
-  items: Conversation[] | null;
-  agentNames: Record<string, string>;
-  onViewAll: () => void;
-}) {
-  const [sel, setSel] = React.useState<Conversation | null>(null);
-  const [tab, setTab] = React.useState("attention");
-  const all = items ?? [];
-  const unresolved = all.filter((c) => !convStatus(c).ok).length;
-  // "Real conversation" (canonical): the customer actually engaged — a call they stayed on (not a
-  // voicemail/no-answer blip) OR an SMS thread with a human reply. No connected flag on the row, so
-  // proxy calls by a short talk-time floor and SMS by the presence of an inbound/human message.
-  const isReal = (c: Conversation) =>
-    c.channel === "call"
-      ? (c.durationSec ?? 0) >= 15
-      : (c.sms?.some((m) => m.direction === "inbound" || m.authorType === "human") ?? (c.msgs ?? 0) > 1);
-  const match = (c: Conversation) => {
-    switch (tab) {
-      case "attention": return !convStatus(c).ok;
-      case "real": return isReal(c);
-      case "call": return c.channel === "call";
-      case "sms": return c.channel === "sms";
-      default: return true; // all
-    }
-  };
-  const rows = all.filter(match).slice(0, 6);
-  const tabs = [
-    { key: "attention", label: "Needs Attention", count: unresolved },
-    { key: "real", label: "Real", count: all.filter(isReal).length },
-    { key: "call", label: "Calls", count: all.filter((c) => c.channel === "call").length },
-    { key: "sms", label: "SMS", count: all.filter((c) => c.channel === "sms").length },
-    { key: "all", label: "All", count: all.length },
-  ];
-  return (
-    <>
-      <div className="flex w-full flex-col items-start gap-[15px] rounded-[10px] border border-[#e5e7eb] bg-white">
-        <div className="flex min-h-[60px] w-full flex-wrap items-center justify-between gap-3 border-b border-[#e5e7eb] px-5 py-[15px]">
-          <p className="text-[14px] font-semibold uppercase text-[#030712]">💬 Recent conversations</p>
-          {items !== null && <TableTabs tabs={tabs} active={tab} onPick={setTab} />}
-        </div>
-        {items === null ? (
-          <div className="w-full px-5 pb-5"><div className="h-[220px] w-full animate-pulse rounded-xl bg-[#f3f4f6]" /></div>
-        ) : rows.length === 0 ? (
-          <p className="px-5 pb-5 text-[12.5px] text-[#626f81]">{tab === "attention" ? "Nothing needs attention — all conversations resolved." : "No conversations synced yet."}</p>
-        ) : (
-          <div className="w-full overflow-x-auto px-[15px]">
-            <table className="w-full min-w-[860px] border-collapse text-[14px]">
-              <thead>
-                <tr className="text-left text-[#626f81]">
-                  <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Customer</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Contact</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] font-medium">Intent</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Date &amp; Time</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Duration</th>
-                  <th className="border-b border-[#e5e7eb] p-[15px] text-center font-medium">Outcome</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((c) => {
-                  const name = c.customer || "Unknown";
-                  const status = convStatus(c);
-                  return (
-                    <tr key={c.id} onClick={() => setSel(c)} className="cursor-pointer hover:bg-[#faf8ff]">
-                      <td className="border-b border-[#e5e7eb] p-[15px]">
-                        <div className="flex items-center gap-2">
-                          <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full text-[11px] font-medium text-white" style={{ background: avatarColor(name) }}>{initials(name)}</span>
-                          <span className="whitespace-nowrap text-[#030712]">{name}</span>
-                        </div>
-                      </td>
-                      <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.channel === "sms" ? "💬" : "📞"} {c.phone ?? "—"}</td>
-                      <td className="max-w-[280px] truncate border-b border-[#e5e7eb] p-[15px] text-[#030712]">{c.title || agentDisplayName(c, agentNames)}</td>
-                      <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-center text-[#030712]">{fmtWhenShort(c.at)}</td>
-                      <td className="whitespace-nowrap border-b border-[#e5e7eb] p-[15px] text-center text-[#030712]">{c.channel === "call" ? (c.durationSec ? fmtSecs(c.durationSec) : "—") : `${c.msgs ?? 0} messages`}</td>
-                      <td className="border-b border-[#e5e7eb] p-[15px] text-center">
-                        <span className="whitespace-nowrap rounded px-[15px] py-1 text-[12px] font-medium" style={status.ok ? { background: C.greenBg, color: C.green } : { background: C.redBg, color: C.red }}>{status.text}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <div className="flex w-full items-center justify-between border-t border-[#e5e7eb] px-5 py-[15px]">
-          <p className="text-[12px] text-[#626f81]">{fmtInt(unresolved)} unresolved of {fmtInt((items ?? []).length)} conversations</p>
-          <button onClick={onViewAll} className="text-[12px] font-medium" style={{ color: C.primary }}>View All Conversations →</button>
-        </div>
-      </div>
-      <ConversationDrawer conv={sel} onClose={() => setSel(null)} agentNames={agentNames} />
-    </>
-  );
-}
+/* "Recent Conversations" table REMOVED (Ishan, 2026-09-28).
+ *
+ * It could only ever print "Unresolved": the SMS branch hardcoded queryResolved:false, so every
+ * text row fell through to that label and the card told the dealer 100% of conversations needed
+ * attention. The data behind it is not there either — 1,950 SMS conversations on the sample day,
+ * 23 with an outcome, 0 with queryResolved, 0 with a summary. Every tab count was the fetch limit
+ * rather than a total, and the "Intent" column rendered the agent's name on SMS rows. */
 
 /* ══════════════════════════ top-level composition ══════════════════════════ */
 export interface LiveOverviewProps {
   account: Account;
   fleet: FleetLive;
+  /** The feed is still in flight — numbers shimmer instead of rendering a misleading 0. */
+  loading?: boolean;
   agents: AgentData[]; // ranked (by appointments desc), already dept-filtered
   warmLeads: WarmLeadItem[];
   namedAppts: NamedAppt[];
   aiStats: { stats: ActionItemStats } | null;
   workItems: ActionItem[];
-  conversations: Conversation[] | null;
-  agentNames: Record<string, string>;
   onOpenAgent: (id: string) => void;
   onViewAppointments: () => void; // "View All →" on the appointments card — navigates to the Appointments tab
   onOpenWarmModal: () => void;
@@ -1244,14 +1158,13 @@ export const LIVE_SECTIONS: { id: string; label: string }[] = [
   { id: "live.hotleads", label: "Hot Leads" },
   { id: "live.appts", label: "Appointments" },
   { id: "live.actions", label: "Action Items" },
-  { id: "live.conversations", label: "Recent Conversations" },
 ];
 // Hot Leads + Appointments render side-by-side when both are visible AND adjacent (the default), and go
 // full-width when hidden/separated — so reorder + independent hide work without breaking the layout.
 const PAIRABLE = new Set(["live.hotleads", "live.appts"]);
 
 export function LiveOverview({
-  account, fleet, agents, warmLeads, namedAppts, aiStats, workItems, conversations, agentNames,
+  account, fleet, loading, agents, warmLeads, namedAppts, aiStats, workItems,
   onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, outcomes, headerControls, ctrl, serviceMode,
   variant = "old",
 }: LiveOverviewProps) {
@@ -1263,7 +1176,7 @@ export function LiveOverview({
   const deptLabel: "Sales" | "Service" = serviceMode ? "Service" : "Sales";
 
   const nodes: Record<string, React.ReactNode> = {
-    "live.hero": <LiveHero fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
+    "live.hero": <LiveHero loading={loading} fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} />,
     /* NEW: one set of numbers, three readings (Headline / Impact / Compact) — see LiveAgentPerformance.
        Upsell cards still fill a missing direction, so a rooftop running one agent keeps its "get the
        other one" prompt instead of a half-empty row. OLD keeps the production pair. */
@@ -1301,7 +1214,6 @@ export function LiveOverview({
       ? <LiveUpcomingApptsCard items={namedAppts} onViewAll={onViewAppointments} />
       : <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
     "live.actions": <LiveActionItemsTable items={workItems} stats={aiStats?.stats ?? null} onViewAll={onViewActionItems} />,
-    "live.conversations": <LiveConversationsTable items={conversations} agentNames={agentNames} onViewAll={onViewConversations} />,
   };
 
   // Apply the customize layout: chosen order (ctrl.order) minus hidden ids; default order + all shown

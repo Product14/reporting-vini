@@ -29,6 +29,8 @@
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
+import { fetchCanonicalDrill } from "@/lib/spyne/consoleReports";
+import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 
@@ -63,7 +65,8 @@ export async function GET(request: Request): Promise<Response> {
 
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
-  if (!hasClickhouseCreds()) return Response.json({ conversations: [], degraded: true });
+  /* The ClickHouse guard moved BELOW the console-API attempt: this panel no longer needs ClickHouse at
+     all when the API answers, and prod Vercel has no ClickHouse access. It still guards the fallback. */
 
   const dept = (searchParams.get("serviceType") || "").toLowerCase();
   const agentType = dept === "service" ? "service" : "sales";
@@ -85,7 +88,9 @@ export async function GET(request: Request): Promise<Response> {
   const piSql = primaryIntent ? ` AND primaryIntent='${chEsc(primaryIntent)}'` : "";
   const ocSql = outcome ? ` AND outcomeAchieved='${chEsc(outcome)}'` : "";
 
-  const tz = (await getStoreTimeZone(teamId, spyneTokenFrom(request), spyneEnvFrom(request))) || "UTC";
+  const spyneToken = spyneTokenFrom(request);
+  const spyneEnv = spyneEnvFrom(request);
+  const tz = (await getStoreTimeZone(teamId, spyneToken, spyneEnv)) || "UTC";
   let start = searchParams.get("start") || "";
   let end = searchParams.get("end") || "";
   if (!DATE_RE.test(start) || !DATE_RE.test(end)) {
@@ -94,6 +99,52 @@ export async function GET(request: Request): Promise<Response> {
     start = r.start;
     end = r.end;
   }
+
+  /* CONSOLE API FIRST (2026-09-29). Same cell, same filters, but the counts this panel opens from now
+   * come from the same backend — so a lane that reads 128 opens 128 rows instead of two independently
+   * derived sets that can disagree. The ClickHouse implementation below is untouched and remains the
+   * fallback; it is also the only path when no Spyne credential is present. */
+  {
+    const entId = enterpriseIdFromToken(spyneToken);
+    if (entId) {
+      const viaApi = await fetchCanonicalDrill(
+        {
+          enterpriseId: entId,
+          teamId,
+          dept: dept === "service" ? "service" : "sales",
+          direction: dirRaw === "inbound" || dirRaw === "outbound" ? dirRaw : undefined,
+          channel: chRaw,
+          callType: callType || undefined,
+          primaryIntent: primaryIntent || undefined,
+          outcome: outcome || undefined,
+          start,
+          end,
+        },
+        spyneToken,
+        spyneEnv,
+      );
+      if (viaApi && Array.isArray(viaApi.conversations)) {
+        /* Field names differ by two: the panel calls the identifier `callId` (it is the conversationId
+           on a text thread) and the message count `msgs`. */
+        const conversations: DrillConversation[] = viaApi.conversations.map((c) => ({
+          callId: c.id,
+          leadId: c.leadId,
+          customer: c.customer,
+          phone: c.phone,
+          at: c.at,
+          durationSec: c.durationSec,
+          summary: c.summary,
+          outcome: c.outcome,
+          hasRecording: c.hasRecording,
+          isSms: c.isSms,
+          msgs: c.messages,
+        }));
+        return Response.json({ conversations, window: { start, end }, degraded: false, source: "console-api" });
+      }
+    }
+  }
+
+  if (!hasClickhouseCreds()) return Response.json({ conversations: [], degraded: true });
 
   const T = chEsc(teamId);
   const TZ = chEsc(tz);

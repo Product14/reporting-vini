@@ -145,7 +145,7 @@ export interface EvalOutcomes {
  * are raised by sales AND service agents alike, so they can't narrow a cohort by department — which is
  * why the funnel/tool fan-out below uses only this set. Mirrors the buckets the eval dashboard treats as
  * its sales base. */
-const SALES_CALL_TYPES = new Set([
+export const SALES_CALL_TYPES = new Set([
   "sales_shopping",
   "sales_routing",
   "sales_appointment_booking",

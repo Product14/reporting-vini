@@ -16,6 +16,8 @@
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { fetchCanonicalLeadConversations } from "@/lib/spyne/consoleReports";
+import type { Conversation } from "@/components/reports/liveData";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -48,9 +50,6 @@ export async function GET(request: Request): Promise<Response> {
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
-  // degraded:true is a LOUD signal — without it, a missing CLICKHOUSE_* env returns an empty 200 that
-  // looks identical to "no events", so the transactional cron silently sends nothing (it did, for days).
-  if (!hasClickhouseCreds()) return Response.json({ conversations: [], total: 0, degraded: true, note: "clickhouse not configured" });
 
   const svc = (searchParams.get("serviceType") || "both").toLowerCase();
   const service = SERVICE.has(svc) ? svc : "both";
@@ -75,6 +74,70 @@ export async function GET(request: Request): Promise<Response> {
   // the time window — used by the "review conversation" drill-down on named leads. Validated like team_id.
   const leadId = (searchParams.get("leadId") || "").trim();
   const leadScoped = idOk(leadId);
+
+  /* CONSOLE API FIRST, but ONLY for a lead-scoped request (2026-09-29).
+   *
+   * `/reports/lead-conversations` serves ONE lead's calls and texts with their transcripts — which is
+   * exactly what the flow-drill row click and the Hot & warm leads drawer ask for. The un-scoped uses
+   * of this route (the calls page, the transactional pollers) have no canonical equivalent and keep
+   * the ClickHouse path untouched below.
+   *
+   * degraded:true stays a LOUD signal for those paths — without it a missing CLICKHOUSE_* env returns
+   * an empty 200 that looks identical to "no events", and the transactional cron silently sends
+   * nothing (it did, for days). It is simply checked after this attempt rather than before it, so a
+   * deployment with no ClickHouse can still open a conversation. */
+  if (leadScoped) {
+    const chWanted = (searchParams.get("channel") || "both").toLowerCase();
+    const viaApi = await fetchCanonicalLeadConversations(
+      {
+        teamId,
+        leadId,
+        channel: chWanted === "call" || chWanted === "sms" ? chWanted : "both",
+      },
+      spyneTokenFrom(request),
+      spyneEnvFrom(request),
+    );
+    if (viaApi && Array.isArray(viaApi.conversations)) {
+      const conversations: Conversation[] = viaApi.conversations.map((c) => ({
+        id: c.id,
+        leadId: c.leadId,
+        callId: c.callId,
+        /* Not served per-conversation: the caller already knows the lead it asked about. Null rather
+           than a fabricated name. */
+        phone: null,
+        customer: null,
+        channel: c.channel,
+        dept: "sales",
+        direction: c.direction === "inbound" ? "inbound" : "outbound",
+        title: c.outcome || "",
+        summary: c.summary,
+        durationSec: c.durationSec,
+        recordingUrl: c.recordingUrl,
+        outcome: c.outcome,
+        /* No canonical flags for these; false is the honest default and the drawer hides them. */
+        appointmentScheduled: false,
+        queryResolved: false,
+        hasActionItem: false,
+        msgs: c.messages.length,
+        /* Bubbles, oldest→newest, already ordered by the API. */
+        sms: c.channel === "sms"
+          ? c.messages.map((m) => ({
+              authorType: m.role === "customer" ? "human" : "ai",
+              body: m.text,
+              status: "",
+              at: m.at ?? "",
+              direction: m.role === "customer" ? "in" : "out",
+            }))
+          : undefined,
+        at: c.at,
+      }));
+      return Response.json({ conversations, total: conversations.length, degraded: false, source: "console-api" });
+    }
+  }
+
+  if (!hasClickhouseCreds()) {
+    return Response.json({ conversations: [], total: 0, degraded: true, note: "clickhouse not configured" });
+  }
 
   // Window resolution. The report UI passes a preset `bucket` → resolve a STORE-LOCAL [start,end) window
   // server-side (rooftop tz, same as /api/reports) so the Calls tab / recent-conversations "Yesterday" is
