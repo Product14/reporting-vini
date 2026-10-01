@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
-  ActiveCampaign,
+  
   AGENTS as MOCK_AGENTS,
   AgentData,
   agentById,
@@ -30,7 +30,7 @@ import {
   Th,
   TrendBars,
 } from "@/components/reports/kit";
-import { fmtRate, fmtWhenShort, IntentOutcomeTable, RankedOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
+import { fmtRate, fmtWhenShort, IntentOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
@@ -372,10 +372,9 @@ function AgentReportsView() {
   // leadFunnel is absent (mock/no-backend).
   const leadConnected = a.leadFunnel?.connected ?? m.conversations;
   const leadQualified = a.leadFunnel?.qualified ?? m.qualified;
-  // Warm leads (outbound) — total across the agent's active campaigns (campaignLeadMappings outcomes
-  // that signal intent/engagement, summed in report_campaigns). Rooftop-wide, like the campaigns table,
-  // so it is NOT window-scaled. Shown as a headline activity stat + above the campaigns table.
-  const warmLeadsTotal = !inbound ? (r.activeCampaigns ?? []).reduce((s, c) => s + (c.warmLeads || 0), 0) : 0;
+  /* The "Warm leads" stat went with the campaigns table it was summed from. Warm leads ARE qualified
+     leads (Ishan, 2026-09-29), so the one list this page shows is Hot & warm leads — qualified and not
+     yet booked — served by /reports/hot-leads. */
 
   // Shared between the JSX (PerfFunnel / outcome tiles / transfer-quality QCell) and the CSV/XLSX export
   // below, so the exported numbers always match what's on screen. Every stage is a window-DISTINCT lead
@@ -441,7 +440,6 @@ function AgentReportsView() {
         ["Total SMS", scale(m.smsSent)],
         // web chat — only when the rooftop actually runs it (see migration 0021)
         ...(scale(m.chats ?? 0) > 0 ? [["Web chats", scale(m.chats ?? 0)]] : []),
-        [inbound ? "" : "Warm leads (campaigns)", inbound ? "" : warmLeadsTotal],
         ["Calls during hours", during],
         ["Calls after hours", after],
         [],
@@ -489,22 +487,11 @@ function AgentReportsView() {
       });
     }
 
-    if (!inbound && r.activeCampaigns?.length) {
-      sheets.push({
-        name: "Campaigns",
-        rows: [
-          ["Campaign", "Use case", "Enrolled", "Appts", "Appt rate", "Warm leads", "Opt-outs"],
-          ...r.activeCampaigns.map((c) => [c.name, c.useCase, c.enrolled, c.appts, `${c.apptRate}%`, c.warmLeads, c.optOuts]),
-        ],
-      });
-    }
-
-    if (!inbound && r.outcomes?.length) {
-      sheets.push({
-        name: "Outbound outcomes",
-        rows: [["Outcome", "Count"], ...r.outcomes.map((o) => [o.label, o.value])],
-      });
-    }
+    /* "Active campaigns" and "Outbound outcomes" REMOVED (Ishan, 2026-09-28). Both were built from
+       campaignLeadMappings, a lead universe that disagrees with every other number on this page — its
+       booked count read 77 against a calendar holding 9. Until those outcomes can be expressed over the
+       same reached-lead universe as the rest of the report, showing them put two contradictory answers
+       on one screen. */
 
     if (r.warmLeads?.length) {
       sheets.push({
@@ -664,7 +651,6 @@ function AgentReportsView() {
               [inbound ? "Total calls" : "Calls dispatched", `${scale(m.calls)} (${scale(m.talkMinutes)} min talk)`],
               ["Total SMS", scale(m.smsSent)],
               ...(scale(m.chats ?? 0) > 0 ? [["Web chats", scale(m.chats ?? 0)]] : []),
-              ...(!inbound ? [["Warm leads (campaigns)", warmLeadsTotal]] : []),
               ["Calls during hours", during],
               ["Calls after hours", after],
             ],
@@ -737,19 +723,6 @@ function AgentReportsView() {
       });
     }
 
-    if (!inbound && r.activeCampaigns?.length) {
-      sections.push({
-        heading: "Active campaigns",
-        blocks: [{ kind: "rows", columns: ["Campaign", "Use case", "Enrolled", "Appts", "Appt rate", "Warm leads", "Opt-outs"], rows: r.activeCampaigns.map((c) => [c.name, c.useCase, c.enrolled, c.appts, `${c.apptRate}%`, c.warmLeads, c.optOuts]) }],
-      });
-    }
-
-    if (!inbound && r.outcomes?.length) {
-      sections.push({
-        heading: "Outbound outcomes",
-        blocks: [{ kind: "rows", columns: ["Outcome", "Count"], rows: r.outcomes.map((o) => [o.label, o.value]) }],
-      });
-    }
 
     if (r.namedAppointments?.length) {
       const preview = r.namedAppointments.slice(0, 30);
@@ -1144,9 +1117,14 @@ function AgentReportsView() {
               {/* web chat — the third channel; shown only on rooftops that actually run it (migration 0021) */}
               {scale(m.chats ?? 0) > 0 ? <ActivityStat label="Web chats" value={fmtInt(scale(m.chats ?? 0))} hint="sessions" /> : null}
               <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint={svcWanted ? "wanted service ÷ conversations" : "qualified ÷ conversations"} accent="#813fed" />
-              {inbound
-                ? <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint={svcWanted ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
-                : <ActivityStat label="Warm leads" value={fmtInt(warmLeadsTotal)} hint="buying intent across campaigns" accent="#059669" />}
+              {/* BOTH directions show close rate. Outbound used to show "Warm leads" here, summed from
+                  the campaigns table — a different lead universe with its own vocabulary. Warm leads ARE
+                  qualified leads (Ishan, 2026-09-29), so the one number worth this slot is the same one
+                  inbound shows.
+                  The hints stay direction-agnostic but follow the service overlay: on a service agent
+                  reporting wantedService, the qualified stage IS "wanted service", so the denominator is
+                  named that way instead (RETCONVAI-5066). */}
+              <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint={svcWanted ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
             </div>
 
             {/* tertiary: call breakdown — coverage split + outcome tiles, only what live volume gives us */}
@@ -1331,33 +1309,9 @@ function AgentReportsView() {
             />
           </Card>
 
-          {/* ── Outbound-only: active campaigns + no-interaction ── */}
-          {!inbound && (
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-              <div className="lg:col-span-2">
-                <Card title="Active campaigns" sub="What this agent is working on right now" pad={false}>
-                  {r.activeCampaigns?.length ? (
-                    <>
-                      <div className="flex items-baseline gap-2 border-b border-[#f0f0f0] px-6 py-3">
-                        <span className="text-[23px] font-extrabold tabular-nums text-[#813fed]">{fmtInt(warmLeadsTotal)}</span>
-                        <span className="text-[11.5px] text-[#6b7280]">warm leads engaged across {r.activeCampaigns.length} campaign{r.activeCampaigns.length === 1 ? "" : "s"}</span>
-                      </div>
-                      <CampaignsTable items={r.activeCampaigns} />
-                    </>
-                  ) : (
-                    <EmptyState icon="📣" title="No active campaigns" body="This rooftop isn't running any outbound campaigns yet." />
-                  )}
-                </Card>
-              </div>
-              <Card title="Outbound outcomes" sub="Where every worked lead stands — best outcome first">
-                {r.outcomes?.length ? (
-                  <OutcomesTableTracked slices={r.outcomes} teamId={teamId} agent={a.id} />
-                ) : (
-                  <EmptyState icon="📊" title="No outbound activity yet" body="The outbound outcome breakdown appears once this rooftop starts outbound calling." />
-                )}
-              </Card>
-            </div>
-          )}
+          {/* "Active campaigns" and "Outbound outcomes" REMOVED (Ishan, 2026-09-28) — see the note
+              on the export sections above. Both came from campaignLeadMappings, whose booked count
+              read 77 against a calendar holding 9, so they contradicted every other number here. */}
 
           {/* ── Hot & warm leads for THIS agent (named appointments are consolidated into the single
                  "Appointments" card above — total + upcoming, one card, not two) ── */}
@@ -1711,12 +1665,6 @@ function StlOpenFunnel({ data }: { data?: { stlLeadsHandled: number; stlAppts: n
   );
 }
 
-/* Ranked outbound-outcomes table + a once-per-mount "viewed" event (depth signal). */
-function OutcomesTableTracked({ slices, teamId, agent }: { slices: NonNullable<AgentData["report"]["outcomes"]>; teamId: string; agent: string }) {
-  useEffect(() => { track("outcome_table_viewed", { team_id: teamId, agent }); }, [teamId, agent]);
-  return <RankedOutcomeTable slices={slices} />;
-}
-
 function QCell({ label, value, status }: { label: string; value: string; status?: "green" | "amber" | "red" }) {
   return (
     <div className="rounded-xl border border-[#f0f0f0] px-4 py-3">
@@ -1857,39 +1805,4 @@ function PriorityPill({ priority }: { priority: string }) {
   const v = (priority || "").toUpperCase();
   const c = v.startsWith("H") ? { bg: "#fee2e2", fg: "#991b1b" } : v.startsWith("M") ? { bg: "#fef3c7", fg: "#92400e" } : { bg: "#f3f4f6", fg: "#6b7280" };
   return <span className="rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide" style={{ background: c.bg, color: c.fg }}>{priority || "—"}</span>;
-}
-
-/* ── Best campaigns (Supabase ← card 12232) ── */
-function CampaignsTable({ items }: { items: ActiveCampaign[] }) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full">
-        <thead className="border-b border-[#f0f0f0]">
-          <tr>
-            <Th>Campaign</Th>
-            <Th align="right">Enrolled</Th>
-            <Th align="right">Appts</Th>
-            <Th align="right">Appt rate</Th>
-            <Th align="right">Warm</Th>
-            <Th align="right">Opt-outs</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((c, i) => (
-            <tr key={i} className="border-b border-[#f7f7f9] last:border-0">
-              <Td>
-                <p className="text-[12.5px] font-semibold text-[#111]">{c.name}</p>
-                <p className="text-[10.5px] text-[#9ca3af]">{c.useCase}</p>
-              </Td>
-              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#111]">{fmtInt(c.enrolled)}</span></Td>
-              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#111]">{fmtInt(c.appts)}</span></Td>
-              <Td align="right"><span className="text-[12.5px] font-semibold tabular-nums text-[#10b981]">{c.apptRate}%</span></Td>
-              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#6b7280]">{fmtInt(c.warmLeads)}</span></Td>
-              <Td align="right"><span className="text-[12.5px] tabular-nums text-[#6b7280]">{fmtInt(c.optOuts)}</span></Td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
 }

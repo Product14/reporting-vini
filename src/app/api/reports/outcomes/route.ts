@@ -21,6 +21,7 @@ import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
 import { resolveTeams } from "@/lib/spyne/enterpriseTeams";
 import { fetchSalesOutcomes, type EvalDirection } from "@/lib/spyne/evalPipeline";
 import { fetchOutcomesFromClickhouse } from "@/lib/spyne/evalClickhouse";
+import { fetchCanonicalOutcomes, toEvalOutcomes } from "@/lib/spyne/consoleReports";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 
@@ -109,6 +110,32 @@ export async function GET(request: Request): Promise<Response> {
   const endISO = `${end}T00:00:00.000Z`;
 
   try {
+    /* THE CONSOLE API FIRST (2026-09-29).
+     *
+     * conversational-ai-backend now owns these definitions, and this is what makes the flow card, the
+     * funnels and the transfer card agree with the agent card above them: "Reached"/"Qualified" here
+     * are the SAME canonical rungs, not the review's own reading. They used to differ by a lot — 412
+     * against 261 inbound, 925 against 360 outbound.
+     *
+     * Its response carries BOTH directions, and this route is called once per direction, so it is
+     * memoised on the shared TTL cache — one upstream call per page, not two.
+     *
+     * The two paths below stay exactly as they were. If the console API is unreachable the report
+     * degrades to ClickHouse and then to the eval API, unchanged. */
+    const canon = await cached(
+      `canon-outcomes:${env ?? "prod"}:${teamId}:${agentType}:${start}:${end}`,
+      () => fetchCanonicalOutcomes({ enterpriseId, teamId, dept: agentType, start, end }, token, env),
+    );
+    const forDir = canon?.directions.find((x) => x.direction === dir);
+    if (forDir) {
+      return Response.json({
+        outcomes: toEvalOutcomes(forDir),
+        window: { start, end },
+        degraded: false,
+        source: "console-api",
+      });
+    }
+
     /* CLICKHOUSE FIRST. The eval API's dashboard endpoints take no agentType or agentCallType, so its
      * funnel and tool cohorts are call-type-matched rather than scoped, and the card had to admit its
      * steps covered both directions. Reading the three eval tables directly scopes every panel to this

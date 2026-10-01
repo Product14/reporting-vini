@@ -16,7 +16,7 @@ import {
 import { TrainingOverview, type Direction, type DirectionStatus } from "@/components/reports/training";
 import { LiveOverview, LIVE_SECTIONS } from "@/components/reports/liveReplica";
 import { OnboardingStub, type Stage } from "@/components/reports/stageFlow";
-import { SAMPLE_SERVICE_FEED, SAMPLE_AISTATS, SAMPLE_WORKITEMS, SAMPLE_CONVERSATIONS } from "@/components/reports/sampleData";
+import { SAMPLE_SERVICE_FEED, SAMPLE_AISTATS, SAMPLE_WORKITEMS } from "@/components/reports/sampleData";
 import {
   ActionItemList,
   ActionItemsScoreboard,
@@ -29,14 +29,14 @@ import {
   MetricTile,
   Modal,
   NamedApptsTable,
-  RecentConversationsCard,
+  
   ValueTile,
   WarmLeadChips,
   WarmLeadsModal,
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
-import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser, type Conversation } from "@/components/reports/liveData";
+import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser } from "@/components/reports/liveData";
 import { useDateRange, useVariant, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { exportRoiPdf } from "@/components/reports/roiPdf";
 import type { QualifiedLead } from "@/app/api/reports/qualified-leads/route";
@@ -47,7 +47,8 @@ import { track } from "@/lib/analytics";
 import { useServiceOverviewOverlay } from "@/lib/serviceMetrics";
 
 // Customizable section ids for the Overview (stable module constant → identity-stable across renders).
-const OVERVIEW_SECTION_IDS = ["value", "agents", "work", "conversations"];
+/* "conversations" dropped with the Recent Conversations section it ordered. */
+const OVERVIEW_SECTION_IDS = ["value", "agents", "work"];
 // Customize manifest for the NEW Live overview — ids/labels come straight from LiveOverview so they can
 // never drift from what actually renders.
 const LIVE_SECTION_IDS = LIVE_SECTIONS.map((s) => s.id);
@@ -187,31 +188,34 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     [createdItems],
   );
 
-  // Recent conversations (calls + SMS) for the Overview preview list + drawer, scoped to dept + window.
-  const [conversations, setConversations] = useState<Conversation[] | null>(null);
-  useEffect(() => {
-    if (sampleMode) return;
-    if (!teamId) { setConversations([]); return; }
-    let on = true;
-    setConversations(null);
-    // Bound BOTH ends of the window (server-resolved store-local feed.start/end) so "Yesterday" shows
-    // yesterday's conversations, not everything since yesterday-through-now (RETCONVAI-4152).
-    fetchConversations(teamId, { channel: "both", service: svc, since: feed?.start, end: feed?.end, limit: 12, spyneToken, spyneEnv }).then((r) => { if (on) setConversations(r); });
-    return () => { on = false; };
-  }, [teamId, svc, feed?.start, feed?.end, spyneToken, spyneEnv]);
+  /* The Recent-conversations fetch went with the section it fed. Every page load was paying a
+     12-row conversation query for a card that could only ever print "Unresolved". The per-LEAD
+     fetch used by the Hot & warm leads drawer is a different call and stays. */
 
   // SAMPLE mode: feed the built-in service demo data and skip every network fetch above (all guarded on
   // sampleMode). Placed after every useState so the setters are in scope.
   useEffect(() => {
     if (!sampleMode) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setFeed(SAMPLE_SERVICE_FEED); setAiStats(SAMPLE_AISTATS); setOpenItems(SAMPLE_WORKITEMS); setCreatedItems(SAMPLE_WORKITEMS); setConversations(SAMPLE_CONVERSATIONS);
+    setFeed(SAMPLE_SERVICE_FEED); setAiStats(SAMPLE_AISTATS); setOpenItems(SAMPLE_WORKITEMS); setCreatedItems(SAMPLE_WORKITEMS);
   }, [sampleMode]);
 
   // Scope to the agents this rooftop runs, then to the selected department, then aggregate.
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept)), [agents, feed, dept]);
+  /* `afterHours` is overridden with the ROOFTOP lead count when the canonical API served one.
+   * aggregateFleet sums each agent's after-hours CALLS, which answers "when is the phone ringing";
+   * the "Captured after-hours" tile asks "how many CUSTOMERS did we catch while the floor was shut"
+   * — a different question, and a lead-grain answer that is distinct rather than a sum of agents.
+   * Only for a SALES-scoped or whole-rooftop view: the canonical figure covers the sales agents, so
+   * handing it to a Service-only tile would credit it the wrong department's leads. */
+  const fleet = useMemo(() => {
+    const f = aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept));
+    const rooftopAfterHours = feed?.capturedAfterHours;
+    return typeof rooftopAfterHours === "number" && dept !== "service"
+      ? { ...f, afterHours: rooftopAfterHours }
+      : f;
+  }, [agents, feed, dept]);
 
   const hasTeam = teamId !== "" || sampleMode;
 
@@ -642,19 +646,17 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
         );
       })(),
     },
-    {
-      id: "conversations",
-      label: "Recent conversations",
-      // No service-metrics twin (no transcript/conversation-list endpoint among contact/appointment/
-      // action-item/opportunity) — hidden on Service once the flag is on, rather than keep showing the
-      // ClickHouse-sourced list the new page has no matching read for.
-      node: serviceMetricsOn ? false : (
-        <div className="flex flex-col gap-3.5">
-          <SectionLabel hint={conversations ? `${conversations.length} recent · calls & texts` : "loading…"}>Recent conversations</SectionLabel>
-          <RecentConversationsCard items={conversations ?? []} loading={conversations === null} agentNames={agentNames} onViewAll={() => { track("report_tab_clicked", { from: "overview", to: "calls", team_id: teamId }); goCrossPage("conversations", { enterpriseId, teamId }, `/reports/calls${navQuery}`); }} onOpen={(c) => track("call_row_opened", { team_id: teamId, channel: c.channel })} teamId={teamId} />
-        </div>
-      ),
-    },
+    /* "Recent Conversations" REMOVED (Ishan, 2026-09-28). The card could only ever print
+       "Unresolved": the SMS branch hardcoded queryResolved:false, so every text row fell through to
+       that label and the dealer was told 100% of conversations needed attention. The data behind it
+       is not there either — 1,950 SMS conversations on the sample day, 23 with an outcome, 0 with
+       queryResolved, 0 with a summary. Every tab count was the fetch limit rather than a total, and
+       the "Intent" column rendered the agent's name on SMS rows. */
+    /* Merge note (PR #28, service-metrics overlay): that branch added a `serviceMetricsOn ? false : …`
+       guard to this same section, because the new service endpoints (contact / appointment /
+       action-item / opportunity) have no transcript or conversation-list read to swap in. Moot here —
+       the section and RecentConversationsCard are gone on this branch for the reason above, so there
+       is nothing left to guard. */
   ];
 
   /* EXPORT PDF — the ROI report a CSM sends a dealer, built from exactly what this page is showing:
@@ -788,6 +790,9 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                 <LiveOverview
                   account={account}
                   fleet={fleet}
+                  /* null feed = still fetching. The canonical endpoints are multi-second warehouse
+                     queries, so the gap is visible; a shimmer is honest where a 0 is not. */
+                  loading={feed === null}
                   agents={ranked}
                   serviceMode={dept === "service"}
                   variant={variant}
@@ -796,8 +801,6 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   namedAppts={namedAppts}
                   aiStats={aiStats}
                   workItems={createdWork}
-                  conversations={conversations}
-                  agentNames={agentNames}
                   onOpenAgent={openAgent}
                   onViewAppointments={() => goCrossPage("appointments", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/appointments${navQuery}`)}
                   onOpenWarmModal={() => setWarmModalOpen(true)}

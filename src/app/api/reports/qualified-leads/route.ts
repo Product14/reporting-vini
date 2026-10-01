@@ -16,7 +16,9 @@
  * PII: customer names and phone numbers, so this is auth-gated exactly like the other per-customer routes.
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
-import { requireTeamAuth } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
+import { fetchCanonicalHotLeads } from "@/lib/spyne/consoleReports";
 import { getSupabase, AGENT_LEAD_DAYS } from "@/lib/reports/supabase";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -85,15 +87,50 @@ export async function GET(request: Request): Promise<Response> {
   // document nobody can use and a ClickHouse IN() clause to match.
   const limit = Math.min(Math.max(parseInt(searchParams.get("limit") || "400", 10) || 400, 1), 800);
 
-  const sb = getSupabase();
-  if (!sb) return Response.json({ leads: [], total: 0, degraded: true, note: "supabase not configured" });
+  /* SALES COMES FROM THE CANONICAL API, NOT agent_lead_days.
+   *
+   * The header above says agent_lead_days is "the same lead-grain table every qualified count on the
+   * report is built from", and that stopped being true when the console moved onto the canonical
+   * endpoints. Qualified is now rule V12 (eval-based); agent_lead_days still carries the old spine
+   * rule, and the two agree on only 89 leads (spine 190, eval 149 -- decisions.md:130). Leaving this
+   * on Supabase would hand a dealer an ROI PDF whose list matches the tile printed above it on under
+   * half its rows. Everything below -- the ClickHouse name/phone/source/lastTouch lookup, the limit,
+   * the ordering, the degraded shapes -- is untouched; only where the SET comes from changed.
+   *
+   * SERVICE AND "both" STAY ON SUPABASE. The canonical endpoint is sales-only, and mixing one
+   * department's new rule with another's old rule inside a single list would be worse than either.
+   */
+  let qualified: Set<string> | null = null;
+  let total = 0;
 
-  const [qualified, booked] = await Promise.all([
-    leadIdsWith(sb, teamId, types, start, end, "qualified"),
-    leadIdsWith(sb, teamId, types, start, end, "appointment"),
-  ]);
-  for (const id of booked) qualified.delete(id);
-  const total = qualified.size;
+  if (dept === "sales") {
+    const token = spyneTokenFrom(request);
+    const canon = await fetchCanonicalHotLeads(
+      { enterpriseId: enterpriseIdFromToken(token) ?? "", teamId, dept: "sales", start, end },
+      token,
+      spyneEnvFrom(request),
+    );
+    if (canon) {
+      qualified = new Set(canon.leads.map((l) => l.leadId).filter(Boolean));
+      // `count` is the rooftop figure the tile shows; `leads` may be a capped sample, so the TOTAL is
+      // the API's count, never the length of the list we happen to have resolved names for.
+      total = canon.count;
+    }
+    // canon === null → the API is unreachable; fall through to the aggregate rather than hand back an
+    // empty export. The numbers will be the old rule's, which is why the caller flags `degraded`.
+  }
+
+  const sb = getSupabase();
+  if (!qualified) {
+    if (!sb) return Response.json({ leads: [], total: 0, degraded: true, note: "supabase not configured" });
+    const [q, booked] = await Promise.all([
+      leadIdsWith(sb, teamId, types, start, end, "qualified"),
+      leadIdsWith(sb, teamId, types, start, end, "appointment"),
+    ]);
+    for (const id of booked) q.delete(id);
+    qualified = q;
+    total = q.size;
+  }
   if (!total) return Response.json({ leads: [], total: 0, start, end });
 
   // Names live only in ClickHouse. Without creds the count is still honest — the list is simply empty,

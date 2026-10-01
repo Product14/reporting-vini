@@ -25,11 +25,17 @@
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
+import { fetchCanonicalActionItemStats } from "@/lib/spyne/consoleReports";
+import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/* Matches the other canonical fan-out routes (reports, outcomes, conversation-drill). This route now
+   makes a gated canonical call too, so without it alone it would run at the Vercel project default —
+   the tightest budget of the group, on the one route that was not given a deadline. */
+export const maxDuration = 60;
 
 const SERVICE = new Set(["sales", "service", "both"]);
 const SCOPE = new Set(["recent", "open", "overdue", "stats", "created"]);
@@ -56,10 +62,6 @@ export async function GET(request: Request): Promise<Response> {
   const auth = requireTeamAuth(request, teamId);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
-  // degraded:true is a LOUD signal — a missing CLICKHOUSE_* env otherwise returns an empty 200 that's
-  // indistinguishable from "no action items", silently disabling the transactional cron.
-  if (!hasClickhouseCreds()) return Response.json({ actionItems: [], total: 0, degraded: true, note: "clickhouse not configured" });
-
   const svc = (searchParams.get("serviceType") || "both").toLowerCase();
   const service = SERVICE.has(svc) ? svc : "both";
   const scopeRaw = (searchParams.get("scope") || "recent").toLowerCase();
@@ -78,11 +80,20 @@ export async function GET(request: Request): Promise<Response> {
   // to compute the window client-side with no tz → UTC, RETCONVAI-4144). Explicit start/end (custom
   // picker) win; neither given → trailing 30 days. tz resolution costs one Spyne call, so it only runs for
   // the windowed scopes (never for recent/open/overdue).
-  async function windowExprs(): Promise<{ startExpr: string; endExpr: string }> {
+  /* Also returns the resolved calendar dates + timezone, not just the ClickHouse expressions, so the
+     dealer-leads API below can be asked for the IDENTICAL window rather than re-deriving it. */
+  async function windowExprs(): Promise<{
+    startExpr: string;
+    endExpr: string;
+    start: string;
+    end: string;
+    tz: string | null;
+  }> {
     let s = dateOk(searchParams.get("start") || "") ? (searchParams.get("start") as string) : "";
     let e = dateOk(searchParams.get("end") || "") ? (searchParams.get("end") as string) : "";
+    let tz: string | null = null;
     if ((!s || !e) && BUCKETS.has(bucketRaw)) {
-      const tz = await getStoreTimeZone(teamId, spyneToken, spyneEnv);
+      tz = await getStoreTimeZone(teamId, spyneToken, spyneEnv);
       const w = rangeFor(bucketRaw as Bucket, tz ?? undefined);
       if (!s) s = w.start;
       if (!e) e = w.end;
@@ -90,8 +101,21 @@ export async function GET(request: Request): Promise<Response> {
     return {
       startExpr: s ? `toDateTime64('${s} 00:00:00',3)` : "now() - INTERVAL 30 DAY",
       endExpr: e ? `toDateTime64('${e} 00:00:00',3)` : "now()",
+      start: s,
+      end: e,
+      tz,
     };
   }
+
+  /* The ClickHouse guard is checked per-path rather than up front, because `scope=stats` is now served
+   * by the dealer-leads API and needs no ClickHouse at all — prod Vercel has none, and the blanket
+   * guard turned that scope into an empty 200 there.
+   *
+   * degraded:true stays a LOUD signal for every path that DOES need ClickHouse: a missing CLICKHOUSE_*
+   * env otherwise returns an empty 200 that is indistinguishable from "no action items", silently
+   * disabling the transactional cron. */
+  const noCh = () =>
+    Response.json({ actionItems: [], total: 0, degraded: true, note: "clickhouse not configured" });
 
   // ── scope=stats: rooftop action-item scoreboard (created/closed in-window + open/overdue/due-today
   //    now + a who-closed-most leaderboard). All from dealer_leads.actionItems, de-duped to the latest
@@ -101,7 +125,32 @@ export async function GET(request: Request): Promise<Response> {
   //    — a minor TZ skew vs the dealer-local report window, acceptable for these operational counts. ──
   if (scope === "stats") {
     const svcFilter = service !== "both" ? ` AND lower(ifNull(service_type,'')) LIKE '${service}%'` : "";
-    const { startExpr, endExpr } = await windowExprs();
+    const { startExpr, endExpr, start: winStart, end: winEnd, tz: winTz } = await windowExprs();
+
+    /* DEALER-LEADS FIRST (2026-09-29). Action items are WRITTEN in Mongo; everything below reads the
+     * ClickHouse CDC replica of them. Same roll-up, same grain — verified equal on the reference
+     * rooftop, 559/558/1/1/1 both ways — so this is a change of SOURCE, not of number: no CDC lag, and
+     * the window is resolved in the rooftop's own timezone instead of ClickHouse server time.
+     *
+     * The ClickHouse path stays underneath, unchanged, as the fallback. The row-level scopes further
+     * down are deliberately NOT moved: they also feed the transactional-email pipeline, which depends
+     * on their current shape. */
+    if (winStart && winEnd) {
+      const entId = enterpriseIdFromToken(spyneToken);
+      if (entId) {
+        const viaApi = await fetchCanonicalActionItemStats(
+          { enterpriseId: entId, teamId, serviceType: service === "both" ? undefined : service, start: winStart, end: winEnd, timezone: winTz },
+          spyneToken,
+          spyneEnv,
+        );
+        if (viaApi?.stats) {
+          return Response.json(
+            { scope: "stats", stats: viaApi.stats, closers: viaApi.closers ?? [], source: "dealer-leads" },
+            { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } },
+          );
+        }
+      }
+    }
     // Two-level roll-up. Level 1 (byId): latest CDC row per _id (argMax over _version). Level 2 (perLead):
     // collapse to ONE row per LEAD. The AI re-creates the same action item on every touch — one Bridgeton
     // lead carried 115 'AskStaffMember/Manager' + 95 'RequestCallback' rows — so counting per _id inflated
@@ -137,6 +186,7 @@ export async function GET(request: Request): Promise<Response> {
       ` FROM (${byId}) WHERE deleted=0 AND intent != '' AND lower(intent) != 'custom' AND is_completed=1` +
       ` AND updatedAt >= ${startExpr} AND updatedAt < ${endExpr}` +
       " GROUP BY assigned_to ORDER BY closed DESC LIMIT 10";
+    if (!hasClickhouseCreds()) return noCh();
     const [statRows, closerRows] = await Promise.all([
       runClickhouse<Record<string, string | number>>(statsSql),
       runClickhouse<Record<string, string | number>>(closersSql),
@@ -158,6 +208,8 @@ export async function GET(request: Request): Promise<Response> {
       { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } },
     );
   }
+
+  if (!hasClickhouseCreds()) return noCh();
 
   // Two-level roll-up — SAME grain as the `stats` scope (one row per LEAD), so the list and the scoreboard
   // agree. Level 1 (byIdList): latest CDC row per _id. Level 2 (dedupedList): one row per lead = the latest

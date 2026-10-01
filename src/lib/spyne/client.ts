@@ -66,6 +66,14 @@ export async function spyneGet<T>(
     const r = await fetch(`${base}${path}`, {
       headers: { accept: "application/json, text/plain, */*", authorization: `Bearer ${auth}` },
       cache: "no-store",
+      /* MUST HAVE A DEADLINE. undici sets no overall request timeout, and the canonical fetchers run
+         behind a module-level concurrency gate whose slot is only released in the finally of this
+         await. A half-open connection to the API therefore holds a slot forever, and on a warm Vercel
+         instance that gate is shared by every concurrent invocation — so two hung calls permanently
+         wedge every canonical report call on that instance until it recycles. 30s is well clear of the
+         slowest endpoint measured in prod (outcomes at ~2.0s) and inside the routes' maxDuration of 60.
+         The ClickHouse client next door already does this (clickhouse.ts: AbortSignal.timeout(10_000)). */
+      signal: AbortSignal.timeout(30_000),
     });
     if (!r.ok) {
       console.error(`[spyne] GET ${path} → ${r.status}`);
@@ -82,17 +90,45 @@ export async function spyneGet<T>(
 }
 
 /* Tiny module-level TTL cache. Working hours / onboarded agents change rarely, but /api/reports is hit
- * per page load — without this each report would re-fetch both. Keyed by an arbitrary string. */
+ * per page load — without this each report would re-fetch both. Keyed by an arbitrary string.
+ *
+ * IT CACHES THE IN-FLIGHT PROMISE, NOT JUST THE RESULT. Storing only the resolved value meant two
+ * callers arriving before the first finished BOTH missed and BOTH called upstream — which is exactly
+ * what the report does: one page load fans out to overview, outcomes x2, lead-sources x2 and hot-leads
+ * at the same moment. Sharing the promise collapses those into one call per key.
+ *
+ * A STALE ENTRY IS SERVED WHEN A REFRESH FAILS. A 504 from a slow upstream should show the numbers we
+ * had a minute ago, not zeros. */
 const cache = new Map<string, { at: number; value: unknown }>();
+const inflight = new Map<string, Promise<unknown>>();
 const TTL_MS = 10 * 60 * 1000; // 10 min
+/** How long a stale entry may still be served when the refresh returns nothing. */
+const STALE_MS = 60 * 60 * 1000;
 
 export async function cached<T>(key: string, load: () => Promise<T | null>): Promise<T | null> {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.value as T | null;
-  const value = await load();
-  // Cache successes only — a transient null shouldn't be pinned for 10 min.
-  if (value !== null) cache.set(key, { at: Date.now(), value });
-  return value;
+
+  const pending = inflight.get(key);
+  if (pending) return (await pending) as T | null;
+
+  const p = (async () => {
+    try {
+      const value = await load();
+      // Cache successes only — a transient null shouldn't be pinned for 10 min.
+      if (value !== null) {
+        cache.set(key, { at: Date.now(), value });
+        return value;
+      }
+      // Refresh failed: fall back to a stale entry rather than propagating an empty result.
+      if (hit && Date.now() - hit.at < STALE_MS) return hit.value as T | null;
+      return null;
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  inflight.set(key, p);
+  return (await p) as T | null;
 }
 
 /* Decode a Spyne session token's claims — WITHOUT verifying a signature; this only ever reads a

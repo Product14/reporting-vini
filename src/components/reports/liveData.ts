@@ -178,6 +178,11 @@ export interface FetchResult {
   // credential names a DIFFERENT rooftop than the one requested (the group rooftop-switch case). The two
   // need different words in front of the dealer, so the status is carried, not just the boolean.
   authStatus?: 401 | 403;
+  /* ROOFTOP leads whose FIRST touch fell outside opening hours — the "Captured after-hours" tile.
+   * A CUSTOMER count, and deliberately not `fleet.afterHours`, which sums each agent's after-hours
+   * CALLS. The two answer different questions and the tile asks the first one. Distinct at rooftop
+   * level, so it is never the sum of the agent rows. Absent when the canonical API is unavailable. */
+  capturedAfterHours?: number;
   prior: Record<string, Basis>; // per-agent-id totals for the prior window (for fleet deltas)
   // The window the server actually resolved (store-local when a timezone was known) + that timezone.
   // Informational — lets the UI label the period / note the zone. Absent on the mock/error fallback.
@@ -543,6 +548,9 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
         everLive: typeof j.everLive === "boolean" ? j.everLive : undefined,
         fetchedAt: typeof j.fetchedAt === "number" ? j.fetchedAt : Date.now(),
         prior: (j.prior as Record<string, Basis>) ?? {},
+        /* This object is an explicit ALLOW-LIST, not a spread — a field the server adds is dropped
+           here unless it is named. */
+        capturedAfterHours: typeof j.capturedAfterHours === "number" ? j.capturedAfterHours : undefined,
         start: j.start,
         end: j.end,
         timezone: j.timezone ?? null,
