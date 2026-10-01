@@ -31,7 +31,7 @@ function LibraryRoute() {
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ReportTopBar
           title="Reports"
           subtitle="Ready-made reports on your live data — pick one to open it."

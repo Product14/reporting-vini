@@ -173,7 +173,7 @@ function ReportingView() {
 
   return (
     <div className="flex min-h-screen bg-white">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ReportTopBar
           title="Reporting"
           subtitle="A one-page scorecard for this rooftop — print it or save as PDF to share."
@@ -182,7 +182,7 @@ function ReportingView() {
           query={navQuery}
           right={
             teamId ? (
-              <div className="no-print flex items-center gap-3">
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
@@ -247,7 +247,7 @@ function ReportingView() {
           {namedAppts.length > 0 && (
             <div className="flex flex-col gap-3.5">
               <SectionLabel hint={`${fmtInt(namedAppts.length)} on the books`}>Appointments — named</SectionLabel>
-              <Card title="On the books" sub="AI-booked = the AI created the meeting · AI-assisted = flagged AI-assisted in your CRM" pad={false}>
+              <Card title="On the books" sub="AI-booked = the AI created the meeting · AI-assisted = you booked it, on a lead the AI had already spoken to" pad={false}>
                 <NamedApptsTable items={namedAppts.slice(0, 20)} teamId={teamId} />
               </Card>
             </div>

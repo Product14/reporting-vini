@@ -38,10 +38,13 @@ import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser } from "@/components/reports/liveData";
 import { useDateRange, useVariant, reportNavQuery, type Dept } from "@/components/reports/dateRange";
+import { exportRoiPdf } from "@/components/reports/roiPdf";
+import type { QualifiedLead } from "@/app/api/reports/qualified-leads/route";
 import { useCustomize, CustomizeToggle, CustomizeSections, CustomizeModal, Hideable, type SectionDef, type CustomizeGroup } from "@/components/reports/customize";
 import { useOutcomes, OutcomesSection } from "@/components/reports/outcomes";
 import { goCrossPage } from "@/components/reports/parentNav";
 import { track } from "@/lib/analytics";
+import { useServiceOverviewOverlay } from "@/lib/serviceMetrics";
 
 // Customizable section ids for the Overview (stable module constant → identity-stable across renders).
 /* "conversations" dropped with the Recent Conversations section it ordered. */
@@ -215,6 +218,25 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
   }, [agents, feed, dept]);
 
   const hasTeam = teamId !== "" || sampleMode;
+
+  // RETCONVAI-5066: OLD Service Overview reads service-metrics instead of the ClickHouse-backed `fleet`
+  // above, so the numbers match the NEW page exactly. Flag off (default) or Sales → untouched, `fleet`
+  // stays the only source. A tile/card with no trustworthy service-metrics twin reads null and hides —
+  // see serviceMetrics.ts and the method note in OLD-VIEW-BRIEF.md.
+  const serviceMetricsFlagOn = process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
+  const serviceMetricsOn = serviceMetricsFlagOn && dept === "service" && hasTeam && !sampleMode;
+  const svcMetrics = useServiceOverviewOverlay({
+    enabled: serviceMetricsOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: feed?.start,
+    rangeEndExclusive: feed?.end,
+    timezone: feed?.timezone ?? undefined,
+  });
   // Carries team scope + the selected window into the tab links and the per-agent drill-down, so the
   // chosen date range survives navigation to the By-agent view.
   /* Staged rollout switch (header toggle) — decides which Overview layout this render produces.
@@ -412,23 +434,67 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
           <SectionLabel hint={periodLabel}>The value delivered</SectionLabel>
           {/* MAIN — the outcome story, IB/OB split + period deltas */}
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
-            <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
-            <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
-            <Hideable id="tile.qualified" ctrl={ctrl}><ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} delta={fleet.deltas.qualified} accent="violet" subtext={<>concrete buying intent</>} /></Hideable>
-            <Hideable id="tile.appts" ctrl={ctrl}><ValueTile label="Appointments — AI-booked" total={fmtInt(fleet.appointments)} inbound={fmtInt(split.inbound.appointments)} outbound={fmtInt(split.outbound.appointments)} unassigned={fleet.appointmentsNoAgent > 0 ? fmtInt(fleet.appointmentsNoAgent) : undefined} delta={fleet.deltas.appointments} accent="green" subtext={fleet.appointmentsAssisted > 0 ? <>+{fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>} onClick={fleet.appointments > 0 ? openApptModal : undefined} /></Hideable>
+            {/* Leads touched — NO TWIN. ov-prod reads leadsReached per-agent/per-direction only; it never
+                sums inbound+outbound into one rooftop total, which is what this tile needs. See
+                serviceMetrics.ts's NO_TWIN_ON_OLD_OVERVIEW (single source for this decision — not
+                re-decided here). Hidden on Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
+            )}
+            {/* Real conversations — NO TWIN. ov-prod's Service Overview never reads realConversations at
+                all (see NO_TWIN_ON_OLD_OVERVIEW). Hidden on Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
+            )}
+            {/* Qualified leads — no service-metrics twin (Classification stays available:false pending
+                RETCONVAI-5010). Hidden rather than shown from the old ClickHouse source once the flag is on,
+                so this page never shows a number the new page can't back. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.qualified" ctrl={ctrl}><ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} delta={fleet.deltas.qualified} accent="violet" subtext={<>concrete buying intent</>} /></Hideable>
+            )}
+            <Hideable id="tile.appts" ctrl={ctrl}>
+              {serviceMetricsOn ? (
+                svcMetrics.appointments && <ValueTile label="Appointments — AI-booked" total={fmtInt(svcMetrics.appointments.total)} inbound={svcMetrics.appointments.inbound != null ? fmtInt(svcMetrics.appointments.inbound) : undefined} outbound={svcMetrics.appointments.outbound != null ? fmtInt(svcMetrics.appointments.outbound) : undefined} accent="green" subtext={svcMetrics.appointments.assisted != null && svcMetrics.appointments.assisted > 0 ? <>+{fmtInt(svcMetrics.appointments.assisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>} onClick={svcMetrics.appointments.total > 0 ? openApptModal : undefined} />
+              ) : (
+                <ValueTile label="Appointments — AI-booked" total={fmtInt(fleet.appointments)} inbound={fmtInt(split.inbound.appointments)} outbound={fmtInt(split.outbound.appointments)} unassigned={fleet.appointmentsNoAgent > 0 ? fmtInt(fleet.appointmentsNoAgent) : undefined} delta={fleet.deltas.appointments} accent="green" subtext={fleet.appointmentsAssisted > 0 ? <>+{fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>} onClick={fleet.appointments > 0 ? openApptModal : undefined} />
+              )}
+            </Hideable>
           </div>
           {/* SECONDARY — operational quality, one compact row */}
           <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
-            <Hideable id="tile.handoffs" ctrl={ctrl}><MetricTile label="Hand-offs to team" value={fmtInt(fleet.handoffs)} accent="#2563eb" sub={<>{fmtInt(fleet.transfers)} transfers · {fmtInt(fleet.callbacks)} callbacks</>} title="Completed transfers + requested callbacks. Failed transfers are reported separately." /></Hideable>
-            {fleet.responseTimeSec != null && (
+            {/* Hand-offs to team — no service-metrics twin (no transfer/callback field on any of the four
+                endpoints this page reads). Hidden when the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.handoffs" ctrl={ctrl}><MetricTile label="Hand-offs to team" value={fmtInt(fleet.handoffs)} accent="#2563eb" sub={<>{fmtInt(fleet.transfers)} transfers · {fmtInt(fleet.callbacks)} callbacks</>} title="Completed transfers + requested callbacks. Failed transfers are reported separately." /></Hideable>
+            )}
+            {/* Response time is a Sales construct (speed-to-lead, Sales Inbound STL) — never shown on
+                Service, flag or no flag. */}
+            {!serviceMetricsOn && fleet.responseTimeSec != null && (
               <Hideable id="tile.response" ctrl={ctrl}><MetricTile label="Response time" value={fmtSecs(fleet.responseTimeSec)} accent="#0ea5e9" sub={<>avg first response · speed-to-lead</>} title="Average time from a new lead arriving to the AI's first touch (speed-to-lead, Sales Inbound)." /></Hideable>
             )}
-            <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Customers with follow-ups" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} cleared · {fmtInt(aiStats.stats.open)} still waiting</> : <>syncing…</>} onClick={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)} title="Customers the AI logged a follow-up for this period — someone with several counts once. Click for the full list." /></Hideable>
-            {/* Web chat is folded in as a third channel, but only shown on rooftops that run it — so the
-                label and sub-line stay "Calls & texts" everywhere else (migration 0021). */}
-            <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label={(fleet.chats ?? 0) > 0 ? "Calls, texts & chats" : "Calls & texts"} value={fmtInt(fleet.calls + fleet.smsThreads + (fleet.chats ?? 0))} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts{(fleet.chats ?? 0) > 0 ? <> · {fmtInt(fleet.chats)} web chats</> : null}</>} title="AI conversations handled across voice, SMS and web chat — voice calls + SMS threads + chat sessions (conversations, not individual messages)." /></Hideable>
-            <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
-            <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
+            {/* Customers with follow-ups — the headline number (created-in-window) has no service-metrics
+                twin; action-item only carries openNow/cleared, not created. Hidden rather than show a
+                different number under the same label. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.actions" ctrl={ctrl}><MetricTile label="Customers with follow-ups" value={aiStats ? fmtInt(aiStats.stats.created) : "—"} accent="#ea760c" sub={aiStats ? <>{fmtInt(aiStats.stats.completed)} cleared · {fmtInt(aiStats.stats.open)} still waiting</> : <>syncing…</>} onClick={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`)} title="Customers the AI logged a follow-up for this period — someone with several counts once. Click for the full list." /></Hideable>
+            )}
+            {/* Calls & texts — NO TWIN. ov-prod reads `calls` only as a per-outbound-agent dial count
+                ("contacted"); it never renders a rooftop calls+sms total, and smsSent isn't read at all.
+                Web chat is folded in as a third channel on rooftops that run it — irrelevant here, this
+                whole tile is hidden on Service once the flag is on (NO_TWIN_ON_OLD_OVERVIEW). */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label={(fleet.chats ?? 0) > 0 ? "Calls, texts & chats" : "Calls & texts"} value={fmtInt(fleet.calls + fleet.smsThreads + (fleet.chats ?? 0))} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts{(fleet.chats ?? 0) > 0 ? <> · {fmtInt(fleet.chats)} web chats</> : null}</>} title="AI conversations handled across voice, SMS and web chat — voice calls + SMS threads + chat sessions (conversations, not individual messages)." /></Hideable>
+            )}
+            {/* Talk time — NO TWIN. ov-prod's Service Overview never reads talkTimeMinutes. Hidden on
+                Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
+            )}
+            {/* After-hours captured — NO TWIN. ov-prod's Service Overview never reads afterHoursLeads.
+                Hidden on Service once the flag is on. */}
+            {!serviceMetricsOn && (
+              <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
+            )}
           </div>
         </div>
       ),
@@ -485,51 +551,100 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
     {
       id: "work",
       label: "Work these now",
-      node: (warmLeads.length > 0 || namedAppts.length > 0 || (aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0))) ? (
+      node: (() => {
+        // Behind the flag on Service: the named lists this section draws on (warmLeads, namedAppts,
+        // aiStats) are the OLD ClickHouse source. Swap to the service-metrics twins so the "View all"
+        // links match the same numbers the tiles above now show. Hot & warm leads has no twin (a Sales
+        // construct, per the brief) and stays hidden.
+        const svcAppts = serviceMetricsOn ? (svcMetrics.namedAppointments ?? []) : null;
+        const svcActions = serviceMetricsOn ? svcMetrics.actionItems : null;
+        const showWarmCard = !serviceMetricsOn && warmLeads.length > 0;
+        const showApptsCard = serviceMetricsOn ? !!(svcAppts && svcAppts.length > 0) : namedAppts.length > 0;
+        const showActionsCard = serviceMetricsOn ? !!svcActions && svcActions.openNow > 0 : !!(aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0));
+        if (!showWarmCard && !showApptsCard && !showActionsCard) return false;
+        return (
         <div className="flex flex-col gap-3.5">
           <SectionLabel hint="reviewed, in-market, unworked — the fastest net-new appointments">Work these now</SectionLabel>
           <div className="grid gap-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
-            {warmLeads.length > 0 && (
+            {showWarmCard && (
               <Hideable id="card.warm" ctrl={ctrl}>
                 <Card title="Hot & warm leads" sub="Buying intent on record, no appointment yet — call these first" right={<button onClick={() => setWarmModalOpen(true)} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
                   <WarmLeadChips items={warmLeads} teamId={teamId} maxHot={6} maxWarm={5} />
                 </Card>
               </Hideable>
             )}
-            {namedAppts.length > 0 && (
+            {showApptsCard && (
               <Hideable id="card.appts" ctrl={ctrl}>
-              <Card title="Appointments" sub="On the books — AI-booked & AI-assisted" right={<button onClick={() => goCrossPage("appointments", { enterpriseId, teamId }, `/reports/appointments${navQuery}`)} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+              <Card title="Appointments" sub={serviceMetricsOn ? "Upcoming — on the books" : "On the books — AI-booked & AI-assisted"} right={<button onClick={() => goCrossPage("appointments", { enterpriseId, teamId }, `/reports/appointments${navQuery}`)} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
                 <div className="flex flex-col gap-2">
-                  {namedAppts.slice(0, 6).map((a, i) => (
-                    <div key={`${a.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f5f5f5] pb-2 last:border-0 last:pb-0">
-                      <div className="min-w-0">
-                        <p className="truncate text-[12.5px] font-semibold text-[#111]">{a.customer}{a.vehicle ? <span className="ml-2 text-[10.5px] font-normal text-[#9ca3af]">{a.vehicle}</span> : null}</p>
-                        <p className="truncate text-[10.5px] font-medium" style={{ color: a.assisted ? "#6d28d9" : "#059669" }}>{a.how}</p>
-                      </div>
-                      <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{fmtWhenShort(a.when)}</p>
-                    </div>
-                  ))}
-                  {namedAppts.length > 6 && <p className="text-[11px] font-semibold text-[#9ca3af]">+{namedAppts.length - 6} more on the Appointments tab</p>}
+                  {serviceMetricsOn
+                    ? (svcAppts ?? []).slice(0, 6).map((a, i) => (
+                        <div key={`${a.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f5f5f5] pb-2 last:border-0 last:pb-0">
+                          <div className="min-w-0">
+                            <p className="truncate text-[12.5px] font-semibold text-[#111]">{a.customer}{a.vehicle ? <span className="ml-2 text-[10.5px] font-normal text-[#9ca3af]">{a.vehicle}</span> : null}</p>
+                          </div>
+                          <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when) : ""}</p>
+                        </div>
+                      ))
+                    : namedAppts.slice(0, 6).map((a, i) => (
+                        <div key={`${a.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f5f5f5] pb-2 last:border-0 last:pb-0">
+                          <div className="min-w-0">
+                            <p className="truncate text-[12.5px] font-semibold text-[#111]">{a.customer}{a.vehicle ? <span className="ml-2 text-[10.5px] font-normal text-[#9ca3af]">{a.vehicle}</span> : null}</p>
+                            <p className="truncate text-[10.5px] font-medium" style={{ color: a.assisted ? "#6d28d9" : "#059669" }}>{a.how}</p>
+                          </div>
+                          <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{fmtWhenShort(a.when)}</p>
+                        </div>
+                      ))}
+                  {!serviceMetricsOn && namedAppts.length > 6 && <p className="text-[11px] font-semibold text-[#9ca3af]">+{namedAppts.length - 6} more on the Appointments tab</p>}
                 </div>
               </Card>
               </Hideable>
             )}
           </div>
-          {aiStats && (aiStats.stats.created > 0 || aiStats.stats.open > 0) && (
+          {showActionsCard && (
             <Hideable id="card.actions" ctrl={ctrl}>
-            <Card title="Action items" sub="Created & closed this window · open, overdue and due-today are live counts" right={<button onClick={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
-              <ActionItemsScoreboard stats={aiStats.stats} periodLabel={periodLabel} />
-              {workItems.length > 0 && (
-                <div className="mt-4 border-t border-[#f3f4f6] pt-3">
-                  <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Overdue / due soon — work these next</p>
-                  <ActionItemList items={workItems} max={6} onMore={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} />
-                </div>
+            <Card title="Action items" sub={serviceMetricsOn ? "Waiting on your team — live count" : "Created & closed this window · open, overdue and due-today are live counts"} right={<button onClick={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} className="no-print rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">View all →</button>}>
+              {serviceMetricsOn ? (
+                <>
+                  {/* openNow only — ov-prod's Overview ("Waiting on your team") never shows `cleared`, only
+                      this live count + the waiting-tasks list (see serviceMetrics.ts). */}
+                  <div className="flex gap-6">
+                    <div><p className="text-[9.5px] font-bold uppercase tracking-wider text-[#9ca3af]">Open now</p><p className="mt-0.5 text-[20px] font-extrabold tabular-nums text-[#111]">{fmtInt(svcActions!.openNow)}</p></div>
+                  </div>
+                  {svcActions!.items.length > 0 && (
+                    <div className="mt-4 border-t border-[#f3f4f6] pt-3">
+                      <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Overdue / due soon — work these next</p>
+                      <div className="flex flex-col gap-2">
+                        {svcActions!.items.slice(0, 6).map((it, i) => (
+                          <div key={`${it.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f5f5f5] pb-2 last:border-0 last:pb-0">
+                            <div className="min-w-0">
+                              <p className="truncate text-[12.5px] font-semibold text-[#111]">{it.customer}</p>
+                              <p className="truncate text-[10.5px] text-[#6b7280]">{it.what}</p>
+                            </div>
+                            <p className={`flex-none text-[11px] tabular-nums ${it.isLate ? "text-[#dc2626]" : "text-[#6b7280]"}`}>{it.due ? fmtWhenShort(it.due) : ""}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <ActionItemsScoreboard stats={aiStats!.stats} periodLabel={periodLabel} />
+                  {workItems.length > 0 && (
+                    <div className="mt-4 border-t border-[#f3f4f6] pt-3">
+                      <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca3af]">Overdue / due soon — work these next</p>
+                      <ActionItemList items={workItems} max={6} onMore={() => { track("action_items_opened", { tab: "overview", team_id: teamId }); goCrossPage("actions", { enterpriseId, teamId, serviceType: dept !== "all" ? dept : undefined }, `/reports/action-items${navQuery}`); }} />
+                    </div>
+                  )}
+                </>
               )}
             </Card>
             </Hideable>
           )}
         </div>
-      ) : false,
+        );
+      })(),
     },
     /* "Recent Conversations" REMOVED (Ishan, 2026-09-28). The card could only ever print
        "Unresolved": the SMS branch hardcoded queryResolved:false, so every text row fell through to
@@ -537,13 +652,68 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
        is not there either — 1,950 SMS conversations on the sample day, 23 with an outcome, 0 with
        queryResolved, 0 with a summary. Every tab count was the fetch limit rather than a total, and
        the "Intent" column rendered the agent's name on SMS rows. */
+    /* Merge note (PR #28, service-metrics overlay): that branch added a `serviceMetricsOn ? false : …`
+       guard to this same section, because the new service endpoints (contact / appointment /
+       action-item / opportunity) have no transcript or conversation-list read to swap in. Moot here —
+       the section and RecentConversationsCard are gone on this branch for the reason above, so there
+       is nothing left to guard. */
   ];
+
+  /* EXPORT PDF — the ROI report a CSM sends a dealer, built from exactly what this page is showing:
+     same window, same department, same figures. The one thing the page does NOT already hold is the
+     NAMED "qualified but not booked" list, so that is fetched on click rather than on every render —
+     it is a PII read nobody needs until they ask for the document. */
+  const [exporting, setExporting] = useState(false);
+  const onExportPdf = async () => {
+    if (exporting || !feed) return;
+    setExporting(true);
+    track("report_exported", { tab: "overview", team_id: teamId, format: "pdf", range: custom ? "custom" : bucket });
+    try {
+      const qs = new URLSearchParams({ team_id: teamId, serviceType: dept === "all" ? "both" : dept });
+      // Send the window the way the page resolved it, so the export cannot drift from the tiles by a day.
+      if (feed.start && feed.end) { qs.set("start", feed.start); qs.set("end", feed.end); }
+      else if (custom) { qs.set("start", custom.start); qs.set("end", addDay(custom.end)); }
+      else qs.set("bucket", bucket);
+      if (spyneToken) qs.set("auth_key", spyneToken);
+      if (spyneEnv) qs.set("env", spyneEnv);
+
+      let qualified: QualifiedLead[] = [];
+      let qualifiedTotal = fleet.qualified;
+      try {
+        const r = await fetch(`/api/reports/qualified-leads?${qs}`);
+        if (r.ok) {
+          const j = await r.json();
+          qualified = Array.isArray(j.leads) ? j.leads : [];
+          if (typeof j.total === "number") qualifiedTotal = j.total;
+        }
+      } catch { /* the document is still worth having without the third list — see below */ }
+
+      await exportRoiPdf({
+        accountName: account.name, periodLabel, dept, fleet,
+        namedAppts, qualified, qualifiedTotal,
+        tzLabel: feed.timezone ? tzShortLabel(feed.timezone) : undefined,
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Date filter + Customize + refresh — the only report controls kept in the live flow. In the preview
   // Live stage these render INSIDE the hero (below "…what your sales AI handled"), so the top bar is
   // dropped entirely; on the production report they stay in the top bar.
   const liveControls = hasTeam ? (
-    <div className="no-print flex items-center gap-3">
+    <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
+      <button
+        onClick={onExportPdf}
+        disabled={exporting || feed === null}
+        title="Download this report as a PDF for the selected period"
+        className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#813fed] px-3 text-[12px] font-bold text-white transition-colors hover:bg-[#6d28d9] disabled:opacity-50"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 3v12M7 11l5 5 5-5M5 21h14" />
+        </svg>
+        {exporting ? "Preparing…" : "Export PDF"}
+      </button>
       {liveReady && <CustomizeToggle ctrl={ctrl} />}
       {showPreview && stage === "live" && <CustomizeToggle ctrl={liveCtrl} />}
       <DateFilter
@@ -573,7 +743,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
 
         {!hideTopBar && (
         <ReportTopBar
@@ -615,7 +785,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
               {stage === "onboarding" ? (
                 <OnboardingStub onGoLive={() => { setManualStage("training"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
               ) : stage === "training" ? (
-                <TrainingOverview account={account} overrides={directionOverrides} earlyStats={trainingEarly} fleet={fleet} aiStats={aiStats?.stats ?? null} onGoLive={() => { setManualStage("live"); window.scrollTo({ top: 0, behavior: "smooth" }); }} onOnboard={() => { setManualStage("onboarding"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+                <TrainingOverview account={account} overrides={directionOverrides} earlyStats={trainingEarly} fleet={fleet} aiStats={aiStats?.stats ?? null} serviceMetricsOn={serviceMetricsOn} onGoLive={() => { setManualStage("live"); window.scrollTo({ top: 0, behavior: "smooth" }); }} onOnboard={() => { setManualStage("onboarding"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
               ) : (
                 <LiveOverview
                   account={account}
@@ -626,6 +796,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   agents={ranked}
                   serviceMode={dept === "service"}
                   variant={variant}
+                  serviceMetricsOverlay={serviceMetricsOn ? svcMetrics : null}
                   warmLeads={warmLeads}
                   namedAppts={namedAppts}
                   aiStats={aiStats}
@@ -682,20 +853,41 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
         sub="AI-booked & AI-assisted — straight from your report data, so it always matches the tiles above"
         wide
       >
-        {namedAppts.length > 0 ? (
+        {serviceMetricsOn ? (
+          (svcMetrics.namedAppointments?.length ?? 0) > 0 ? (
+            <div className="flex flex-col gap-2">
+              {svcMetrics.namedAppointments!.map((a, i) => (
+                <div key={`${a.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f0f0f0] pb-2 last:border-0 last:pb-0">
+                  <div className="min-w-0">
+                    <span className="font-semibold text-[#111]">{a.customer}</span>
+                    {a.vehicle && <span className="ml-2 text-[11px] text-[#6b7280]">{a.vehicle}</span>}
+                  </div>
+                  <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when) : ""}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[12.5px] text-[#6b7280]">No appointment details for {periodLabel} yet — the counts above are correct; the named list syncs shortly.</p>
+          )
+        ) : namedAppts.length > 0 ? (
           <NamedApptsTable items={namedAppts} teamId={teamId} />
         ) : (
           <p className="text-[12.5px] text-[#6b7280]">No appointment details for {periodLabel} yet — the counts above are correct; the named list syncs shortly.</p>
         )}
       </Modal>
-      {/* Warm-leads "view all" — click a lead to review its conversation (calls + SMS) in the drawer. */}
-      <WarmLeadsModal
-        open={warmModalOpen}
-        onClose={() => setWarmModalOpen(false)}
-        items={warmLeads}
-        agentNames={agentNames}
-        loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken, spyneEnv })}
-      />
+      {/* Warm-leads "view all" — click a lead to review its conversation (calls + SMS) in the drawer.
+          No service-metrics twin (Classification unavailable), and Hot Leads has no trigger left once the
+          flag is on for Service (its card is hidden) — so this isn't just unreachable, it's not mounted
+          at all, and real ClickHouse warmLeads never even reaches it as a prop. */}
+      {!serviceMetricsOn && (
+        <WarmLeadsModal
+          open={warmModalOpen}
+          onClose={() => setWarmModalOpen(false)}
+          items={warmLeads}
+          agentNames={agentNames}
+          loadConversation={(leadId) => fetchConversations(teamId, { leadId, channel: "both", limit: 10, spyneToken, spyneEnv })}
+        />
+      )}
       {/* Customize layout — hide/reorder sections (opened from the header). Two modals: `ctrl` for the
           legacy layout, `liveCtrl` for the new Live overview. Each renders only when ITS editing is on. */}
       <CustomizeModal ctrl={ctrl} groups={customizeGroups} accountLabel={account.name} />

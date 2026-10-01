@@ -566,10 +566,21 @@ export async function GET(request: Request): Promise<Response> {
    * CANNOT be re-attributed from the snapshot the way the AI-booked half is above. The honest split is
    * therefore: per-agent cards show what the spine can attribute, the rooftop tiles show this total. */
   const assistedBy = { sales: 0, service: 0, unknown: 0 };
+  const assistedByAgent: Record<string, number> = {};
   for (const a of windowedAppointments) {
     if (a.assisted) {
       const svcA = (a.service_type || "").toLowerCase();
       assistedBy[svcA === "sales" || svcA === "service" ? svcA : "unknown"]++;
+      /* PER-AGENT assists, from the same rows as the rooftop total directly above — which is what makes
+         the agent cards sum to the tile instead of to a windowed subset of it. `direction` on an assisted
+         row is the agent whose conversation earned the assist (detailQueries assist_agent), resolved over
+         the full 90-day lookback rather than the report window. A row that resolves to no agent is left
+         out of the per-agent map and stays in the rooftop total, exactly like an unattributed booking. */
+      const dirA = (a.direction || "").toLowerCase();
+      if ((svcA === "sales" || svcA === "service") && (dirA === "inbound" || dirA === "outbound")) {
+        const typeA = `${svcA === "sales" ? "Sales" : "Service"} ${dirA === "inbound" ? "Inbound" : "Outbound"}`;
+        assistedByAgent[typeA] = (assistedByAgent[typeA] ?? 0) + 1;
+      }
       continue;
     }
     const svc = (a.service_type || "").toLowerCase();
@@ -591,6 +602,11 @@ export async function GET(request: Request): Promise<Response> {
     const type = AGENT_TYPE_BY_ID[agent.id];
     if (!type) continue;
     agent.metrics.appointments = curByAgent[type] ?? 0;
+    /* Assists come from the appointment snapshot too, overriding the spine's figure. The spine can only
+       credit an assist when the lead has an IN-WINDOW conversation to hang it on, so its per-agent numbers
+       are a subset of the rooftop total (Covina Kia 30d: 19 of 38). These are attributed over the same
+       90-day lookback the rooftop total uses, so the two reconcile. */
+    agent.metrics.appointmentsAssisted = assistedByAgent[type] ?? 0;
     const basis = result.prior?.[agent.id];
     if (priByAgent && basis && typeof basis.appointments === "number") basis.appointments = priByAgent[type] ?? 0;
   }

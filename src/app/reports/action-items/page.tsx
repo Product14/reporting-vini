@@ -19,11 +19,13 @@ import {
   fetchActionItems,
   fetchActionItemStats,
   addDay,
+  rangeFor,
   type ActionItem,
   type ActionItemStats,
   type ActionItemCloser,
 } from "@/components/reports/liveData";
 import { track } from "@/lib/analytics";
+import { useServiceActionItemsPageOverlay } from "@/lib/serviceMetrics";
 
 type Scope = "open" | "overdue";
 
@@ -36,7 +38,7 @@ export default function ActionItemsPage() {
 }
 
 function ActionItemsView() {
-  const { teamId, account, spyneToken, spyneEnv } = useScenario();
+  const { teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
   const { bucket, custom, setPreset, setCustom } = useDateRange();
   const { dept } = useDept(); // top-level scope (shared header, URL-persisted)
   // variant rides along so the Old/New choice survives navigation between tabs.
@@ -49,6 +51,25 @@ function ActionItemsView() {
   const [scope, setScope] = useState<Scope>("open");
   const [stats, setStats] = useState<{ stats: ActionItemStats; closers: ActionItemCloser[] } | null>(null);
   const [items, setItems] = useState<ActionItem[] | null>(null);
+
+  // RETCONVAI-5066: read service-metrics instead of ClickHouse for Service, behind the flag. Om's
+  // action-item endpoint has no `created` field — only openNow/pastSla/cleared — so the "Created" stat
+  // and its tab (below) have no twin and are dropped entirely for Service; the Open/Overdue working list
+  // reuses the same rooftop-wide list this app's Overview now reads (see serviceMetrics.ts).
+  const serviceMetricsFlagOn = process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
+  const serviceMetricsOn = serviceMetricsFlagOn && dept === "service" && !!teamId;
+  const svcRange = custom ? { start: custom.start, end: addDay(custom.end) } : rangeFor(bucket);
+  const svcMetrics = useServiceActionItemsPageOverlay({
+    enabled: serviceMetricsOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: svcRange.start,
+    rangeEndExclusive: svcRange.end,
+  });
 
   useEffect(() => { track("report_viewed", { tab: "actions", team_id: teamId }); }, [teamId]);
 
@@ -79,7 +100,7 @@ function ActionItemsView() {
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ReportTopBar
           title="Action items"
           subtitle="Follow-up tasks the AI logged for the team — what's open, what's overdue, and who's closing them."
@@ -101,11 +122,22 @@ function ActionItemsView() {
         />
 
         <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
-          {/* Scoreboard */}
+          {/* Scoreboard — Service (flag on) has no `created` field on service-metrics, only
+              openNow/pastSla/cleared, so the "Created" stat and the closers breakdown are dropped
+              entirely rather than shown from the old ClickHouse source (see serviceMetrics.ts). */}
           <div className="flex flex-col gap-3.5">
             <SectionLabel hint={periodLabel}>The scoreboard</SectionLabel>
-            <Card title="Follow-up tasks the AI logged" sub="Created & closed for the selected window · open, overdue and due-today are live counts">
-              {stats ? (
+            <Card title="Follow-up tasks the AI logged" sub={serviceMetricsOn ? "Open, past-SLA and cleared — live counts" : "Created & closed for the selected window · open, overdue and due-today are live counts"}>
+              {serviceMetricsOn ? (
+                <div className="grid grid-cols-3 gap-4">
+                  <ScoreTile label="Open now" value={svcMetrics.openNow} />
+                  {/* Past SLA is a count of the loaded rows' own isLate flag, same as the Overview table
+                      — never a separate live metric, so there is nothing that can disagree with the rows
+                      below it and no caveat is needed (checker fix, 28-Sep). */}
+                  <ScoreTile label="Past SLA" value={svcMetrics.pastSla} />
+                  <ScoreTile label="Cleared" value={svcMetrics.cleared} />
+                </div>
+              ) : stats ? (
                 <ActionItemsScoreboard stats={stats.stats} closers={stats.closers} periodLabel={periodLabel} />
               ) : (
                 <div className="h-[120px] animate-pulse rounded-xl bg-[#eef0f3]" />
@@ -116,7 +148,7 @@ function ActionItemsView() {
           {/* Working list */}
           <div className="flex flex-col gap-3.5">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <SectionLabel hint={items ? `${items.length} shown` : "loading…"}>
+              <SectionLabel hint={serviceMetricsOn ? `${svcMetrics.items?.length ?? 0} shown` : items ? `${items.length} shown` : "loading…"}>
                 {scope === "overdue" ? "Overdue — needs attention" : "Open queue"}
               </SectionLabel>
               <div className="no-print flex items-center gap-2">
@@ -125,7 +157,41 @@ function ActionItemsView() {
               </div>
             </div>
             <Card title="" pad={false}>
-              {items === null ? (
+              {serviceMetricsOn ? (
+                (() => {
+                  // Om's list is already the OPEN queue, sort=due:asc — "Overdue" here filters that same
+                  // list by `isLate` client-side rather than a second server scope (there isn't one).
+                  const svcRows = (svcMetrics.items ?? []).filter((it) => scope === "open" || it.isLate);
+                  return svcRows.length === 0 ? (
+                    <div className="px-6 py-6">
+                      <EmptyState icon="✅" title={scope === "overdue" ? "Nothing overdue" : "No open action items"} body={`${account.name || "This rooftop"} has no ${scope === "overdue" ? "overdue" : "open"} action items.`} />
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
+                        <thead>
+                          <tr>
+                            <Th>Customer</Th>
+                            <Th>What to do</Th>
+                            <Th>Due</Th>
+                            <Th>Status</Th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {svcRows.map((it, i) => (
+                            <tr key={`${it.customer}-${i}`} className="border-t border-[#f0f0f0]">
+                              <Td><span className="font-semibold text-[#111]">{it.customer}</span></Td>
+                              <Td><span className="text-[#374151]">{it.what}</span></Td>
+                              <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due) : "—"}</span></Td>
+                              <Td>{it.isLate ? <span className="font-semibold text-[#dc2626]">Overdue</span> : <span className="font-semibold text-[#2563eb]">Open</span>}</Td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()
+              ) : items === null ? (
                 <div className="px-6 py-6"><div className="h-[160px] animate-pulse rounded-xl bg-[#eef0f3]" /></div>
               ) : items.length === 0 ? (
                 <div className="px-6 py-6">
@@ -173,11 +239,22 @@ function ActionItemsView() {
               )}
             </Card>
             <p className="text-[11px] text-[#9ca3af]">
-              Action items are created and auto-resolved by your Vini AI. &ldquo;Closed most&rdquo; shows the AI plus any team members your CRM assigns tasks to.
+              {serviceMetricsOn
+                ? "Action items are created and auto-resolved by your Vini AI."
+                : <>Action items are created and auto-resolved by your Vini AI. &ldquo;Closed most&rdquo; shows the AI plus any team members your CRM assigns tasks to.</>}
             </p>
           </div>
         </main>
       </div>
+    </div>
+  );
+}
+
+function ScoreTile({ label, value }: { label: string; value: number | null }) {
+  return (
+    <div>
+      <p className="text-[9.5px] font-bold uppercase tracking-wider text-[#9ca3af]">{label}</p>
+      <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#111]">{value != null ? fmtInt(value) : "—"}</p>
     </div>
   );
 }

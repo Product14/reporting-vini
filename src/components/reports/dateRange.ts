@@ -158,20 +158,24 @@ export function useDateRange(): DateRangeState {
  */
 export type ReportVariant = "old" | "new";
 
-/** The variant portion of a query string (no leading "&"/"?"). "" for the default "old". */
+/* ★ NEW IS THE DEFAULT (2026-09-29). The staged rollout is over: the reworked Overview ships to every
+ * rooftop and the Old/New switcher is no longer rendered (see ReportTopBar). `?view=old` still resolves,
+ * deliberately — it costs nothing, and it keeps a way to put the previous layout in front of someone
+ * without a deploy. Service is unaffected either way: OverviewView pins it to "old" because every change
+ * behind this flag was a sales-report change. */
 export function variantQS(variant: ReportVariant): string {
-  return variant === "new" ? "view=new" : "";
+  return variant === "old" ? "view=old" : "";
 }
 
 export function useVariant(): { variant: ReportVariant; setVariant: (v: ReportVariant) => void } {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const variant: ReportVariant = params.get("view") === "new" ? "new" : "old";
+  const variant: ReportVariant = params.get("view") === "old" ? "old" : "new";
   const setVariant = useCallback(
     (v: ReportVariant) => {
       const sp = new URLSearchParams(params.toString());
-      if (v === "new") sp.set("view", "new");
+      if (v === "old") sp.set("view", "old");
       else sp.delete("view");
       const qs = sp.toString();
       // replace (not push) — same reasoning as setDept: toggling a view is not a history step.

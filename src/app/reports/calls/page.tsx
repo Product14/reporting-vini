@@ -66,7 +66,7 @@ function RecentCallsView() {
 
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ReportTopBar
           title="Recent calls"
           subtitle="Every AI conversation — who called, what they wanted, how it ended, and the AI's grade."

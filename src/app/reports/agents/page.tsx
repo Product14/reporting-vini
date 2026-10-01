@@ -26,8 +26,8 @@ import {
   ReportTopBar,
   SectionLabel,
   StepList,
-  
-  
+  Td,
+  Th,
   TrendBars,
 } from "@/components/reports/kit";
 import { fmtRate, fmtWhenShort, IntentOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
@@ -44,6 +44,8 @@ import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
 import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, CANONICAL_DEFINITION_ROWS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { track } from "@/lib/analytics";
+import { useServiceOverviewOverlay, useServiceAgentsOverlay, shouldUseServiceMetrics } from "@/lib/serviceMetrics";
+import { applyServiceAgentsOverlay, serviceReportsOmOn } from "@/lib/reports/serviceAgentsOverlay";
 
 // Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
 const MISSED_LABELS: Record<string, string> = {
@@ -143,7 +145,26 @@ function AgentReportsView() {
       .catch(() => { track("report_load_failed", { tab: "agents", team_id: teamId }); setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
   };
   // Scope the live feed (and the no-crash mock skeleton) to the agents this rooftop actually runs.
-  const AGENTS = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
+  // Sumit, 29-Sep: Service agents' headline numbers read Om's service-metrics API, same source as the
+  // Overview, for the rooftops on NEXT_PUBLIC_SERVICE_REPORTS_OM_TEAMS. The full report is untouched.
+  const serviceOmOn = serviceReportsOmOn(teamId) && dept !== "sales";
+  const svcAgents = useServiceAgentsOverlay({
+    enabled: serviceOmOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: feed?.start,
+    rangeEndExclusive: feed?.end,
+    timezone: feed?.timezone ?? undefined,
+  });
+  const AGENTS = useMemo(
+    () => applyServiceAgentsOverlay(agentsForAccount(feed?.agents ?? [], account), { loading: false, inbound: svcAgents.inbound, outbound: svcAgents.outbound }),
+    // The overlay's two blocks are stable state references; the wrapper object is not.
+    [feed, account, svcAgents.inbound, svcAgents.outbound],
+  );
   const hasTeam = teamId !== "";
   // Carries team scope + the selected window into the tab links and the back arrow, so the window
   // survives navigation back to the Overview tab.
@@ -230,6 +251,40 @@ function AgentReportsView() {
   // Drives the swap below: when the scorer has this agent's window, its flow REPLACES the older
   // intent/outcome table; otherwise that table stays as the fallback.
   const hasOutcomes = !!outcomes && outcomes.scored > 0;
+
+  /* RETCONVAI-5066 (coordinator, 28-Sep): the console's Service "Reports" tab iframes THIS route
+   * (see the comment above on view2 — "The console's Reports tab iframes THIS route"), so every number
+   * on this whole per-agent drill-down is dealer-facing and in scope for the same rule as Overview: a
+   * service-metrics twin or hidden. The page's own report library ships nothing new yet, so the only
+   * twins available today are the same three already used on Overview — Appointments (bookedBySpyne +
+   * bookingRate split), Action Items (openNow + list) and the upcoming-appointments list — none of the
+   * per-agent funnel/calls/conversations/outcomes/highlights/missed/library numbers below have one.
+   * Called unconditionally (rules of hooks) even though the early return below is the only path that
+   * reads it — Sales and flag-off Service never construct this fetch's request (enabled: false → EMPTY,
+   * no network call, see serviceMetrics.ts).
+   *
+   * Checker fix, 28-Sep: gate on the agent ACTUALLY SHOWN too, not only the top-level dept scope. This
+   * route can be opened with dept="all" (unlike Overview, which is host-locked to one department) — a
+   * dealer viewing the Service Inbound/Outbound pill with dept=all must still get the gated render, not
+   * the ClickHouse one, because `a`/`m`/`r` below are Service data regardless of what `dept` says. */
+  // Sumit, 28-Sep: the flag-on Service render below replaced the whole report with a summary that has no
+  // Download menu and no report library, and clients escalated. Reports stays on the full report (its
+  // exports included) until a service-metrics version carries the same downloads. Overview is unaffected.
+  const REPORTS_ON_SERVICE_METRICS = false;
+  const serviceMetricsFlagOn = REPORTS_ON_SERVICE_METRICS && process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
+  const serviceMetricsOn = shouldUseServiceMetrics({ flagOn: serviceMetricsFlagOn, deptIsService: dept === "service", agentIsService: agentSvc === "service", hasTeam });
+  const svcMetrics = useServiceOverviewOverlay({
+    enabled: serviceMetricsOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: feed?.start,
+    rangeEndExclusive: feed?.end,
+    timezone: feed?.timezone ?? undefined,
+  });
   /* The rebuilt page is for the two SALES agents only. Every restructured block below is gated on this,
    * so a Service agent renders exactly the page it always did — no reordering, no removed cards. */
   const isSales = agentSvc === "sales";
@@ -274,6 +329,12 @@ function AgentReportsView() {
   const apptModalItems = useMemo(() => {
     if (!apptModal) return null;
     const dir = apptModal.agentType.endsWith("_ob") ? "Outbound" : "Inbound";
+    // Om's rooftops: the rows Om's bookedBySpyne counted, so list and tile share one source. Falls
+    // through to the old rows while Om's list can't be trusted (see agentDrilldownLists).
+    if (apptModal.service === "service") {
+      const om = dir === "Inbound" ? svcAgents.inboundList : svcAgents.outboundList;
+      if (om) return om;
+    }
     return (feed?.namedAppointments ?? [])
       .filter((a) => !a.assisted && a.serviceType === apptModal.service && a.channel === dir)
       .map((a) => ({
@@ -282,7 +343,7 @@ function AgentReportsView() {
         when: a.when ?? "", tz: null, status: a.status,
         serviceType: a.serviceType, assignedTo: null, intent: null, bookedAt: a.bookedAt,
       }));
-  }, [apptModal, feed?.namedAppointments]);
+  }, [apptModal, feed?.namedAppointments, svcAgents.inboundList, svcAgents.outboundList]);
 
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
@@ -321,16 +382,31 @@ function AgentReportsView() {
   // appointments) and never double-counts a lead touched on multiple days. Falls back to event counts
   // only if leadFunnel is absent. Canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) ·
   // "Real conversations" · "Qualified leads" · "Appointments — AI-booked".
-  const entryStage = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
+  // Om's API numbers on a Service agent (see serviceAgentsOverlay.ts). Sumit 29-Sep: Service has no
+  // "qualified" field, it reads "Wanted service"; outbound's entry is a dial count, so it says so.
+  const svcOm = serviceOmOn && agentSvc === "service" && !!(inbound ? svcAgents.inbound : svcAgents.outbound);
+  // Overnight audit 30-Sep: Om returns neededService unavailable for outbound (under half of connected calls
+  // carry an intent), so the overlay keeps the legacy qualified count. Label it by what is shown, not by the flag.
+  const svcWanted = svcOm && (inbound ? svcAgents.inbound : svcAgents.outbound)?.wantedService != null;
+  const qualLabel = svcWanted ? "Wanted service" : "Qualified leads";
+  const entryStageRaw = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
+  // Om, 29-Sep: the funnel's top has to count conversations, like the bar under it. Customers reached
+  // (leadsReached) and calls dialed (voice only) are different units, which is how Honda DTLA read 569
+  // conversations out of 545 reached (104%). conversationsReached = calls connected + SMS threads replied.
+  const svcNums = svcOm ? (inbound ? svcAgents.inbound : svcAgents.outbound) : null;
+  const entryStage = svcNums && svcNums.conversationsReached !== null
+    ? { label: "Conversations reached", value: svcNums.conversationsReached }
+    : svcOm && !inbound ? { label: "Calls dialed", value: m.calls } : entryStageRaw;
+  const funnelCountHeader = svcOm ? "Count" : "Leads (distinct)";
   const funnelStages = [
     { label: entryStage.label, value: scale(entryStage.value) },
     { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
-    { label: "Qualified leads", value: scale(a.leadFunnel?.qualified ?? m.qualified) },
+    { label: qualLabel, value: scale(a.leadFunnel?.qualified ?? m.qualified) },
     { label: "Appointments — AI-booked", value: scale(m.appointments) },
   ];
   const outcomeTiles = [
     { label: "Real conversations", value: scale(leadConnected), accent: "#2563eb" },
-    { label: "Qualified leads", value: scale(leadQualified), accent: "#813fed" },
+    { label: qualLabel, value: scale(leadQualified), accent: "#813fed" },
     ...(inbound
       ? [
           { label: "Transferred", value: scale(r.callFlow.transferred), accent: "#059669" },
@@ -382,7 +458,7 @@ function AgentReportsView() {
     const funnel: ExportSheet = {
       name: "Funnel",
       rows: [
-        ["Stage", "Leads (distinct)", "Conversion from prior stage"],
+        ["Stage", funnelCountHeader, "Conversion from prior stage"],
         ...funnelStages.map((s, i) => {
           const prev = i > 0 ? funnelStages[i - 1].value : null;
           const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "";
@@ -583,7 +659,7 @@ function AgentReportsView() {
       },
       {
         heading: "Lead-to-appointment funnel",
-        blocks: [{ kind: "rows", columns: ["Stage", "Leads (distinct)", "Conversion from prior stage"], rows: funnelStages.map((s, i) => {
+        blocks: [{ kind: "rows", columns: ["Stage", funnelCountHeader, "Conversion from prior stage"], rows: funnelStages.map((s, i) => {
           const prev = i > 0 ? funnelStages[i - 1].value : null;
           const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "—";
           return [s.label, fmtInt(s.value), conv];
@@ -727,9 +803,120 @@ function AgentReportsView() {
     });
   };
 
+  // RETCONVAI-5066 (coordinator, 28-Sep): Service + the flag on gets a SEPARATE, minimal render — not a
+  // sprinkling of hides through the 1000+ lines below — so this stays provably byte-identical for Sales
+  // and flag-off Service (the huge return below is completely untouched, never re-entered on this path).
+  // Only the three sanctioned twins render; every per-agent/funnel/outcomes/library number this page
+  // otherwise shows has none (see the comment above svcMetrics for the full list) and simply isn't built.
+  if (serviceMetricsOn) {
+    const appt = svcMetrics.appointments;
+    const ai = svcMetrics.actionItems;
+    const upcoming = svcMetrics.namedAppointments ?? [];
+    return (
+      <div className="flex min-h-screen bg-[#fafafa]">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <ReportTopBar
+            title="Agent performance"
+            subtitle="Appointments and action items for this rooftop."
+            active="agents"
+            teamId={teamId}
+            query={navQuery}
+            back={`/reports${navQuery}`}
+            right={hasTeam ? (
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
+                <DateFilter
+                  bucket={bucket}
+                  custom={custom}
+                  onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
+                  onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "agents", range: "custom", team_id: teamId }); }}
+                />
+              </div>
+            ) : undefined}
+          />
+          <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Card title="Appointments" sub="Booked by Spyne, this window">
+                {appt ? (
+                  <div className="flex flex-col gap-1 px-1 py-1">
+                    <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(appt.total)}</p>
+                    <p className="text-[12px] text-[#6b7280]">{appt.inbound != null || appt.outbound != null ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound` : "Booked by Spyne"}</p>
+                  </div>
+                ) : (
+                  <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No appointment data for {periodLabel} yet.</p>
+                )}
+              </Card>
+              {/* openNow only — ov-prod's Overview never renders pastSla (it's shown on ov-prod's separate
+                  Action Items tab, with its own window-vs-live caveat; this route mirrors Overview's
+                  twins only, per the coordinator's own scope for this page). */}
+              <Card title="Action items" sub="Waiting on your team, live count">
+                {ai ? (
+                  <div className="flex flex-col gap-1 px-1 py-1">
+                    <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(ai.openNow)}</p>
+                    <p className="text-[12px] text-[#6b7280]">open now</p>
+                  </div>
+                ) : (
+                  <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No action-item data for {periodLabel} yet.</p>
+                )}
+              </Card>
+            </div>
+            <div className="flex flex-col gap-3.5">
+              <SectionLabel>Upcoming appointments</SectionLabel>
+              <Card title="" pad={upcoming.length === 0}>
+                {upcoming.length > 0 ? (
+                  <div className="flex flex-col gap-2 px-4 py-3">
+                    {upcoming.map((it, i) => (
+                      <div key={`${it.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f0f0f0] pb-2 last:border-0 last:pb-0">
+                        <div className="min-w-0">
+                          <span className="font-semibold text-[#111]">{it.customer}</span>
+                          {it.vehicle && <span className="ml-2 text-[11px] text-[#6b7280]">{it.vehicle}</span>}
+                        </div>
+                        <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{it.when ? fmtWhenShort(it.when) : ""}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState icon="📅" title="No upcoming appointments" body="New bookings from Spyne show up here." />
+                )}
+              </Card>
+            </div>
+            {ai && ai.items.length > 0 && (
+              <div className="flex flex-col gap-3.5">
+                <SectionLabel>Waiting on your team</SectionLabel>
+                <Card title="" pad={false}>
+                  <div className="overflow-x-auto px-[15px]">
+                    <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
+                      <thead>
+                        <tr>
+                          <Th>Customer</Th>
+                          <Th>What to do</Th>
+                          <Th>Due</Th>
+                          <Th>Status</Th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ai.items.map((it, i) => (
+                          <tr key={`${it.customer}-${i}`} className="border-t border-[#f0f0f0]">
+                            <Td><span className="font-semibold text-[#111]">{it.customer}</span></Td>
+                            <Td><span className="text-[#374151]">{it.what}</span></Td>
+                            <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due) : ""}</span></Td>
+                            <Td>{it.isLate ? <span className="font-semibold text-[#dc2626]">Overdue</span> : <span className="font-semibold text-[#2563eb]">Open</span>}</Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              </div>
+            )}
+          </main>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-screen bg-[#fafafa]">
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
 
         <ReportTopBar
           title="Agent performance"
@@ -740,7 +927,7 @@ function AgentReportsView() {
           back={`/reports${navQuery}`}
           right={
             hasTeam ? (
-              <div className="no-print flex items-center gap-3">
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
                 <DateFilter
                   bucket={bucket}
                   custom={custom}
@@ -828,8 +1015,10 @@ function AgentReportsView() {
               department's upsell pills removed there are two, and a hard-coded four left half the row
               empty. */}
           <div
-            className="grid grid-cols-1 gap-2.5 sm:grid-cols-2"
-            style={visibleAgents.length > 2 ? { gridTemplateColumns: `repeat(${visibleAgents.length}, minmax(0, 1fr))` } : undefined}
+            // Mobile QA 29-Sep: the inline column count applied at every width, so 3+ agents
+            // squeezed side by side on a phone. One column on phone, the count from sm up.
+            className={`grid grid-cols-1 gap-2.5 sm:grid-cols-2 ${visibleAgents.length > 2 ? "sm:[grid-template-columns:repeat(var(--agent-cols),minmax(0,1fr))]" : ""}`}
+            style={visibleAgents.length > 2 ? ({ "--agent-cols": visibleAgents.length } as React.CSSProperties) : undefined}
           >
             {visibleAgents.map((ag) => {
               const selected = ag.id === activeId;
@@ -927,12 +1116,15 @@ function AgentReportsView() {
               <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} />
               {/* web chat — the third channel; shown only on rooftops that actually run it (migration 0021) */}
               {scale(m.chats ?? 0) > 0 ? <ActivityStat label="Web chats" value={fmtInt(scale(m.chats ?? 0))} hint="sessions" /> : null}
-              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint="qualified ÷ conversations" accent="#813fed" />
+              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint={svcWanted ? "wanted service ÷ conversations" : "qualified ÷ conversations"} accent="#813fed" />
               {/* BOTH directions show close rate. Outbound used to show "Warm leads" here, summed from
                   the campaigns table — a different lead universe with its own vocabulary. Warm leads ARE
                   qualified leads (Ishan, 2026-09-29), so the one number worth this slot is the same one
-                  inbound shows. */}
-              <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint="AI-booked ÷ qualified" accent="#059669" />
+                  inbound shows.
+                  The hints stay direction-agnostic but follow the service overlay: on a service agent
+                  reporting wantedService, the qualified stage IS "wanted service", so the denominator is
+                  named that way instead (RETCONVAI-5066). */}
+              <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint={svcWanted ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
             </div>
 
             {/* tertiary: call breakdown — coverage split + outcome tiles, only what live volume gives us */}

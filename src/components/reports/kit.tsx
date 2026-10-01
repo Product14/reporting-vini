@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
 import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
-import { useDept, useVariant, type Dept, type ReportVariant } from "./dateRange";
+import { useDept, type Dept, type ReportVariant } from "./dateRange";
 import { track } from "@/lib/analytics";
 
 export * from "./data";
@@ -115,9 +115,9 @@ export function ReportTopBar({
   }, []);
   // top-level department scope — shared across every tab (persisted in the URL via useDept).
   const { dept, setDept, locked } = useDept();
-  // Staged rollout: Old (today's production report) vs New (the 2026-09-24 changes). URL-persisted so the
-  // choice carries across tabs; default "old" so nobody sees the redesign until they ask for it.
-  const { variant, setVariant } = useVariant();
+  // (The Old/New variant hook was dropped here with the switcher below — the new Overview is the default
+  //  for every rooftop now. Restoring the control means restoring `const { variant, setVariant } =
+  //  useVariant();` alongside it, and re-adding useVariant to the dateRange import above.)
 
   return (
     <div
@@ -148,12 +148,11 @@ export function ReportTopBar({
         </div>
         )}
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          {/* Sits FIRST, left of every other control: it changes what the rest of the header is describing,
-              so it reads as a scope on the page rather than one more filter among the filters.
-              SALES ONLY — every change behind the New variant is a sales-report change (the service hero
-              is a separate component, and the outcomes cards are already gated to sales), so offering the
-              switch on a Service report would promise a difference that variant cannot produce. */}
-          {teamId && dept !== "service" && <VariantSwitcher variant={variant} setVariant={setVariant} />}
+          {/* OLD/NEW SWITCHER — not rendered since 2026-09-29: the new Overview is now the default for
+              every rooftop, so there is nothing to choose between. VariantSwitcher and useVariant are
+              both still here and `?view=old` still resolves, so this is one line to put back if the
+              rollout needs a visible escape hatch again.
+          {teamId && dept !== "service" && <VariantSwitcher variant={variant} setVariant={setVariant} />} */}
           {teamId && !locked && !hideDept && <DeptSwitcher dept={dept} setDept={setDept} />}
           {right}
         </div>
@@ -264,7 +263,7 @@ export function DateFilter({
   // makes the end exclusive). Seed from the active range when it already spans a single day.
   const [day, setDay] = useState(() => (custom && custom.start === custom.end ? custom.start : new Date().toISOString().slice(0, 10)));
   return (
-    <div className="relative flex flex-wrap items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
+    <div className="relative flex min-w-0 max-w-full flex-wrap items-center gap-1 rounded-lg bg-[#f3f4f6] p-1">
       {DATE_PRESETS.map((p) => {
         const on = !custom && bucket === p.id;
         return (
@@ -284,7 +283,7 @@ export function DateFilter({
         {custom ? (custom.start === custom.end ? custom.start.slice(5) : `${custom.start.slice(5)}–${custom.end.slice(5)}`) : "Custom"}
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-30 mt-2 flex flex-col gap-2.5 rounded-xl border border-[#e5e7eb] bg-white p-3 shadow-[0_10px_30px_rgba(16,24,40,0.15)]">
+        <div className="absolute right-0 top-full z-30 mt-2 flex max-w-[calc(100vw-32px)] flex-col gap-2.5 rounded-xl border border-[#e5e7eb] bg-white p-3 shadow-[0_10px_30px_rgba(16,24,40,0.15)]">
           <label className="flex flex-col gap-1 text-[9.5px] font-bold uppercase tracking-wide text-[#9ca3af]">
             Single day
             <div className="flex items-end gap-2">
@@ -571,7 +570,7 @@ export function StepFunnel({
         const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
         const isLast = i === stages.length - 1;
         return (
-          <div key={s.label} className="flex flex-1 flex-col">
+          <div key={s.label} className="flex min-w-0 flex-1 flex-col">
             {/* bar zone */}
             <div className="relative flex items-end" style={{ height }}>
               <div
