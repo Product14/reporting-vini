@@ -36,7 +36,7 @@ export const OUTCOME_RUNGS: { key: string; label: string; color: string }[] = [
   { key: "Transfer", label: "Transferred", color: "#2563eb" },
   { key: "Callback", label: "Callback", color: "#d97706" },
   { key: "Query Resolved", label: "Query resolved", color: "#7c3aed" },
-  /* NAMED "Interested, nothing arranged", not "Qualified lead" — same reason as "Booking agreed" above,
+  /* NAMED "Interested", not "Qualified lead" — same reason as "Booking agreed" above,
      and a worse collision. These six answer ONE question: what was arranged at the end of the call?
      Every conversation gets exactly one. This rung is the LEFTOVER — the customer is worth chasing but
      nothing was set: no booking, no transfer, no callback, no answered question.
@@ -49,7 +49,7 @@ export const OUTCOME_RUNGS: { key: string; label: string; color: string }[] = [
 
      Do NOT re-point this at V12. These rungs must stay mutually exclusive or the row stops summing to
      its own total and the shares cross 100%. */
-  { key: "Qualified Lead", label: "Interested, nothing arranged", color: "#0891b2" },
+  { key: "Qualified Lead", label: "Interested", color: "#0891b2" },
   { key: "Voicemail", label: "Voicemail", color: "#cbd2db" },
   { key: "None", label: "No next step", color: "#adb5c0" },
 ];
