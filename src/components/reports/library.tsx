@@ -2055,7 +2055,7 @@ const OUTCOME_KEYS = ["Appointment", "Transfer", "Callback", "Query Resolved", "
    exported column headed "Qualified Lead" reads as the funnel's qualified count, which it is not — it is
    the leftover rung, "interested but nothing was arranged". See OUTCOME_RUNGS in outcomes.tsx for the
    measured split. A spreadsheet outlives the screen, so it is the worse place to carry the collision. */
-const OUTCOME_HEADERS = ["Booking agreed", "Transferred", "Callback", "Query resolved", "Interested, nothing arranged", "No next step"];
+const OUTCOME_HEADERS = ["Booking agreed", "Transferred", "Callback", "Query resolved", "Interested", "No next step"];
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /* THE DRILL-DOWN. Clicking a segment asks the server for the leads behind exactly that cell, then a lead
