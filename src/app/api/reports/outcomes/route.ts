@@ -133,6 +133,10 @@ export async function GET(request: Request): Promise<Response> {
         window: { start, end },
         degraded: false,
         source: "console-api",
+      }, {
+        /* See /api/reports. Cached only on this SUCCESS path — the degraded exits carry no header, so a
+           transient upstream failure is never pinned in a dealer's browser for 15 minutes. */
+        headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" },
       });
     }
 
@@ -144,7 +148,12 @@ export async function GET(request: Request): Promise<Response> {
      * The API stays as the fallback: it is the only source for TOOL metrics (no ClickHouse table), which
      * the Service-drive reports read and which self-hide when absent. */
     const fromCh = await fetchOutcomesFromClickhouse({ teamId, dir, agentType, startISO, endISO });
-    if (fromCh) return Response.json({ outcomes: fromCh, window: { start, end }, degraded: false, source: "clickhouse" });
+    if (fromCh) return Response.json({ outcomes: fromCh, window: { start, end }, degraded: false, source: "clickhouse" }, {
+        /* See /api/reports for the full reasoning. PRIVATE because this payload is dealer data; the
+           15-min browser window is the only cache layer that survives both a page reload and a Vercel
+           instance change, and the Refresh button bypasses it explicitly. */
+        headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" },
+      });
 
     const outcomes = await fetchSalesOutcomes(
       { enterpriseId, teamId, dir, agentType, startISO, endISO },
@@ -152,7 +161,9 @@ export async function GET(request: Request): Promise<Response> {
       env,
     );
     if (!outcomes) return Response.json({ outcomes: null, degraded: true, note: "eval api unavailable" });
-    return Response.json({ outcomes, window: { start, end }, degraded: false, source: "eval-api" });
+    return Response.json({ outcomes, window: { start, end }, degraded: false, source: "eval-api" }, {
+        headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" },
+      });
   } catch (e) {
     console.error(`[outcomes] ${teamId}/${dir} failed: ${e instanceof Error ? e.message : String(e)}`);
     return Response.json({ outcomes: null, degraded: true, note: "eval fetch failed" });

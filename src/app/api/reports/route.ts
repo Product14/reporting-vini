@@ -327,7 +327,11 @@ export async function GET(request: Request): Promise<Response> {
     /* NO AGGREGATE AND NO CANONICAL ANSWER IS AN OUTAGE, NOT AN EMPTY ROOFTOP. Returning a confident
        200 full of zeros is how a slow upstream ends up telling a dealer they booked nothing. degraded
        keeps the UI in its syncing state and lets the client retry. */
-    return Response.json({ ...built, ...meta, ...(canonNow ? {} : { degraded: true }) });
+    /* Same window as the full path below, but ONLY when the canonical answer actually arrived. A
+       degraded body is the "report is on its way" state — pinning that for 15 minutes would leave a
+       dealer on a syncing screen long after the upstream recovered. */
+    return Response.json({ ...built, ...meta, ...(canonNow ? {} : { degraded: true }) },
+      canonNow ? { headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" } } : undefined);
   }
 
   // agent_daily is read ONCE across the combined [prior.start, end) range and split in-memory into the
@@ -613,9 +617,17 @@ export async function GET(request: Request): Promise<Response> {
 
   return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved, ...(!canonicalResolved && !result.hasData ? { degraded: true } : {}) }, {
     /* PRIVATE, not shared: this body carries customer names and phone numbers, so it must never sit in
-       a shared CDN cache. `max-age` lets a reload inside 60s come straight from the browser — the
-       canonical endpoints are multi-second warehouse queries and a refresh should not pay for them
-       twice — and `stale-while-revalidate` keeps the numbers on screen while the refresh runs. */
-    headers: { "Cache-Control": "private, max-age=60, stale-while-revalidate=300" },
+       a shared CDN cache. `max-age` lets a reload come straight from the browser — the canonical
+       endpoints are multi-second warehouse queries and a refresh should not pay for them twice — and
+       `stale-while-revalidate` keeps the numbers on screen while the refresh runs.
+
+       RAISED 60s -> 900s (15 min). Measured on 3d3deabc98: a COLD request is 6-16s, because this route
+       fans out to four canonical calls and the slowest (overview) is 8.3s on a busy rooftop. The old 60s
+       was far shorter than the work it was protecting, and the server-side cache behind it is a
+       module-level Map — per serverless instance on Vercel, so a reload routed to a fresh instance pays
+       the full cold cost. The browser cache is the only layer that survives both a reload and an
+       instance change, which is why it carries the long window. The Refresh button bypasses it
+       explicitly (see `force` in liveData.ts), so a dealer can always get live numbers on demand. */
+    headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" },
   });
 }

@@ -296,6 +296,9 @@ export async function GET(request: Request): Promise<Response> {
   // hasMore is a cheap "got a full page" heuristic (no extra COUNT query) — a caller paginating with
   // offset should keep going while this is true, and stop as soon as a page comes back short.
   return Response.json({ actionItems, total: actionItems.length, scope, hasMore: actionItems.length === limit }, {
-    headers: { "Cache-Control": "s-maxage=30, stale-while-revalidate=60" },
+    /* PRIVATE, not s-maxage. This payload carries customer names and phone numbers, and `s-maxage`
+         targets SHARED caches — a CDN keys on URL alone and would ignore the bearer token this
+         route is gated by. Matches /api/reports, which already says the same thing. */
+      headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" },
   });
 }
