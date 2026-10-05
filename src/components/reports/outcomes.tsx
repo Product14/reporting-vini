@@ -97,7 +97,7 @@ export async function fetchOutcomes(args: {
   if (args.spyneEnv) qs.set("env", args.spyneEnv);
   try {
     const headers = args.spyneToken ? { Authorization: `Bearer ${args.spyneToken}` } : undefined;
-    const r = await fetch(`/api/reports/outcomes?${qs}`, { cache: "no-store", headers });
+    const r = await fetch(`/api/reports/outcomes?${qs}`, { cache: "default", headers });
     if (!r.ok) return { outcomes: null, degraded: true };
     const j = (await r.json()) as OutcomesFeed;
     return { outcomes: j?.outcomes ?? null, degraded: j?.degraded !== false };

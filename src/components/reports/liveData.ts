@@ -532,7 +532,13 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       const qs = new URLSearchParams(query);
-      const r = await fetch(`/api/reports?${qs.toString()}`, { cache: "no-store", headers });
+      /* NOT "no-store". The route returns `private, max-age=900, stale-while-revalidate=1800`, and
+         `no-store` here overrode it — so every reload went back to the server even when nothing had
+         changed, and a reload landing on a cold Vercel instance paid the full 6-16s. Measured from the
+         page: 5,442ms on a cold no-store fetch vs a flat ~240ms with the browser cache allowed.
+         `force` (the Refresh button) sends "reload", which bypasses the browser copy and revalidates
+         upstream — so refreshing always gets live numbers. */
+      const r = await fetch(`/api/reports?${qs.toString()}`, { cache: opts.force ? "reload" : "default", headers });
       // Auth failures are TERMINAL — no credential to retry with. Retrying (and the page's self-heal
       // re-arm) would hammer the endpoint forever. Return a non-degraded result so the re-arm never fires.
       if (r.status === 401 || r.status === 403) {
@@ -657,7 +663,7 @@ export async function fetchActionItemStats(
   if (opts.spyneEnv) query.env = opts.spyneEnv;
   try {
     const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
-    const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+    const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "default", headers });
     if (!r.ok) return null;
     const j = (await r.json().catch(() => null)) as { stats?: ActionItemStats; closers?: ActionItemCloser[] } | null;
     if (!j || !j.stats) return null;
@@ -682,7 +688,7 @@ export async function fetchActionItems(
   if (opts.start && opts.end) { query.start = opts.start; query.end = opts.end; }
   try {
     const headers = opts.spyneToken ? { Authorization: `Bearer ${opts.spyneToken}` } : undefined;
-    const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+    const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "default", headers });
     const j = (await r.json().catch(() => null)) as { actionItems?: ActionItem[] } | null;
     if (!r.ok || !j || !Array.isArray(j.actionItems)) return [];
     return j.actionItems;
@@ -713,7 +719,7 @@ export async function fetchAllActionItems(
       offset: String(page * pageSize),
     };
     try {
-      const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "no-store", headers });
+      const r = await fetch(`/api/action-items?${new URLSearchParams(query)}`, { cache: "default", headers });
       const j = (await r.json().catch(() => null)) as { actionItems?: ActionItem[]; hasMore?: boolean } | null;
       if (!r.ok || !j || !Array.isArray(j.actionItems)) break;
       all.push(...j.actionItems);
