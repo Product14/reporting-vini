@@ -105,6 +105,15 @@ async function leadCountsBoth(sb: any, teamId: string, start: string, end: strin
  *
  * OPT-IN PER REQUEST. Only Reports > Agent performance and its report library send the param; the
  * Overview and the digest cron get exactly the response they always have. */
+/* A timestamp as whole UTC seconds. The snapshot's booked_at comes back from Postgres with a zone, the live
+ * feed's createdAt as ISO-Z with milliseconds; a zone-less string is read as UTC (ClickHouse writes UTC). */
+function epochSecond(ts: string | null | undefined): number | null {
+  if (!ts) return null;
+  const iso = (ts.includes("T") ? ts : ts.replace(" ", "T")).replace(/([+-]\d{2})$/, "$1:00"); // "+00" → "+00:00"
+  const t = Date.parse(/(Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`);
+  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
+}
+
 type LeadFlags = Map<string, { connected: boolean; qualified: boolean }>; // `${agent_type}|${lead_id}`
 type StageGap = { worked: number; notConnected: number; notQualified: number };
 
@@ -607,11 +616,30 @@ export async function GET(request: Request): Promise<Response> {
      * outbound disagreement resolves to outbound. Keyed over the whole ~120d snapshot so the prior window
      * flips too; a booking newer than the last sync keeps agentData's direction until the next one. */
     // SERVICE bookings only: the close basis is a Service rule, and Sales stays exactly as it was.
-    const snapshotOutbound = customerBasis
-      ? new Set(appointments.filter((a) => !a.assisted && a.meeting_id && (a.service_type ?? "").toLowerCase() === "service" && (a.direction ?? "").toLowerCase() === "outbound").map((a) => a.meeting_id as string))
-      : null;
+    /* ★ MATCHED ON LEAD + BOOKING SECOND, NOT ONLY THE ID (fixed after #36). The feed's `id` is
+     * meetings.meeting_id on some rows and the Mongo _id on others (see the snapshotByLead note above),
+     * and the snapshot only stores meeting_id — so an id-only match silently skipped every row the API
+     * handed back under its _id. In prod that was all 8 of Paragon Honda's callbacks since 6 Sep: Riley
+     * (Service Inbound, 30d) kept 7 bookings beside a 0% close rate. booked_at is the same meeting's
+     * created_at on both sides, so lead + that second identifies the meeting whichever id the API sent;
+     * ±1 s absorbs a rounding difference between the two copies. */
+    const snapshotOutbound = customerBasis ? new Set<string>() : null;
+    if (snapshotOutbound) {
+      for (const a of appointments) {
+        if (a.assisted || (a.service_type ?? "").toLowerCase() !== "service" || (a.direction ?? "").toLowerCase() !== "outbound") continue;
+        if (a.meeting_id) snapshotOutbound.add(`m:${a.meeting_id}`);
+        const sec = epochSecond(a.booked_at);
+        if (a.lead_id && sec !== null) snapshotOutbound.add(`l:${a.lead_id}|${sec}`);
+      }
+    }
+    const isSnapshotOutbound = (m: { id: string; leadId?: string | null; bookedAt?: string | null }): boolean => {
+      if (!snapshotOutbound) return false;
+      if (m.id && snapshotOutbound.has(`m:${m.id}`)) return true;
+      const sec = epochSecond(m.bookedAt);
+      return !!m.leadId && sec !== null && [sec, sec - 1, sec + 1].some((x) => snapshotOutbound.has(`l:${m.leadId}|${x}`));
+    };
     liveAppts = liveAppts.map((m) => {
-      if (snapshotOutbound && m.direction === "inbound" && m.id && snapshotOutbound.has(m.id) && (m.agentType || m.serviceType || "").toLowerCase() === "service") m = { ...m, direction: "outbound" };
+      if (m.direction === "inbound" && (m.agentType || m.serviceType || "").toLowerCase() === "service" && isSnapshotOutbound(m)) m = { ...m, direction: "outbound" };
       if (m.agentType && m.direction) return m;
       const prev = snapFor(m);
       if (!prev) return m;
