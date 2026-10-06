@@ -1,8 +1,10 @@
-import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS, SYNC_STATE } from "@/lib/reports/supabase";
+import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, AGENT_LEAD_DAYS, REPORT_CALLBACKS, REPORT_CAMPAIGNS, REPORT_OUTCOMES, REPORT_APPOINTMENTS, REPORT_WARM_LEADS, SYNC_STATE } from "@/lib/reports/supabase";
 import { buildResult, AGENT_TYPE_BY_ID } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 
-import { fetchLiveAppointments, countByAgent } from "@/lib/reports/liveAppointments";
+import { fetchLiveAppointments, countByAgent, bookedLeadsByAgent } from "@/lib/reports/liveAppointments";
+import type { AgentData } from "@/components/reports/data";
+import type { Basis } from "@/components/reports/liveData";
 import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -77,6 +79,130 @@ async function leadCountsBoth(sb: any, teamId: string, start: string, end: strin
     return { cur, prior };
   } catch {
     return {};
+  }
+}
+
+/* ── SERVICE CLOSE RATE ON ONE BASIS (Reports only, ?close_basis=customers) — Freshdesk #23995 ──
+ * Close rate is AI-booked ÷ qualified. On Paragon Honda it read 172% (lifetime) / 220% (Service Inbound,
+ * MTD) because the two sides were different people, not just a different grain:
+ *   • The spine marks a Service lead qualified only on a buying-intent action item or an intent-analysis
+ *     match, and a booking the AI COMPLETES leaves neither behind — action items are follow-ups for a
+ *     human, and a text or booking-link booking has no intent analysis at all. Paragon MTD Sep, Service
+ *     Outbound: 43 of 54 booked customers were never in `qualified`; fleet, 30d: 24% of AI-booked
+ *     Service customers.
+ *   • Bookings are records (a reschedule or a second vehicle counts again); qualified is customers.
+ * The rate is therefore taken over the customers this agent WORKED in the window (a row in
+ * agent_lead_days — the funnel's own population). Each booked customer among them has by definition held
+ * a real conversation and qualified, so connected and qualified add the ones they are missing — an exact
+ * union, |stage ∪ booked| = |stage| + |booked − stage| — and the numerator is those booked CUSTOMERS
+ * (leadFunnel.bookedLeads, read by closeRateParts). booked ⊆ qualified ⊆ connected ⊆ worked, so the rate
+ * cannot pass 100% and the funnel's entry stage (leads reached / dialed, and the agent chip) is never
+ * touched. A booking whose customer this agent did not work in the window still counts in
+ * "Appointments — AI-booked" (records, unchanged) but not in the rate: one booked from a conversation
+ * before the window, or one filed on a different customer record than the conversation that made it
+ * (all 15 such on Paragon Honda, lifetime, Service Outbound — a duplicate or owner-vs-caller record).
+ * Sales is untouched.
+ *
+ * OPT-IN PER REQUEST. Only Reports > Agent performance and its report library send the param; the
+ * Overview and the digest cron get exactly the response they always have. */
+type LeadFlags = Map<string, { connected: boolean; qualified: boolean }>; // `${agent_type}|${lead_id}`
+type StageGap = { worked: number; notConnected: number; notQualified: number };
+
+/* The agent_lead_days flags of the given leads over [start, end), OR-ed per (agent_type, lead). Reads only
+ * those leads' rows (the rooftop's Service bookings, never the whole window), 100 ids per request, four
+ * requests at a time. null on any error, so the caller can drop the whole rule rather than half-apply it. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function readLeadFlags(sb: any, teamId: string, start: string, end: string, leadIds: Set<string>): Promise<LeadFlags | null> {
+  const ids = Array.from(leadIds);
+  const flags: LeadFlags = new Map();
+  const readChunk = async (chunk: string[]): Promise<boolean> => {
+    // PostgREST caps a response at 1000 rows and a lead carries one row per active day: page the chunk.
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await sb
+        .from(AGENT_LEAD_DAYS)
+        .select("agent_type,lead_id,connected,qualified")
+        .eq("team_id", teamId)
+        .gte("activity_day", start)
+        .lt("activity_day", end)
+        .in("lead_id", chunk)
+        .order("agent_type").order("lead_id").order("activity_day")
+        .range(from, from + 999);
+      if (error || !Array.isArray(data)) return false;
+      for (const r of data as Array<{ agent_type: string; lead_id: string; connected: boolean; qualified: boolean }>) {
+        const k = `${r.agent_type}|${r.lead_id}`;
+        const f = flags.get(k) ?? { connected: false, qualified: false };
+        f.connected ||= !!r.connected;
+        f.qualified ||= !!r.qualified;
+        flags.set(k, f);
+      }
+      if (data.length < 1000) return true;
+    }
+  };
+  try {
+    const chunks: string[][] = [];
+    for (let i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    for (let i = 0; i < chunks.length; i += 4) {
+      const ok = await Promise.all(chunks.slice(i, i + 4).map(readChunk));
+      if (ok.includes(false)) return null;
+    }
+    return flags;
+  } catch {
+    return null;
+  }
+}
+
+/* For each agent's booked customers: how many it WORKED in the window (any agent_lead_days row under that
+ * agent), and of those, how many the connected / qualified stages do not already count. Pure. */
+function stageGaps(flags: LeadFlags, booked: Record<string, Set<string>>): Record<string, StageGap> {
+  const out: Record<string, StageGap> = {};
+  for (const [type, leads] of Object.entries(booked)) {
+    const g: StageGap = { worked: 0, notConnected: 0, notQualified: 0 };
+    for (const l of leads) {
+      const f = flags.get(`${type}|${l}`);
+      if (!f) continue; // not worked by this agent in the window: outside the funnel and the rate
+      g.worked++;
+      if (!f.connected) g.notConnected++;
+      if (!f.qualified) g.notQualified++;
+    }
+    out[type] = g;
+  }
+  return out;
+}
+
+// A booking with no lead id cannot be matched to a worked customer, so it stays outside the rate (noLead
+// is collected for symmetry with bookedLeadsByAgent, not counted).
+type Booked = { leads: Record<string, Set<string>>; noLead: Record<string, number> };
+const serviceOnly = (b: Booked): Booked => ({
+  leads: Object.fromEntries(Object.entries(b.leads).filter(([t]) => t.startsWith("Service "))),
+  noLead: Object.fromEntries(Object.entries(b.noLead).filter(([t]) => t.startsWith("Service "))),
+});
+
+/* Applies the rule above to the Service agents (current window) and to their prior-window basis, so the
+ * period deltas compare like with like. Pure apart from mutating the agents/prior it is handed. */
+function applyCustomerBasis(agents: AgentData[], prior: Record<string, Basis> | undefined,
+  gaps: Record<string, StageGap>, priGaps: Record<string, StageGap> | null): void {
+  for (const agent of agents) {
+    const type = AGENT_TYPE_BY_ID[agent.id];
+    if (!type || agent.dept !== "Service") continue;
+    const lf = agent.leadFunnel;
+    if (lf) {
+      const g = gaps[type];
+      agent.leadFunnel = {
+        ...lf,
+        connected: lf.connected + (g?.notConnected ?? 0),
+        qualified: lf.qualified + (g?.notQualified ?? 0),
+        bookedLeads: g?.worked ?? 0,
+      };
+    }
+    const basis = prior?.[agent.id];
+    if (priGaps && basis) {
+      const g = priGaps[type];
+      prior![agent.id] = {
+        ...basis,
+        conversations: basis.conversations + (g?.notConnected ?? 0),
+        qualified: basis.qualified + (g?.notQualified ?? 0),
+      };
+    }
   }
 }
 
@@ -252,6 +378,9 @@ export async function GET(request: Request): Promise<Response> {
   // Which Spyne backend the enrichment calls below hit — the console now embeds a rooftop with
   // ?env=uat|stag|prod, and a UAT dealer's token only works against the UAT API.
   const spyneEnv = spyneEnvFrom(request);
+  // Reports > Agent performance asks for the Service close rate on one basis (applyCustomerBasis above).
+  // Every other caller omits it and gets the response unchanged.
+  let customerBasis = searchParams.get("close_basis") === "customers";
 
   // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
   // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).
@@ -427,6 +556,23 @@ export async function GET(request: Request): Promise<Response> {
    * Detail the live API doesn't carry (booked_via — call / SMS / web chat) is enriched back from the
    * snapshot row with the same meeting_id, so a booking the aggregate already knows about keeps its
    * "AI-booked, via SMS" label and only a booking too new for the aggregate reads as plain "AI-booked". */
+  /* ALL OR NOTHING (close basis). Read the funnel flags of every Service booking up front — current
+   * window, and the prior one when the live fetch ran. If either read fails, drop the basis for the whole
+   * request: callbacks stay where they were and the funnel is untouched, i.e. exactly the response
+   * without the param. Moving callbacks without the union would put more bookings over the same
+   * qualified count (Paragon lifetime, Service Outbound: 179% instead of 162%). */
+  let flagsCur: LeadFlags | null = null;
+  let flagsPri: LeadFlags | null = null;
+  if (customerBasis) {
+    const ids = new Set<string>();
+    for (const m of live?.meetings ?? []) if (m.leadId && (m.agentType || m.serviceType || "").toLowerCase() === "service") ids.add(m.leadId);
+    for (const a of windowedAppointments) if (!a.assisted && a.lead_id && (a.service_type || "").toLowerCase() === "service") ids.add(a.lead_id);
+    [flagsCur, flagsPri] = await Promise.all([
+      readLeadFlags(sb, teamId, start, end, ids),
+      live ? readLeadFlags(sb, teamId, prior.start, prior.end, ids) : Promise.resolve(null),
+    ]);
+    if (!flagsCur || (live && !flagsPri)) customerBasis = false;
+  }
   let liveAppts = live?.meetings ?? null;
   const appointmentsLive = !!liveAppts;
   if (liveAppts) {
@@ -452,7 +598,20 @@ export async function GET(request: Request): Promise<Response> {
      * and direction the aggregate already resolved for that meeting. Without this the row still lists —
      * it is a real appointment — but belongs to no agent, so the tiles sum to one less than the list
      * beneath them. Anything still unresolved stays listed and uncounted rather than being guessed at. */
+    /* CALLBACK → OUTBOUND (Reports basis only). agentData.callType is the CALL's direction, so a
+     * customer who calls the outbound line back reads "inbound" here — while the spine
+     * (callbackAttribution.ts) and the snapshot (detailQueries conv_dir) both credit that conversation to
+     * OUTBOUND. Taking agentData's word put the booking on the Inbound card and its conversation on the
+     * Outbound card: Paragon Honda, MTD Sep, Service Inbound read 11 bookings over 5 qualified (220%) and 9
+     * of the 11 were callbacks. The snapshot row for the same meeting carries the flip, so an inbound vs
+     * outbound disagreement resolves to outbound. Keyed over the whole ~120d snapshot so the prior window
+     * flips too; a booking newer than the last sync keeps agentData's direction until the next one. */
+    // SERVICE bookings only: the close basis is a Service rule, and Sales stays exactly as it was.
+    const snapshotOutbound = customerBasis
+      ? new Set(appointments.filter((a) => !a.assisted && a.meeting_id && (a.service_type ?? "").toLowerCase() === "service" && (a.direction ?? "").toLowerCase() === "outbound").map((a) => a.meeting_id as string))
+      : null;
     liveAppts = liveAppts.map((m) => {
+      if (snapshotOutbound && m.direction === "inbound" && m.id && snapshotOutbound.has(m.id) && (m.agentType || m.serviceType || "").toLowerCase() === "service") m = { ...m, direction: "outbound" };
       if (m.agentType && m.direction) return m;
       const prev = snapFor(m);
       if (!prev) return m;
@@ -558,6 +717,7 @@ export async function GET(request: Request): Promise<Response> {
    * The prior window uses live rows when we have them and otherwise leaves the aggregate's basis alone —
    * the snapshot only covers the current window, so recomputing it from these rows would read zero. */
   const curByAgent: Record<string, number> = {};
+  const curBooked: Booked = { leads: {}, noLead: {} }; // same rows, as customers (applyCustomerBasis)
   /* ★ SPLIT BY DEPARTMENT, NOT ONE ROOFTOP-WIDE NUMBER (fixed 2026-09-11). A booking no agent owns is
    * still added to the total the tile shows — but that tile is department-scoped whenever the header's
    * switcher is on Sales or Service, and this used to hand every scope the SAME rooftop-wide scalar.
@@ -604,6 +764,8 @@ export async function GET(request: Request): Promise<Response> {
     }
     const type = `${svc === "sales" ? "Sales" : "Service"} ${dir === "inbound" ? "Inbound" : "Outbound"}`;
     curByAgent[type] = (curByAgent[type] ?? 0) + 1;
+    if (a.lead_id) (curBooked.leads[type] ??= new Set()).add(a.lead_id);
+    else curBooked.noLead[type] = (curBooked.noLead[type] ?? 0) + 1;
   }
   const appointmentsUnattributed = unattributedBy.sales + unattributedBy.service + unattributedBy.unknown;
   const priByAgent = liveAppts ? countByAgent(liveAppts, prior.start, prior.end).byAgent : null;
@@ -618,6 +780,12 @@ export async function GET(request: Request): Promise<Response> {
     agent.metrics.appointmentsAssisted = assistedByAgent[type] ?? 0;
     const basis = result.prior?.[agent.id];
     if (priByAgent && basis && typeof basis.appointments === "number") basis.appointments = priByAgent[type] ?? 0;
+  }
+  if (customerBasis && flagsCur) {
+    applyCustomerBasis(result.agents, result.prior,
+      stageGaps(flagsCur, serviceOnly(curBooked).leads),
+      // The prior window has booking rows only when the live fetch ran (same rule as its appointments).
+      liveAppts && flagsPri ? stageGaps(flagsPri, serviceOnly(bookedLeadsByAgent(liveAppts, prior.start, prior.end)).leads) : null);
   }
 
   return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved, ...(!canonicalResolved && !result.hasData ? { degraded: true } : {}) }, {
