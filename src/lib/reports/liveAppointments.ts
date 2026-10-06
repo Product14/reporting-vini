@@ -20,9 +20,14 @@
  * DEFINITIONS ARE ALREADY IDENTICAL, so this changes freshness and nothing else. Verified id-for-id on
  * Honda Universe (team 5895de05b): the API's source='spyne' set is exactly our rule — meetings.source
  * 'spyne' minus meta.source 'warm_transfer' and 'callback' — 326 = 326, with no row on either side the
- * other lacks. The API applies those exclusions server-side and does not expose meta.source. */
+ * other lacks. The API applies those exclusions server-side and does not expose meta.source.
+ *
+ * CANCELLED BOOKINGS ARE DROPPED HERE (2026-10-06), client-side, because the API returns them under
+ * source=spyne like any other — the same exclusion the spine and the snapshot apply (appointmentStatus.ts).
+ * Without it the tile kept a cancelled booking that its own drill-down listed in red. */
 import { spyneGet } from "@/lib/spyne/client";
 import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
+import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
 import type { Meeting } from "@/components/reports/data";
 
 /** agent_type label the report uses, e.g. "Service Outbound". Null when the API omitted agentData. */
@@ -137,7 +142,7 @@ export async function fetchLiveAppointments(opts: {
       const batch = Array.isArray(res.data) ? res.data : [];
       for (const r of batch) {
         const day = (r.createdAt ?? "").slice(0, 10);
-        if (day && day >= start && day < end) out.push(toMeeting(r));
+        if (day && day >= start && day < end && !isCancelledMeeting(r.status)) out.push(toMeeting(r));
       }
       // Sorted newest-booking-first, so once a page ends before the window we have everything.
       const oldest = batch.length ? (batch[batch.length - 1].createdAt ?? "").slice(0, 10) : "";

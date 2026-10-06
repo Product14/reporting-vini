@@ -3,6 +3,7 @@ import { buildResult, AGENT_TYPE_BY_ID } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 
 import { fetchLiveAppointments, countByAgent } from "@/lib/reports/liveAppointments";
+import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
@@ -403,6 +404,10 @@ export async function GET(request: Request): Promise<Response> {
   // Falls back to the raw prefix when the rooftop's tz is unknown (storeLocalDay's own contract), which
   // is exactly the previous behavior.
   let windowedAppointments = appointments.filter((a) => {
+    // A cancelled booking is not a booking, in either half (appointmentStatus.ts). The snapshot SQL drops
+    // them already; this covers rows synced before that change. The live AI-booked rows are filtered at
+    // fetch (liveAppointments.ts).
+    if (isCancelledMeeting(a.status)) return false;
     const raw = (a.booked_at ?? "").slice(0, 10);
     if (!raw) return false;
     const day = storeLocalDay(a.booked_at ?? "", timezone ?? undefined, raw);
