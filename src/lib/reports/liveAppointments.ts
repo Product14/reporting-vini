@@ -61,6 +61,23 @@ export function countByAgent(meetings: Meeting[], start: string, end: string): {
   return { byAgent, unattributed };
 }
 
+/* Distinct booked customers per agent_type over one sub-window, by the same day test and agent rule as
+ * countByAgent. A meeting with no lead id cannot be matched to another, so it is tallied separately as
+ * one customer each. Used for the Reports close-rate basis (route.ts applyCustomerBasis). */
+export function bookedLeadsByAgent(meetings: Meeting[], start: string, end: string): { leads: Record<string, Set<string>>; noLead: Record<string, number> } {
+  const leads: Record<string, Set<string>> = {};
+  const noLead: Record<string, number> = {};
+  for (const m of meetings) {
+    const day = (m.bookedAt ?? "").slice(0, 10);
+    if (!day || day < start || day >= end) continue;
+    const at = agentTypeOf(m);
+    if (!at) continue;
+    if (m.leadId) (leads[at] ??= new Set()).add(m.leadId);
+    else noLead[at] = (noLead[at] ?? 0) + 1;
+  }
+  return { leads, noLead };
+}
+
 /* Bookings made in [start, end) — NOT appointments scheduled in it. Those are different sets and the
  * report means the first: an appointment booked today for next month belongs to today.
  *
