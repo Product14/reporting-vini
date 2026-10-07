@@ -16,10 +16,10 @@
  * itself is unreachable (never reported as 401, so a caller doesn't log the user out over an outage).
  *
  * DATA. Per team, the leadFunnel of each agent and nothing else — counts only, none of the customer rows
- * (names, phones, appointments) the full report carries. The numbers are produced by the existing
- * GET /api/reports handler, so they are identical to what that rooftop's own report shows; it is invoked
- * in-process with the service credential (CRON_SECRET) purely to step past its team-scope gate, with the
- * caller's own Spyne token forwarded as auth_key for the downstream enrichment (see spyneTokenFrom).
+ * (names, phones, appointments) the full report carries. Computed by lib/reports/leadFunnel.ts: the same
+ * buildResult the report uses, fed only the inputs that decide leadFunnel (the Supabase aggregate, the
+ * window-distinct lead counts and the sales canonical overview) — not the whole report page, which is
+ * 40-60s cold per rooftop. The caller's own Spyne token is used for the canonical call.
  *
  * SHAPE.
  *   { bucket, start?, end?, teams: { "<team_id>": { ok: true, degraded: boolean,
@@ -30,14 +30,14 @@
  * qualified" (= leadFunnel.qualified), each summed over the rooftop's agents exactly as the console's Vini home
  * sums them (useCoreIntegrationStats), so the two screens agree. `agents` is unchanged.
  * One failing team never fails the call; it comes back as { ok: false } under its own key. */
-import { GET as teamReport } from "@/app/api/reports/route";
+import { leadFunnelFor } from "@/lib/reports/leadFunnel";
 import { readBearer } from "@/lib/reports/auth";
 import { apiBaseForEnv } from "@/lib/spyne/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Each team runs the full report path (the sales canonical calls alone are ~14s on a cold rooftop), and
-// the canonical fetchers share a serial gate per instance — keep the batch small enough to finish inside this.
+// Per team: 3 Supabase reads + ONE sales canonical call. The canonical fetchers share a gate of two per
+// instance, so cold teams beyond the first two queue behind each other — keep the batch inside this.
 export const maxDuration = 60;
 
 const MAX_TEAMS = 25;
@@ -91,26 +91,21 @@ function totalsOf(agents: FunnelAgent[]): FunnelTotals {
   return { connected, qualified };
 }
 
-async function funnelFor(teamId: string, token: string, secret: string, params: URLSearchParams): Promise<TeamResult> {
-  const url = new URL("http://internal/api/reports");
-  url.searchParams.set("team_id", teamId);
-  for (const k of ["bucket", "start", "end", "env"]) {
-    const v = params.get(k);
-    if (v) url.searchParams.set(k, v);
-  }
-  // The caller's token rides as auth_key; the Authorization header carries the service secret that clears the gate.
-  url.searchParams.set("auth_key", token);
+async function funnelFor(teamId: string, token: string, params: URLSearchParams): Promise<TeamResult> {
+  const env = params.get("env");
   try {
-    const res = await teamReport(new Request(url, { headers: { authorization: `Bearer ${secret}` } }));
-    if (!res.ok) return { ok: false, status: res.status, error: `report returned HTTP ${res.status}` };
-    const body = (await res.json()) as { agents?: Array<{ id?: string; leadFunnel?: unknown }>; degraded?: boolean };
-    const agents = (body.agents ?? [])
-      .filter((a) => a.id && a.leadFunnel)
-      .map((a) => ({ id: a.id as string, leadFunnel: a.leadFunnel }));
-    return { ok: true, degraded: !!body.degraded, totals: totalsOf(agents), agents };
+    const { degraded, agents } = await leadFunnelFor({
+      teamId,
+      token,
+      env: env === "uat" || env === "stag" || env === "prod" ? env : null,
+      bucket: params.get("bucket"),
+      start: params.get("start"),
+      end: params.get("end"),
+    });
+    return { ok: true, degraded, totals: totalsOf(agents), agents };
   } catch (e) {
     console.error(`[/api/reports/reseller-lead-funnel] team ${teamId} failed: ${e instanceof Error ? e.message : String(e)}`);
-    return { ok: false, status: 500, error: "failed to build report" };
+    return { ok: false, status: 500, error: "failed to build funnel" };
   }
 }
 
@@ -136,9 +131,6 @@ export async function GET(request: Request): Promise<Response> {
   const token = readBearer(request);
   if (!token) return Response.json({ error: "authentication required" }, { status: 401 });
 
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return Response.json({ error: "reseller-lead-funnel is not configured" }, { status: 503 });
-
   const envParam = searchParams.get("env");
   const auth = await isAuth(token, envParam === "uat" || envParam === "stag" || envParam === "prod" ? envParam : null);
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
@@ -149,7 +141,7 @@ export async function GET(request: Request): Promise<Response> {
     Array.from({ length: Math.min(CONCURRENCY, teamIds.length) }, async () => {
       while (next < teamIds.length) {
         const teamId = teamIds[next++];
-        teams[teamId] = await funnelFor(teamId, token, secret, searchParams);
+        teams[teamId] = await funnelFor(teamId, token, searchParams);
       }
     }),
   );
