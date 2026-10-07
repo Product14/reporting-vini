@@ -1,6 +1,6 @@
-/* Lead funnel for MANY rooftops in one call — authenticated, NOT team-scoped.
+/* Reseller lead funnel for MANY rooftops in one call — authenticated, NOT team-scoped.
  *
- *   GET /api/reports/lead-funnel?team_ids=t1,t2,t3&bucket=lifetime&env=prod
+ *   GET /api/reports/reseller-lead-funnel?team_ids=t1,t2,t3&bucket=lifetime&env=prod
  *   (also accepts start=YYYY-MM-DD&end=YYYY-MM-DD instead of bucket, and `team_id` as an alias of `team_ids`)
  *
  * WHY THIS EXISTS. GET /api/reports authorizes with requireTeamAuth: the team_id in the query must equal
@@ -109,7 +109,7 @@ async function funnelFor(teamId: string, token: string, secret: string, params: 
       .map((a) => ({ id: a.id as string, leadFunnel: a.leadFunnel }));
     return { ok: true, degraded: !!body.degraded, totals: totalsOf(agents), agents };
   } catch (e) {
-    console.error(`[/api/reports/lead-funnel] team ${teamId} failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[/api/reports/reseller-lead-funnel] team ${teamId} failed: ${e instanceof Error ? e.message : String(e)}`);
     return { ok: false, status: 500, error: "failed to build report" };
   }
 }
@@ -137,7 +137,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!token) return Response.json({ error: "authentication required" }, { status: 401 });
 
   const secret = process.env.CRON_SECRET;
-  if (!secret) return Response.json({ error: "lead-funnel is not configured" }, { status: 503 });
+  if (!secret) return Response.json({ error: "reseller-lead-funnel is not configured" }, { status: 503 });
 
   const envParam = searchParams.get("env");
   const auth = await isAuth(token, envParam === "uat" || envParam === "stag" || envParam === "prod" ? envParam : null);
