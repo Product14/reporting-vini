@@ -15,7 +15,7 @@ import {
 import { NamedApptsTable, fmtWhenShort } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
 import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/reports/dateRange";
-import { fetchAgents, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
+import { fetchAgents, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, rooftopRungsFor, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
 import type { NamedAppt } from "@/components/reports/data";
 import { track } from "@/lib/analytics";
 import { useServiceAppointmentsPageOverlay } from "@/lib/serviceMetrics";
@@ -58,7 +58,8 @@ function AppointmentsView() {
     const all = agentsForAccount(feed?.agents ?? [], account);
     return dept === "all" ? all : all.filter((a) => a.dept.toLowerCase() === dept);
   }, [feed, account, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept)), [agents, feed, dept]);
+  // Same list, same dept, same line — see liveData.ts's rooftopRungsFor.
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept), rooftopRungsFor(feed, dept, agents)), [agents, feed, dept]);
   const appts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
   const filtered = useMemo<NamedAppt[]>(
     () => appts.filter((a) => (filter === "all" ? true : filter === "assisted" ? a.assisted : !a.assisted)),
@@ -93,10 +94,13 @@ function AppointmentsView() {
     () => appts.map((a) => ({
       id: "", leadId: null,
       customer: a.customer, phone: a.phone || null, vehicle: a.vehicle,
-      when: a.when ?? "", tz: null, status: a.status,
+      /* The ROOFTOP's zone, not null. With null, formatMeetingWhen fell through to Intl with no
+         timeZone — i.e. the VIEWER's browser zone — so this drill-down showed a different time to every
+         person who opened it, and a different time from the table directly behind it. */
+      when: a.when ?? "", tz: feed?.timezone ?? null, status: a.status,
       serviceType: a.serviceType, assignedTo: null, intent: null, bookedAt: a.bookedAt,
     })),
-    [appts],
+    [appts, feed?.timezone],
   );
 
   return (
@@ -177,7 +181,7 @@ function AppointmentsView() {
                           <span className="font-semibold text-[#111]">{a.customer}</span>
                           {a.vehicle && <span className="ml-2 text-[11px] text-[#6b7280]">{a.vehicle}</span>}
                         </div>
-                        <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when) : ""}</span>
+                        <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when, feed?.timezone) : ""}</span>
                       </div>
                     ))}
                   </div>
@@ -185,7 +189,7 @@ function AppointmentsView() {
                   <EmptyState icon="📅" title="No appointments in this view" body={`${account.name || "This rooftop"} has no appointments for ${periodLabel}. Try widening the date range.`} />
                 )
               ) : filtered.length > 0 ? (
-                <NamedApptsTable items={filtered} teamId={teamId} />
+                <NamedApptsTable items={filtered} teamId={teamId} tz={feed?.timezone} />
               ) : (
                 <EmptyState icon="📅" title="No appointments in this view" body={`${account.name || "This rooftop"} has no ${filter === "assisted" ? "AI-assisted" : filter === "booked" ? "AI-booked" : ""} appointments for ${periodLabel}. Try widening the date range or the filter.`} />
               )}

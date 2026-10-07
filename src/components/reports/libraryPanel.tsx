@@ -30,6 +30,7 @@ import {
   aggregateFleet,
   unattributedApptsFor,
   assistedApptsFor,
+  rooftopRungsFor,
   addDay,
   peekAgents,
   tzShortLabel,
@@ -167,7 +168,10 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
   const agents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const scoped = useMemo(() => (dept === "all" ? agents : agents.filter((a) => a.dept.toLowerCase() === dept)), [agents, dept]);
   const { variant } = useVariant(); // staged-rollout switch — rides in ReportCtx (see library.tsx)
-  const fleet = useMemo(() => aggregateFleet(scoped, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept)), [scoped, feed, dept]);
+  // `scoped` goes into BOTH positions: rooftopRungsFor compares the agents actually aggregated against
+  // the agents the canonical API counted, so if this panel ever gains an agent or direction filter the
+  // gate closes by itself and the numbers fall back to summing. See liveData.ts.
+  const fleet = useMemo(() => aggregateFleet(scoped, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept), rooftopRungsFor(feed, dept, scoped)), [scoped, feed, dept]);
   const periodLabel = custom ? `${custom.start} → ${custom.end}` : BUCKET_TEXT[bucket] ?? "Last 30 days";
 
   const ctx: ReportCtx = useMemo(

@@ -6,6 +6,7 @@
  * #813fed accent, green for booked, tiny uppercase labels, tabular numerals. NO chart library. */
 
 import React from "react";
+import { fmtWhenShortIn } from "@/lib/reports/storeTime";
 import { fmtInt, type IntentOutcomeRow, type NamedAppt, type OutcomeSlice, type WarmLeadItem } from "./data";
 import type { ActionItem, ActionItemStats, ActionItemCloser, Conversation } from "./liveData";
 import { FunnelBars, Portal, Td, Th } from "./kit";
@@ -50,18 +51,19 @@ export function fmtSecs(sec: number | null | undefined): string {
   return rm ? `${h}h ${rm}m` : `${h}h`;
 }
 
-/* ISO timestamp → "Jul 7 · 2:30 PM" (UTC fields — timestamps arrive store-local-ish from the source;
- * consistent with the rest of the report's labels). */
-export function fmtWhenShort(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
-  if (!Number.isFinite(d.getTime())) return "—";
-  const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
-  let h = d.getUTCHours();
-  const m = d.getUTCMinutes().toString().padStart(2, "0");
-  const ap = h >= 12 ? "PM" : "AM";
-  h = h % 12 || 12;
-  return `${mon} ${d.getUTCDate()} · ${h}:${m} ${ap}`;
+/* ISO timestamp → "Jul 7 · 2:30 PM" IN THE STORE'S TIMEZONE when one is given, else UTC.
+ *
+ * The old comment here claimed "timestamps arrive store-local-ish from the source", and that claim is
+ * what propagated the bug: meeting_start is a true UTC instant (detailQueries.ts selects
+ * m.meeting_start_time with no toTimeZone wrapper), so reading it with the UTC getters printed an 8:30 PM
+ * Pacific appointment as 03:30 AM the NEXT day. `tz` is OPTIONAL: every call site that has no feed in
+ * scope (customers, calls, outcomes, the presentational tables below) omits it and keeps today's exact
+ * UTC output — see lib/reports/storeTime.ts for why the fallback is UTC and not the browser's zone.
+ *
+ * The output shape is load-bearing: liveReplica.tsx:942 does .split("· ")[1] and :1169/:1253 do
+ * .split(" · ")[0], so the separator, spacing and un-padded hour must not drift. */
+export function fmtWhenShort(iso: string | null | undefined, tz?: string | null): string {
+  return fmtWhenShortIn(iso, tz);
 }
 
 const ACCENTS = {
@@ -81,6 +83,7 @@ export function ValueTile({
   inbound,
   outbound,
   unassigned,
+  overlap,
   delta,
   subtext,
   accent = "purple",
@@ -94,6 +97,12 @@ export function ValueTile({
      SPLIT OF THE HEADLINE, and a reader adds them up — so anything the headline counts that belongs to
      neither direction has to appear here or the tile contradicts itself. See OverviewView. */
   unassigned?: string;
+  /* The other way a SPLIT OF THE HEADLINE fails to add up: when the headline is a DISTINCT lead count
+     and the Inbound/Outbound rows are not, a lead both agents worked is counted once above and twice
+     below, so the rows sum to MORE than the total. Same rule as `unassigned` — name it or the tile
+     reads as an arithmetic error. 253 qualified over Inbound+Outbound = 270 on the reference rooftop.
+     See workedByBoth() in liveData. */
+  overlap?: string;
   delta?: number | null; // null = no prior basis ("New"); undefined = don't show a delta at all
   subtext?: React.ReactNode;
   accent?: TileAccent;
@@ -112,7 +121,7 @@ export function ValueTile({
             : <span className="text-[9.5px] font-semibold" style={{ color: delta > 0 ? "#16a34a" : "#dc2626" }}>{delta > 0 ? "▲" : "▼"} {Math.abs(delta)}%</span>
         )}
       </div>
-      {(inbound !== undefined || outbound !== undefined || unassigned !== undefined) && (
+      {(inbound !== undefined || outbound !== undefined || unassigned !== undefined || overlap !== undefined) && (
         <div className="mt-1.5 flex flex-col gap-0.5">
           {inbound !== undefined && (
             <div className="flex items-baseline justify-between text-[10.5px] font-semibold text-[#6b7280]">
@@ -122,6 +131,11 @@ export function ValueTile({
           {outbound !== undefined && (
             <div className="flex items-baseline justify-between text-[10.5px] font-semibold text-[#6b7280]">
               <span>Outbound</span><span className="tabular-nums font-bold text-[#111]">{outbound}</span>
+            </div>
+          )}
+          {overlap !== undefined && (
+            <div className="flex items-baseline justify-between text-[10.5px] font-semibold text-[#6b7280]">
+              <span>Worked by both</span><span className="tabular-nums font-bold text-[#111]">{overlap}</span>
             </div>
           )}
           {unassigned !== undefined && (
@@ -357,7 +371,10 @@ const STATUS_STYLE: Record<string, { label: string; color: string }> = {
   no_show: { label: "No-show", color: "#d97706" },
   cancelled: { label: "Cancelled", color: "#9ca3af" },
 };
-export function NamedApptsTable({ items, teamId }: { items: NamedAppt[]; teamId?: string }) {
+/* `tz` is the rooftop's IANA zone (feed.timezone). Optional, and absent → UTC, exactly as this table
+ * rendered before: the "When" column is an appointment START, so on a Pacific rooftop an 8:30 PM booking
+ * was printing as 3:30 AM the next day without it. Every caller that has a feed passes it. */
+export function NamedApptsTable({ items, teamId, tz }: { items: NamedAppt[]; teamId?: string; tz?: string | null }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
@@ -387,7 +404,7 @@ export function NamedApptsTable({ items, teamId }: { items: NamedAppt[]; teamId?
                 <Td>
                   <span className="font-medium" style={{ color: a.assisted ? "#6d28d9" : "#059669" }}>{a.how}</span>
                 </Td>
-                <Td>{fmtWhenShort(a.when)}</Td>
+                <Td>{fmtWhenShort(a.when, tz)}</Td>
                 <Td><span className="font-semibold" style={{ color: st.color }}>{st.label}</span></Td>
               </tr>
             );

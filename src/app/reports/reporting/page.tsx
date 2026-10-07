@@ -30,6 +30,8 @@ import {
   aggregateFleet,
   unattributedApptsFor,
   assistedApptsFor,
+  rooftopRungsFor,
+  workedByBoth,
   addDay,
   peekAgents,
   tzShortLabel,
@@ -40,6 +42,23 @@ import {
 import { track } from "@/lib/analytics";
 import { buildPdfReport } from "@/components/reports/printToPdf";
 import { CANONICAL_DEFINITIONS, exportFilenameStem, type PdfSection } from "@/components/reports/exportReport";
+
+/* A headline with its Inbound/Outbound bracket, naming the leads the two disagree about. The headline
+   is a DISTINCT lead count when the canonical rooftop rungs are in scope; the split beside it is still
+   agent-summed (no canonical per-direction rooftop figure exists), so a lead both agents worked is
+   counted once in the headline and twice in the bracket. Derived from the rendered values only. */
+const splitRow = (total: number, inbound: number, outbound: number): string => {
+  const parts = [`Inbound ${fmtInt(inbound)}`, `Outbound ${fmtInt(outbound)}`];
+  const both = workedByBoth(total, inbound, outbound);
+  if (both > 0) parts.push(`worked by both ${fmtInt(both)}`);
+  return `${fmtInt(total)} (${parts.join(" · ")})`;
+};
+
+/* The same caveat as a tile row — see ValueTile's `overlap`. undefined when the numbers already add up. */
+const overlapRow = (total: number, inbound: number, outbound: number): string | undefined => {
+  const n = workedByBoth(total, inbound, outbound);
+  return n > 0 ? fmtInt(n) : undefined;
+};
 
 export default function ReportingPage() {
   return (
@@ -82,7 +101,9 @@ function ReportingView() {
   // Scope to the rooftop's agents, then to the selected department (the shared header switcher).
   const allAgents = useMemo(() => agentsForAccount(feed?.agents ?? [], account), [feed, account]);
   const agents = useMemo(() => (dept === "all" ? allAgents : allAgents.filter((a) => a.dept.toLowerCase() === dept)), [allAgents, dept]);
-  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept)), [agents, feed, dept]);
+  // rooftopRungsFor gets the SAME list and dept as aggregateFleet — it is what decides whether the
+  // rooftop's distinct counts may stand in for the agent sum at all. See liveData.ts.
+  const fleet = useMemo(() => aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept), rooftopRungsFor(feed, dept, agents)), [agents, feed, dept]);
   const split = fleet.bySplit;
   const namedAppts = useMemo(() => (feed?.namedAppointments ?? []).filter((a) => dept === "all" || a.serviceType === dept), [feed, dept]);
 
@@ -105,8 +126,12 @@ function ReportingView() {
                 return `${fmtInt(fleet.appointments)} (${parts.join(" · ")})`;
               })()],
               ...(fleet.appointmentsAssisted > 0 ? [["  AI-assisted (CRM)", fmtInt(fleet.appointmentsAssisted)]] : []),
-              ["Real conversations", `${fmtInt(fleet.conversations)} (Inbound ${fmtInt(split.inbound.conversations)} · Outbound ${fmtInt(split.outbound.conversations)})`],
-              ["Qualified leads", `${fmtInt(fleet.qualified)} (Inbound ${fmtInt(split.inbound.qualified)} · Outbound ${fmtInt(split.outbound.qualified)})`],
+              /* Same rule as the appointments row above, for the other way a bracket fails to add up:
+                 the headline is a DISTINCT lead count and the split is still agent-summed, so a lead
+                 both agents worked is once in the total and twice in the bracket. Named rather than
+                 left to read as an arithmetic error (253 over Inbound+Outbound = 270, team 3d3deabc98). */
+              ["Real conversations", splitRow(fleet.conversations, split.inbound.conversations, split.outbound.conversations)],
+              ["Qualified leads", splitRow(fleet.qualified, split.inbound.qualified, split.outbound.qualified)],
               ["Hand-offs to team", `${fmtInt(fleet.handoffs)} (${fmtInt(fleet.transfers)} transfers · ${fmtInt(fleet.callbacks)} callbacks)`],
               ["Query resolution rate", fmtRate(fleet.queryResolved, fleet.queryConversations)],
               ...(fleet.responseTimeSec != null ? [["Response time (avg first response)", fmtSecs(fleet.responseTimeSec)]] : []),
@@ -153,7 +178,7 @@ function ReportingView() {
           {
             kind: "rows",
             columns: ["Customer", "Vehicle", "When", "How booked", "Status"],
-            rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when) : "—", ap.how, ap.status || "—"]),
+            rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when, feed?.timezone) : "—", ap.how, ap.status || "—"]),
           },
           ...(namedAppts.length > preview.length
             ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${namedAppts.length} appointments — download the CSV or XLSX for the complete list.` }]
@@ -212,8 +237,8 @@ function ReportingView() {
             <SectionLabel hint={periodLabel}>The value delivered</SectionLabel>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <ValueTile label="Appointments — AI-booked" total={fmtInt(fleet.appointments)} inbound={fmtInt(split.inbound.appointments)} outbound={fmtInt(split.outbound.appointments)} accent="green" subtext={fleet.appointmentsAssisted > 0 ? <>+{fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>} />
-              <ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} accent="purple" subtext={<>spoke or replied — voicemail excluded</>} />
-              <ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} accent="violet" subtext={<>concrete buying intent</>} />
+              <ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} overlap={overlapRow(fleet.conversations, split.inbound.conversations, split.outbound.conversations)} accent="purple" subtext={<>spoke or replied — voicemail excluded</>} />
+              <ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} overlap={overlapRow(fleet.qualified, split.inbound.qualified, split.outbound.qualified)} accent="violet" subtext={<>concrete buying intent</>} />
               <ValueTile label="Hand-offs to team" total={fmtInt(fleet.handoffs)} inbound={fmtInt(split.inbound.handoffs)} outbound={fmtInt(split.outbound.handoffs)} accent="blue" subtext={<>{fmtInt(fleet.transfers)} transfers · {fmtInt(fleet.callbacks)} callbacks</>} />
             </div>
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
@@ -248,7 +273,7 @@ function ReportingView() {
             <div className="flex flex-col gap-3.5">
               <SectionLabel hint={`${fmtInt(namedAppts.length)} on the books`}>Appointments — named</SectionLabel>
               <Card title="On the books" sub="AI-booked = the AI created the meeting · AI-assisted = you booked it, on a lead the AI had already spoken to" pad={false}>
-                <NamedApptsTable items={namedAppts.slice(0, 20)} teamId={teamId} />
+                <NamedApptsTable items={namedAppts.slice(0, 20)} teamId={teamId} tz={feed?.timezone} />
               </Card>
             </div>
           )}

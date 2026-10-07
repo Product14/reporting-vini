@@ -345,10 +345,13 @@ function AgentReportsView() {
       .map((a) => ({
         id: "", leadId: null,
         customer: a.customer, phone: a.phone || null, vehicle: a.vehicle,
-        when: a.when ?? "", tz: null, status: a.status,
+          /* The ROOFTOP's zone, not null. With null, formatMeetingWhen fell through to Intl with no
+           timeZone — i.e. the VIEWER's browser zone — so this drill-down showed a different time to
+           every person who opened it, and a different time from the table directly behind it. */
+        when: a.when ?? "", tz: feed?.timezone ?? null, status: a.status,
         serviceType: a.serviceType, assignedTo: null, intent: null, bookedAt: a.bookedAt,
       }));
-  }, [apptModal, feed?.namedAppointments, svcAgents.inboundList, svcAgents.outboundList]);
+  }, [apptModal, feed?.namedAppointments, feed?.timezone, svcAgents.inboundList, svcAgents.outboundList]);
 
   // Window for the appointment drill-down — the same range the report shows (the server-resolved
   // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
@@ -736,7 +739,7 @@ function AgentReportsView() {
       sections.push({
         heading: "Appointments",
         blocks: [
-          { kind: "rows", columns: ["Customer", "Vehicle", "When", "How booked", "Status"], rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when) : "—", ap.how, ap.status || "—"]) },
+          { kind: "rows", columns: ["Customer", "Vehicle", "When", "How booked", "Status"], rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when, feed?.timezone) : "—", ap.how, ap.status || "—"]) },
           ...(r.namedAppointments.length > preview.length
             ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${r.namedAppointments.length} appointment records — download the CSV or XLSX for the complete list.` }]
             : []),
@@ -877,7 +880,7 @@ function AgentReportsView() {
                           <span className="font-semibold text-[#111]">{it.customer}</span>
                           {it.vehicle && <span className="ml-2 text-[11px] text-[#6b7280]">{it.vehicle}</span>}
                         </div>
-                        <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{it.when ? fmtWhenShort(it.when) : ""}</span>
+                        <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{it.when ? fmtWhenShort(it.when, feed?.timezone) : ""}</span>
                       </div>
                     ))}
                   </div>
@@ -905,7 +908,7 @@ function AgentReportsView() {
                           <tr key={`${it.customer}-${i}`} className="border-t border-[#f0f0f0]">
                             <Td><span className="font-semibold text-[#111]">{it.customer}</span></Td>
                             <Td><span className="text-[#374151]">{it.what}</span></Td>
-                            <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due) : ""}</span></Td>
+                            <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due, feed?.timezone) : ""}</span></Td>
                             <Td>{it.isLate ? <span className="font-semibold text-[#dc2626]">Overdue</span> : <span className="font-semibold text-[#2563eb]">Open</span>}</Td>
                           </tr>
                         ))}
@@ -1029,6 +1032,8 @@ function AgentReportsView() {
           >
             {visibleAgents.map((ag) => {
               const selected = ag.id === activeId;
+              // The same stage the selected agent's funnel opens with — see the comment on the count below.
+              const chipStage = leadEntryStage(ag.dir, ag.leadFunnel, ag.report.leadsAttempted);
               return (
                 <button
                   key={ag.id}
@@ -1045,7 +1050,15 @@ function AgentReportsView() {
                   <span className="flex flex-col">
                     <span className={`text-[13px] font-bold leading-tight ${selected ? "text-[#111]" : "text-[#374151]"}`}>{ag.name}</span>
                     <span className="mt-0.5 text-[11px] leading-none text-[#6b7280]">
-                      <b className="tabular-nums text-[#111]">{view.agentLive ? fmtInt(ag.report.leadsAttempted * factor) : "—"}</b> leads attempted
+                      {/* MUST MATCH THE FUNNEL THIS CHIP SELECTS. It used to hardcode `leadsAttempted`
+                          ("leads attempted") for both directions, while the funnel head below uses
+                          leadEntryStage — which is `contacted` for Inbound but `dialed` for Outbound.
+                          So the two agreed on inbound and contradicted each other on outbound: 823 on
+                          the chip over a funnel starting at 622, because 201 of those leads were only
+                          ever texted, never dialed. Both numbers were right; showing them under the same
+                          word was not. Reading the stage here keeps the chip and the funnel the same
+                          number AND the same noun. */}
+                      <b className="tabular-nums text-[#111]">{view.agentLive ? fmtInt(chipStage.value * factor) : "—"}</b> {chipStage.label.toLowerCase()}
                     </span>
                   </span>
                 </button>

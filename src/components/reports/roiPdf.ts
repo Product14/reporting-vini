@@ -16,6 +16,7 @@ import type { UserOptions } from "jspdf-autotable";
 import type { FleetLive, NamedAppt } from "./liveData";
 import type { QualifiedLead } from "@/app/api/reports/qualified-leads/route";
 import { exportFilenameStem } from "./exportReport";
+import { hour12, monShort, storeParts } from "@/lib/reports/storeTime";
 
 const W = 612, H = 792, M = 44;            // Letter, in points
 const NAVY: RGB = [14, 29, 51];
@@ -32,21 +33,18 @@ type RGB = [number, number, number];
 const f = (n: number) => n.toLocaleString("en-US");
 const hrs = (mins: number) => (mins / 60).toFixed(1);
 const mmss = (sec: number) => `${Math.floor(sec / 60)}m ${String(Math.round(sec % 60)).padStart(2, "0")}s`;
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-function parse(iso: string | null | undefined): Date | null {
-  if (!iso) return null;
-  const d = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
-  return Number.isFinite(d.getTime()) ? d : null;
+/* Times in the ROOFTOP's zone, not UTC. This is the document a CSM emails a dealer, so a Pacific store's
+   8:30 PM appointment printing as "Oct 6 · 3:30 AM" is not a cosmetic defect — it is the wrong day and
+   the wrong time in a document the dealer keeps. `tz` is optional and absent → UTC, exactly as before
+   (see lib/reports/storeTime.ts for why the fallback is UTC and not the reader's own zone). */
+function whenLabel(iso: string | null | undefined, tz?: string | null): string {
+  const p = storeParts(iso, tz); if (!p) return "—";
+  const { h, ap } = hour12(p.h24);
+  return `${monShort(p.mon)} ${p.day} · ${h}:${String(p.min).padStart(2, "0")} ${ap}`;
 }
-function whenLabel(iso: string | null | undefined): string {
-  const d = parse(iso); if (!d) return "—";
-  const h = d.getUTCHours() % 12 || 12;
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} · ${h}:${String(d.getUTCMinutes()).padStart(2, "0")} ${d.getUTCHours() >= 12 ? "PM" : "AM"}`;
-}
-function dayLabel(iso: string | null | undefined): string {
-  const d = parse(iso); if (!d) return "—";
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+function dayLabel(iso: string | null | undefined, tz?: string | null): string {
+  const p = storeParts(iso, tz); if (!p) return "—";
+  return `${monShort(p.mon)} ${p.day}`;
 }
 const intentLabel = (s: string) => (s || "").replace(/[_-]+/g, " ").trim().toLowerCase() || "appointment";
 function personLabel(name: string): string {
@@ -62,8 +60,16 @@ export interface RoiPdfInput {
   fleet: FleetLive;
   namedAppts: NamedAppt[];
   qualified: QualifiedLead[];
-  qualifiedTotal: number;
+  /* "Qualified, NOT yet booked" — the canonical count, or null when neither source could serve it.
+     Three separate sentences below assert "not booked" in prose, so there is no number to fall back
+     to: every qualified lead is a different metric and would overstate by everyone who already
+     booked. null drops the stat and both sentences instead. See OverviewView's onExportPdf. */
+  qualifiedTotal: number | null;
+  /* Short display label ("PDT") for prose — NOT usable as an Intl timeZone. */
   tzLabel?: string;
+  /* The rooftop's IANA zone (feed.timezone) for whenLabel/dayLabel. Distinct from tzLabel and not
+     interchangeable with it: Intl needs the zone, the prose needs the abbreviation. null → UTC. */
+  tz?: string | null;
 }
 
 /* Rows per table. autoTable paginates properly here (unlike the single-page renderer), so this is about
@@ -80,7 +86,7 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
   const assisted = i.namedAppts.filter((a) => a.assisted);
   const nBooked = fleet.appointments;
   const nAssist = fleet.appointmentsAssisted;
-  const nQual = i.qualifiedTotal;
+  const nQual = i.qualifiedTotal; // null = not served; every use below has a null branch
   const totalAppts = nBooked + nAssist;
   const deptWord = i.dept === "service" ? "service" : "sales";
 
@@ -139,7 +145,9 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
   let hy = 138 + nameLines.length * 28;
 
   setText(CYAN);
-  const punch = `${f(totalAppts)} appointment${totalAppts === 1 ? "" : "s"}. ${f(nQual)} buyer${nQual === 1 ? "" : "s"} still in play.`;
+  const punch = nQual === null
+    ? `${f(totalAppts)} appointment${totalAppts === 1 ? "" : "s"}.`
+    : `${f(totalAppts)} appointment${totalAppts === 1 ? "" : "s"}. ${f(nQual)} buyer${nQual === 1 ? "" : "s"} still in play.`;
   const punchLines: string[] = doc.splitTextToSize(punch, W - M * 2);
   doc.text(punchLines, M, hy);
   hy += punchLines.length * 28 + 6;
@@ -147,8 +155,21 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
   doc.setFont("helvetica", "normal").setFontSize(9.5); setText([148, 163, 184]);
   const lede =
     `Over ${i.periodLabel.toLowerCase()}, Vini worked every ${deptWord} lead in your CRM — calling, texting and ` +
-    `following up on a multi-day cadence — and put ${f(totalAppts)} appointments on your board. Another ` +
-    `${f(nQual)} qualified buyers are in your pipeline right now, named and reachable at the back of this report.`;
+    `following up on a multi-day cadence — and put ${f(totalAppts)} appointments on your board.` +
+    /* THE PROMISE OF A LIST IS CONDITIONED ON THE LIST, NOT ON THE NUMBER. The count and the named rows
+       come from different places — the count can be served off the feed's canonical hot-leads figure
+       while the /api/reports/qualified-leads lookup that resolves names is degraded or empty (no
+       ClickHouse credential, a failed lookup, a `degraded: true` body). The roster section below only
+       renders `if (i.qualified.length)`, so keying this sentence off nQual alone printed "named and
+       reachable at the back of this report" over a report with no such page — a document that
+       contradicts itself in a CSM's hand. State the number either way; promise the roster only when it
+       is actually attached. */
+    (nQual === null
+      ? ""
+      : i.qualified.length
+        ? ` Another ${f(nQual)} qualified buyers are in your pipeline right now, named and ` +
+          `reachable at the back of this report.`
+        : ` Another ${f(nQual)} qualified buyers are in your pipeline right now.`);
   doc.text(doc.splitTextToSize(lede, 430) as string[], M, hy, { lineHeightFactor: 1.5 });
 
   // ── the floating stat card, straddling the hero's lower edge ────────────────────────────────────
@@ -158,7 +179,10 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
   const stats: { v: string; l: string; s: string; c: RGB }[] = [
     { v: f(nBooked), l: "Appointments booked by Vini", s: "the AI set them itself", c: EMERALD },
     { v: f(nAssist), l: "AI-assisted appointments", s: "you booked, after Vini worked the lead", c: BLUE },
-    { v: f(nQual), l: "Additional qualified leads", s: "qualified, not yet booked", c: ORANGE },
+    // Dropped entirely rather than dashed: the sub-line is the definition, and a dash under it still
+    // claims the document measured something it did not. The card divides by stats.length, so three
+    // columns lay out on their own.
+    ...(nQual === null ? [] : [{ v: f(nQual), l: "Additional qualified leads", s: "qualified, not yet booked", c: ORANGE }]),
     { v: hrs(fleet.talkMinutes), l: "Hours on the phone", s: "conversation you didn't staff", c: NAVY },
   ];
   const colW = (W - M * 2) / stats.length;
@@ -268,8 +292,8 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
 
   const apptRows = (rows: NamedAppt[]) =>
     rows.slice(0, MAX_ROWS).map((a) => [
-      personLabel(a.customer), a.phone || "—", whenLabel(a.when),
-      intentLabel(a.intent), dayLabel(a.bookedAt),
+      personLabel(a.customer), a.phone || "—", whenLabel(a.when, i.tz),
+      intentLabel(a.intent), dayLabel(a.bookedAt, i.tz),
       /cancel/i.test(a.status || "") ? "Cancellation requested" : "Scheduled",
     ]);
 
@@ -307,10 +331,14 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
       idx === 0 ? "entered the funnel"
         : all[idx - 1].value > 0 ? `${Math.round((100 * s.value) / all[idx - 1].value)}%` : "—",
     ]), { 1: 90, 2: 150 });
-  note(`The ${f(nQual)} who qualified without booking are the opportunity.`,
-    `They cleared qualification — a real conversation, a real buying signal — and have not booked. They are ` +
-    `the shortest path to more appointments next period, and every one is named at the back of this report ` +
-    `so your team can work them directly.`);
+  // Same rule as the stat and the lede: the whole note is ABOUT that count, so with no count there is
+  // nothing honest left to say and it is omitted.
+  if (nQual !== null) {
+    note(`The ${f(nQual)} who qualified without booking are the opportunity.`,
+      `They cleared qualification — a real conversation, a real buying signal — and have not booked. They are ` +
+      `the shortest path to more appointments next period, and every one is named at the back of this report ` +
+      `so your team can work them directly.`);
+  }
 
   // ── 04+ the named lists ─────────────────────────────────────────────────────────────────────────
   const APPT_HEAD = ["Customer", "Phone", "Appointment", "What for", "Booked", "Status"];
@@ -329,13 +357,17 @@ export async function exportRoiPdf(i: RoiPdfInput): Promise<void> {
     if (assisted.length > MAX_ROWS) note(`Showing the first ${f(MAX_ROWS)} of ${f(assisted.length)}.`, "The full list is in the CSV or XLSX export.");
   }
   if (i.qualified.length) {
-    section("The opportunity", `Qualified buyers still in play (${f(nQual)})`,
+    /* The heading counts the ROOFTOP total when we have it — `i.qualified` may be a capped sample, so
+       the list's own length is not the answer. With no total (the endpoint failed, which also empties
+       this list, so this is belt-and-braces) the heading counts what is actually printed and the
+       "showing N of M" note is dropped rather than compared against a number we do not have. */
+    section("The opportunity", `Qualified buyers still in play (${f(nQual ?? i.qualified.length)})`,
       "Qualified this period, no appointment yet. Most recently spoken to first — the top of this list is the warmest.");
     table(["Customer", "Phone", "Lead source", "Last spoken to"],
-      i.qualified.slice(0, MAX_ROWS).map((l) => [personLabel(l.customer), l.phone || "—", l.source || "—", dayLabel(l.lastTouch)]),
+      i.qualified.slice(0, MAX_ROWS).map((l) => [personLabel(l.customer), l.phone || "—", l.source || "—", dayLabel(l.lastTouch, i.tz)]),
       { 1: 86, 3: 86 });
     const shown = Math.min(i.qualified.length, MAX_ROWS);
-    if (shown < nQual) note(`Showing the ${f(shown)} most recently contacted of ${f(nQual)}.`, "The full list is in the CSV or XLSX export.");
+    if (nQual !== null && shown < nQual) note(`Showing the ${f(shown)} most recently contacted of ${f(nQual)}.`, "The full list is in the CSV or XLSX export.");
   }
 
   // ── method footer ───────────────────────────────────────────────────────────────────────────────
