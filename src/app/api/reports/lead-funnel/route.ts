@@ -22,8 +22,13 @@
  * caller's own Spyne token forwarded as auth_key for the downstream enrichment (see spyneTokenFrom).
  *
  * SHAPE.
- *   { bucket, start?, end?, teams: { "<team_id>": { ok: true, degraded: boolean, agents: [{ id, leadFunnel }] }
+ *   { bucket, start?, end?, teams: { "<team_id>": { ok: true, degraded: boolean,
+ *                                                  totals: { connected, qualified },
+ *                                                  agents: [{ id, leadFunnel }] }
  *                                                 | { ok: false, status, error } } }
+ * `totals` is what the partner dashboard shows as Vini "Leads contacted" (= leadFunnel.connected) and "Leads
+ * qualified" (= leadFunnel.qualified), each summed over the rooftop's agents exactly as the console's Vini home
+ * sums them (useCoreIntegrationStats), so the two screens agree. `agents` is unchanged.
  * One failing team never fails the call; it comes back as { ok: false } under its own key. */
 import { GET as teamReport } from "@/app/api/reports/route";
 import { readBearer } from "@/lib/reports/auth";
@@ -64,9 +69,27 @@ async function isAuth(token: string, env: string | null): Promise<AuthCheck> {
 }
 
 type FunnelAgent = { id: string; leadFunnel: unknown };
+type FunnelTotals = { connected: number; qualified: number };
 type TeamResult =
-  | { ok: true; degraded: boolean; agents: FunnelAgent[] }
+  | { ok: true; degraded: boolean; totals: FunnelTotals; agents: FunnelAgent[] }
   | { ok: false; status: number; error: string };
+
+const count = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+/* connected / qualified summed over the agents; a missing figure counts as 0. */
+function totalsOf(agents: FunnelAgent[]): FunnelTotals {
+  let connected = 0;
+  let qualified = 0;
+  for (const a of agents) {
+    const f = a.leadFunnel as { connected?: unknown; qualified?: unknown } | null;
+    connected += count(f?.connected);
+    qualified += count(f?.qualified);
+  }
+  return { connected, qualified };
+}
 
 async function funnelFor(teamId: string, token: string, secret: string, params: URLSearchParams): Promise<TeamResult> {
   const url = new URL("http://internal/api/reports");
@@ -84,7 +107,7 @@ async function funnelFor(teamId: string, token: string, secret: string, params: 
     const agents = (body.agents ?? [])
       .filter((a) => a.id && a.leadFunnel)
       .map((a) => ({ id: a.id as string, leadFunnel: a.leadFunnel }));
-    return { ok: true, degraded: !!body.degraded, agents };
+    return { ok: true, degraded: !!body.degraded, totals: totalsOf(agents), agents };
   } catch (e) {
     console.error(`[/api/reports/lead-funnel] team ${teamId} failed: ${e instanceof Error ? e.message : String(e)}`);
     return { ok: false, status: 500, error: "failed to build report" };
