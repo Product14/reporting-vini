@@ -24,6 +24,7 @@ import { fmtInt } from "./data";
 import type { ActionItem, ActionItemStats } from "./liveData";
 import type { FleetLive } from "./liveData";
 import { fmtRate, fmtDuration, fmtSecs, fmtWhenShort, Modal } from "./kitV3";
+import { dayKeyFields, hour12, parseReportTs, shiftDayKey, storeDayKey, storeParts, storeTodayKey } from "@/lib/reports/storeTime";
 import { UnlockPotentialBanner } from "./valueStory";
 import { InterestForm } from "./upsell";
 import { CountUp, useInView } from "./anim";
@@ -155,14 +156,22 @@ function apptSubSales(fleet: FleetLive): string {
   return fleet.appointmentsNoAgent > 0 ? `${fmtInt(fleet.appointmentsNoAgent)} with no agent` : "AI-booked meetings";
 }
 
-/* Qualified leads the AI produced that are NOT already counted in the appointment tile beside it —
-   canonical: the funnel's "Qualified leads" stage minus its "Appointments — AI-booked" stage, the exact
-   two values LiveFunnelCard and the per-agent performance cards render (fleet.qualified is the
-   leadFunnel.qualified sum; fleet.appointments is the same total the funnel's last band shows). Kept on
-   that basis deliberately: read off any other pair of numbers this tile would contradict the funnel two
-   rows below it. Clamped at 0 — fleet.appointments carries unattributed bookings that fleet.qualified
-   (agent-summed) cannot, so a rooftop with near-zero qualified can cross over. */
-function extraQualified(fleet: FleetLive): number {
+/* "Qualified, not yet booked" — the number under this tile's own label.
+ *
+ * PREFERRED: the canonical count, served directly (`qualifiedNotBooked`). The subtraction below is
+ * unsound at BOTH ends and the API's own type file says so: `qualified - booked` gives the WRONG
+ * answer because not every booked lead qualified, so the subtrahend over-subtracts (see
+ * CanonicalHotLeads.bookedQualified in lib/spyne/consoleReports.ts), while the minuend over-counts
+ * whenever `fleet.qualified` is the agent sum. On team 3d3deabc98 the subtraction rendered 234 where
+ * the canonical answer is 222 — and 253 (distinct) minus appointments still does not land on 222,
+ * which is why fixing the input alone was not enough. (Vendor-internal measurements, not audited.)
+ *
+ * FALLBACK, unchanged: the funnel's "Qualified leads" stage minus its "Appointments — AI-booked"
+ * stage — the exact two values LiveFunnelCard and the per-agent cards render, so with no canonical
+ * answer this tile still cannot contradict the funnel two rows below it. Clamped at 0:
+ * fleet.appointments carries unattributed bookings that the qualified stage cannot. */
+function extraQualified(fleet: FleetLive, qualifiedNotBooked?: number): number {
+  if (typeof qualifiedNotBooked === "number") return qualifiedNotBooked;
   return Math.max(0, fleet.qualified - fleet.appointments);
 }
 
@@ -246,7 +255,7 @@ function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOve
   );
 }
 
-export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, variant = "old", nav, loading, serviceMetricsOverlay }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; variant?: ReportVariant; nav?: HeroNav; loading?: boolean; serviceMetricsOverlay?: ServiceOverviewOverlay | null }) {
+export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, qualifiedNotBooked, variant = "old", nav, loading, serviceMetricsOverlay }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; qualifiedNotBooked?: number; variant?: ReportVariant; nav?: HeroNav; loading?: boolean; serviceMetricsOverlay?: ServiceOverviewOverlay | null }) {
   // Speed-to-lead leads both sets and is identical in both — only tiles 2-4 differ.
   const stlTile = { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled };
   // OLD — production today. Keep this arm byte-for-byte as it shipped: it is the control the New arm is
@@ -263,7 +272,7 @@ export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads =
     stlTile,
     { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSubSales(fleet), onClick: nav?.onAppointments },
     { icon: "/live-overview/icon-resolved.svg", value: <CountUp value={fleet.appointmentsAssisted} />, label: "AI-assisted appointments", sub: "you booked, after the AI worked the lead", onClick: nav?.onAppointments },
-    { icon: "/live-overview/icon-actionitems.svg", value: <CountUp value={extraQualified(fleet)} />, label: "Additional qualified leads", sub: "qualified, not yet booked", onClick: nav?.onConversations },
+    { icon: "/live-overview/icon-actionitems.svg", value: <CountUp value={extraQualified(fleet, qualifiedNotBooked)} />, label: "Additional qualified leads", sub: "qualified, not yet booked", onClick: nav?.onConversations },
   ];
   const tiles = variant === "new" ? newTiles : oldTiles;
   return (
@@ -787,8 +796,11 @@ export function LiveFunnelCard({ fleet, serviceMode }: { fleet: FleetLive; servi
           <FunnelCell label="Leads touched" value={leads.value} delta={fleet.deltas.leads} />
           <FunnelCell label="Real Conversations" value={conv.value} delta={fleet.deltas.conversations} />
           <FunnelCell label="Qualified Leads" value={qual.value} delta={fleet.deltas.qualified} />
-          {/* The three stages to the left are exact sums of the agent cards below this card, so this one
-              has to account for itself too when it carries bookings no agent owns. */}
+          {/* This stage is the agent sum PLUS the bookings no agent owns, so the residue is named here.
+              (The three stages to the left used to be exact sums of the agent cards below; they are now
+              the rooftop's own DISTINCT counts whenever the canonical scope check passes — see
+              aggregateFleet — so they can read LOWER than those cards add up to. That overlap is named
+              on the tiles that print a split beside the total; the funnel prints no split.) */}
           <FunnelCell label="Appointments - AI Booked" value={appt.value} delta={fleet.deltas.appointments} last
             note={fleet.appointmentsNoAgent > 0 ? `${fmtInt(fleet.appointmentsNoAgent)} not assigned to an agent` : undefined} />
         </div>
@@ -859,32 +871,43 @@ export function LiveHotLeadsCard({ items, onViewAll }: { items: WarmLeadItem[]; 
 }
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedAppt[]; onViewAll: () => void }) {
+// "2026-10-05" → "October 5, 2026". The key is already a resolved calendar date, so UTC midnight is
+// exact here — there is no instant left to re-zone (same reason dayKeyFields uses the UTC getters).
+const fmtDayKeyLong = (key: string) =>
+  new Date(`${key}T00:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+/* `tz` — the rooftop's IANA zone (feed.timezone), optional, absent → UTC exactly as before.
+ *
+ * THE CALENDAR USED TWO DIFFERENT WRONG ZONES AT ONCE. The day columns were built from a BROWSER-local
+ * `new Date()` but keyed with `toISOString()` (UTC), while the appointments were bucketed on the UTC
+ * prefix of `when`. For any viewer west of UTC the column labelled "Mon 05" could be keyed 2026-10-06,
+ * and an 8:30 PM Pacific booking (03:30Z the next day) landed in the following column regardless. Now
+ * the week is a run of STORE-LOCAL day keys and every bucket, dot, label and count reads off that one
+ * key, so the grid cannot disagree with itself. */
+export function LiveAppointmentsWeekCard({ items, onViewAll, tz }: { items: NamedAppt[]; onViewAll: () => void; tz?: string | null }) {
   const [weekOffset, setWeekOffset] = React.useState(0);
-  const today = React.useMemo(() => new Date(), []);
-  const days = React.useMemo(() => {
-    const base = new Date(today);
-    base.setDate(base.getDate() + weekOffset * 7 - 3);
-    return Array.from({ length: 7 }, (_, i) => { const d = new Date(base); d.setDate(base.getDate() + i); return d; });
-  }, [today, weekOffset]);
+  const todayKey = React.useMemo(() => storeTodayKey(tz), [tz]);
+  // Whole-day arithmetic on a bare YYYY-MM-DD — zone-agnostic by construction, so DST never shifts a column.
+  const days = React.useMemo(
+    () => Array.from({ length: 7 }, (_, i) => shiftDayKey(todayKey, weekOffset * 7 - 3 + i)),
+    [todayKey, weekOffset],
+  );
   const byDay = React.useMemo(() => {
     const m = new Map<string, NamedAppt[]>();
     for (const a of items) {
       if (!a.when) continue;
-      const key = a.when.slice(0, 10);
+      const key = storeDayKey(a.when, tz);
       m.set(key, [...(m.get(key) ?? []), a]);
     }
     return m;
-  }, [items]);
+  }, [items, tz]);
   const [selected, setSelected] = React.useState<string | null>(null);
-  const todayKey = today.toISOString().slice(0, 10);
-  const activeKey = selected ?? days.find((d) => d.toISOString().slice(0, 10) === todayKey)?.toISOString().slice(0, 10) ?? days[3].toISOString().slice(0, 10);
+  const activeKey = selected ?? (days.includes(todayKey) ? todayKey : days[3]);
   const dayAppts = (byDay.get(activeKey) ?? []).sort((a, b) => (a.when ?? "").localeCompare(b.when ?? ""));
   // Footer count must match the VISIBLE week grid — not `items.length` (that's every appointment in the
   // selected report window, e.g. 36 across 30 days, which read as "36 appointments this week"). Sum only
   // the 7 days currently shown so the number tracks the week the user is looking at.
   const weekCount = React.useMemo(
-    () => days.reduce((n, d) => n + (byDay.get(d.toISOString().slice(0, 10))?.length ?? 0), 0),
+    () => days.reduce((n, d) => n + (byDay.get(d)?.length ?? 0), 0),
     [days, byDay],
   );
 
@@ -897,14 +920,14 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
               <span>📅</span>
               <p className="text-[14px] font-semibold uppercase text-[#030712]">Appointments</p>
             </div>
-            <p className="text-[14px] font-medium text-[#535353]">{today.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</p>
+            <p className="text-[14px] font-medium text-[#535353]">{fmtDayKeyLong(todayKey)}</p>
           </div>
           <div className="flex h-[46px] w-full items-center justify-between">
             <button onClick={() => setWeekOffset((w) => w - 1)} aria-label="Previous week" className="flex-none text-[#030712]">←</button>
-            {days.map((d) => {
-              const key = d.toISOString().slice(0, 10);
+            {days.map((key) => {
               const isSel = key === activeKey;
               const count = byDay.get(key)?.length ?? 0;
+              const { dow, day } = dayKeyFields(key);
               return (
                 <button
                   key={key}
@@ -912,8 +935,8 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
                   className="flex w-9 flex-none flex-col items-center justify-center gap-1 rounded"
                   style={isSel ? { background: C.primary, color: "#fff", height: 46 } : undefined}
                 >
-                  <span className="text-[12px]" style={{ color: isSel ? "#fff" : C.sub }}>{DOW[d.getDay()]}</span>
-                  <span className="text-[14px] font-semibold tracking-[-1px]" style={{ color: isSel ? "#fff" : C.dark }}>{String(d.getDate()).padStart(2, "0")}</span>
+                  <span className="text-[12px]" style={{ color: isSel ? "#fff" : C.sub }}>{DOW[dow]}</span>
+                  <span className="text-[14px] font-semibold tracking-[-1px]" style={{ color: isSel ? "#fff" : C.dark }}>{String(day).padStart(2, "0")}</span>
                   {count > 0 && !isSel && <span className="h-1 w-1 rounded-full" style={{ background: C.primary }} />}
                 </button>
               );
@@ -928,7 +951,7 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
             <React.Fragment key={`${a.customer}-${i}`}>
               {i > 0 && <div className="h-px w-full bg-[#e5e7eb]" />}
               <div className="flex w-full items-start gap-6">
-                <p className="w-[70px] flex-none text-[14px] font-semibold text-[#030712]">{a.when ? fmtWhenShort(a.when).split("· ")[1] ?? fmtWhenShort(a.when) : "—"}</p>
+                <p className="w-[70px] flex-none text-[14px] font-semibold text-[#030712]">{a.when ? fmtWhenShort(a.when, tz).split("· ")[1] ?? fmtWhenShort(a.when, tz) : "—"}</p>
                 <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
                   <div className="flex w-full items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -963,29 +986,39 @@ export function LiveAppointmentsWeekCard({ items, onViewAll }: { items: NamedApp
  * gated to exactly those two halves (detailQueries.ts: source='spyne' OR ai_assisted=1). If that gate
  * ever widens, this card widens with it silently, so the two must be changed together.
  *
- * WINDOW. From the START OF TODAY forward, not "later than this exact minute". meeting_start is read as
- * wall-clock (UTC getters, same as fmtWhenShort and the calendar card it replaces), so comparing it to a
- * real instant would skew by the store's offset — up to 8h on a Pacific rooftop, enough to hide a booking
- * later today or surface one already past. Whole days are immune to that, and a dealer opening the report
- * mid-morning wants to see the rest of today regardless.
+ * WINDOW. From the START OF TODAY forward, not "later than this exact minute" — a dealer opening the
+ * report mid-morning wants to see the rest of today, and whole days are immune to the few-minutes drift
+ * between the warehouse and the clock.
+ *
+ * TODAY IS THE STORE'S TODAY, AND THE DAY KEY IS THE STORE'S DAY. This used to be `new Date()
+ * .toISOString().slice(0,10)` compared against `when.slice(0,10)` — i.e. UTC on both sides, on the
+ * mistaken belief (recorded in this comment until 2026-10-06) that meeting_start arrives as store-local
+ * wall-clock. It does not: detailQueries.ts selects m.meeting_start_time with no toTimeZone wrapper, so
+ * it is a true UTC instant. The consequences were both visible and invisible — an 8:30 PM Pacific
+ * appointment is 03:30Z the NEXT day, so it PRINTED as 03:30 AM, it FILED itself under tomorrow's
+ * heading, and between 00:00Z and 08:00Z a Pacific rooftop's UTC "today" is already the dealer's
+ * tomorrow, so the rest of today silently dropped out of "upcoming" altogether.
+ *
+ * All three now come from one store-local day key (storeTime.ts), so the printed heading, the grouping
+ * and the cutoff cannot drift apart. With no tz known they are byte-identical to the old UTC behaviour.
  *
  * Cancelled bookings are dropped: "next on the books" means something the store still expects.
  */
-function apptDayHeading(iso: string): string {
-  const d = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
-  if (!Number.isFinite(d.getTime())) return "";
-  const dow = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"][d.getUTCDay()];
-  const mon = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"][d.getUTCMonth()];
-  return `${dow}, ${mon} ${d.getUTCDate()}`;
+const DOW_UC = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+const MON_UC = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+// "MONDAY, OCT 5", in the store's zone. Uppercase + no stock Intl equivalent, hence formatToParts.
+function apptDayHeading(iso: string, tz?: string | null): string {
+  const p = storeParts(iso, tz);
+  if (!p) return "";
+  return `${DOW_UC[p.dow]}, ${MON_UC[p.mon]} ${p.day}`;
 }
-function apptTime(iso: string): string {
-  const d = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`);
-  if (!Number.isFinite(d.getTime())) return "—";
-  let h = d.getUTCHours();
-  const m = d.getUTCMinutes().toString().padStart(2, "0");
-  const ap = h >= 12 ? "PM" : "AM";
-  h = h % 12 || 12;
-  return `${String(h).padStart(2, "0")}:${m} ${ap}`;
+// "08:30 PM", in the store's zone. Zero-padded hour (the column is tabular), which is why this does not
+// just call fmtWhenShort.
+function apptTime(iso: string, tz?: string | null): string {
+  const p = storeParts(iso, tz);
+  if (!p) return "—";
+  const { h, ap } = hour12(p.h24);
+  return `${String(h).padStart(2, "0")}:${String(p.min).padStart(2, "0")} ${ap}`;
 }
 // "schedule_test_drive" → "schedule test drive". The meeting record's own wording, just made readable —
 // we do not re-label it, so a dealer reading the console and this report see the same thing.
@@ -994,21 +1027,32 @@ function apptIntent(raw: string): string {
 }
 const APPT_ROWS_SHOWN = 5; // the card sits beside Hot Leads; more than this and the pair stops matching
 
-export function LiveUpcomingApptsCard({ items, onViewAll }: { items: NamedAppt[]; onViewAll: () => void }) {
+export function LiveUpcomingApptsCard({ items, onViewAll, tz }: { items: NamedAppt[]; onViewAll: () => void; tz?: string | null }) {
   const groups = React.useMemo(() => {
-    const todayKey = new Date().toISOString().slice(0, 10);
+    const todayKey = storeTodayKey(tz);
+    // One store-local day key per row, computed ONCE and used for the cutoff, the grouping AND (via
+    // apptDayHeading on the same row) the heading. Deriving the key and the label from two separate code
+    // paths is what would let the card show a row under a heading that disagrees with it.
+    /* SORT ON THE INSTANT, NOT THE RAW STRING. The two producers emit DIFFERENT shapes for the same
+       moment — ClickHouse "2026-10-06 03:30:00" (naive, space separator) and the Spyne meetings API
+       "2026-10-06T03:30:00Z" — and a space sorts before "T", so localeCompare on the raw value orders
+       by SHAPE before time. The grouping below only compares against the PREVIOUS group, so it needs
+       same-day rows adjacent; a shape-ordered list splits one store-local day in two and the card
+       renders the same heading twice. Sorting on the parsed epoch is shape-agnostic, and a store-local
+       day is a contiguous span of instants, so a day's rows stay together by construction.
+       Unparseable rows sort last instead of throwing. */
     const upcoming = items
-      .filter((a) => a.when && a.when.slice(0, 10) >= todayKey && !/cancel/i.test(a.status))
-      .sort((a, b) => (a.when ?? "").localeCompare(b.when ?? ""));
+      .map((a) => ({ a, key: a.when ? storeDayKey(a.when, tz) : "", at: parseReportTs(a.when)?.getTime() ?? Number.POSITIVE_INFINITY }))
+      .filter(({ a, key }) => key >= todayKey && !/cancel/i.test(a.status))
+      .sort((x, y) => x.at - y.at);
     const out: { key: string; label: string; rows: NamedAppt[] }[] = [];
-    for (const a of upcoming) {
-      const k = (a.when as string).slice(0, 10);
+    for (const { a, key } of upcoming) {
       const last = out[out.length - 1];
-      if (last && last.key === k) last.rows.push(a);
-      else out.push({ key: k, label: apptDayHeading(a.when as string), rows: [a] });
+      if (last && last.key === key) last.rows.push(a);
+      else out.push({ key, label: apptDayHeading(a.when as string, tz), rows: [a] });
     }
     return out;
-  }, [items]);
+  }, [items, tz]);
 
   const total = groups.reduce((n, g) => n + g.rows.length, 0);
   // Trim to the first APPT_ROWS_SHOWN across groups, dropping any group left with nothing — the footer
@@ -1043,7 +1087,7 @@ export function LiveUpcomingApptsCard({ items, onViewAll }: { items: NamedAppt[]
               </div>
               {g.rows.map((a, i) => (
                 <div key={`${g.key}-${a.customer}-${i}`} className="flex w-full items-center gap-4 border-b border-[#f0f1f4] px-5 py-3">
-                  <p className="w-[74px] flex-none text-[12.5px] font-medium text-[#535353]">{apptTime(a.when as string)}</p>
+                  <p className="w-[74px] flex-none text-[12.5px] font-medium text-[#535353]">{apptTime(a.when as string, tz)}</p>
                   <span
                     className="flex h-8 w-8 flex-none items-center justify-center rounded-full text-[11.5px] font-bold text-white"
                     style={{ background: avatarColor(a.customer) }}
@@ -1301,6 +1345,17 @@ export interface LiveOverviewProps {
    * numbers inside those sections) is dropped rather than shown from the ClickHouse `fleet`/`agents`
    * this component still receives — see serviceMetrics.ts's NO_TWIN_ON_OLD_OVERVIEW for why. */
   serviceMetricsOverlay?: ServiceOverviewOverlay | null;
+  /* The rooftop's IANA timezone (feed.timezone), for the appointment cards' times, day headings, day
+   * grouping and "upcoming" cutoff. Optional and null-tolerant: getStoreTimeZone legitimately returns
+   * null when no Spyne token is forwarded or the working-days call fails, and every appointment surface
+   * then renders exactly as it did before this prop existed (UTC) rather than guessing the VIEWER's zone
+   * — a dealer-group analyst in New York must not silently get Eastern times on a Phoenix rooftop. */
+  tz?: string | null;
+  /* The canonical "qualified, not yet booked" count for the hero's "Additional qualified leads" tile,
+   * already scope-checked by the caller (rooftopRungsFor). undefined → extraQualified() falls back to
+   * its subtraction. NOTE this deliberately does NOT feed the Service hero's "Hot Leads" tile below:
+   * the canonical hot-leads call is made for dept="sales" (route.ts), so it is not that tile's answer. */
+  qualifiedNotBooked?: number;
 }
 
 // The customizable sections of the Live overview, in default order. Exposed so OverviewView can build
@@ -1346,7 +1401,7 @@ export function namedApptsFromServiceMetrics(items: NonNullable<ServiceOverviewO
 export function LiveOverview({
   account, fleet, loading, agents, warmLeads, namedAppts, aiStats, workItems,
   onOpenAgent, onViewAppointments, onOpenWarmModal, onViewActionItems, onViewConversations, outcomes, headerControls, ctrl, serviceMode,
-  variant = "old", serviceMetricsOverlay,
+  variant = "old", serviceMetricsOverlay, qualifiedNotBooked, tz,
 }: LiveOverviewProps) {
   const inbound = agents.find((a) => a.dir === "Inbound");
   const outbound = agents.find((a) => a.dir === "Outbound");
@@ -1360,7 +1415,7 @@ export function LiveOverview({
   const svc = serviceMetricsOverlay ?? null;
 
   const nodes: Record<string, React.ReactNode> = {
-    "live.hero": <LiveHero loading={loading} fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} serviceMetricsOverlay={svc} />,
+    "live.hero": <LiveHero loading={loading} fleet={fleet} actionStats={aiStats?.stats ?? null} controls={headerControls} serviceMode={serviceMode} hotLeads={hotLeads} qualifiedNotBooked={qualifiedNotBooked} variant={variant} nav={{ onAppointments: onViewAppointments, onActionItems: onViewActionItems, onConversations: onViewConversations, onHotLeads: onOpenWarmModal }} serviceMetricsOverlay={svc} />,
     /* NEW: one set of numbers, three readings (Headline / Impact / Compact) — see LiveAgentPerformance.
        Upsell cards still fill a missing direction, so a rooftop running one agent keeps its "get the
        other one" prompt instead of a half-empty row. OLD keeps the production pair.
@@ -1403,10 +1458,10 @@ export function LiveOverview({
        shape (never the week-calendar) because "the upcoming appointments list" is the one sanctioned twin
        — fed from service-metrics' own appointment list via the shim above, not the ClickHouse namedAppts. */
     "live.appts": svc
-      ? <LiveUpcomingApptsCard items={namedApptsFromServiceMetrics(svc.namedAppointments ?? [])} onViewAll={onViewAppointments} />
+      ? <LiveUpcomingApptsCard items={namedApptsFromServiceMetrics(svc.namedAppointments ?? [])} onViewAll={onViewAppointments} tz={tz} />
       : variant === "new"
-        ? <LiveUpcomingApptsCard items={namedAppts} onViewAll={onViewAppointments} />
-        : <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} />,
+        ? <LiveUpcomingApptsCard items={namedAppts} onViewAll={onViewAppointments} tz={tz} />
+        : <LiveAppointmentsWeekCard items={namedAppts} onViewAll={onViewAppointments} tz={tz} />,
     // Service + the flag on: openNow + the list are the sanctioned twins (no Created/Due-Today —
     // service-metrics has no such fields); "Past SLA" is a client-side isLate filter, not the pastSla
     // metric (see LiveActionItemsTableService's own doc comment) — via LiveActionItemsTableService.

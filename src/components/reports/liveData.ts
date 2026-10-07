@@ -17,24 +17,33 @@ export const ID_BY_AGENT_TYPE: Record<string, AgentData["id"]> = {
 };
 
 /* The funnel-entry stage (top of the "leads → conversations → qualified → appointments" funnel) as a
- * label + value, canonical + channel-honest + monotonic. ONE source of truth so every surface (Overview
- * agent cards, By-agent funnel) shows the SAME number/label for the same agent.
- *   • Inbound  → "Leads reached" = unique leads contacted.
- *   • Outbound → "Leads dialed" = unique leads DIALED, but ONLY when dialing is the actual outreach
- *     mechanism (dialed > 0) AND it keeps the funnel monotonic (dialed ≥ connected). SMS-only outbound
- *     has dialed = 0 (e.g. Service Outbound texts, never calls) — showing "0 dialed" is wrong AND breaks
- *     the funnel (0 → N conversations), so fall back to "Leads contacted" = contacted. */
+ * label + value. ONE source of truth so every surface (Overview agent cards, By-agent funnel, and the
+ * agent-selector chips above them) shows the SAME number and the SAME noun for the same agent.
+ *
+ * ALWAYS `reached` — BOTH directions, changed 2026-10-05.
+ *
+ * Outbound used to open on `dialed`, which broke the funnel in two ways on a texting-heavy rooftop:
+ *
+ *   1. NOT A SUPERSET OF THE STAGE BELOW IT. `dialed` is uniqExactIf(lead_id, is_call = 1), while
+ *      `engaged` has its own SMS branch — a lead that was only ever texted and replied is engaged
+ *      WITHOUT ever being dialed. So "622 dialed → 302 real conversations · 49%" was a ratio between
+ *      two partly-disjoint sets, not a funnel.
+ *   2. IT CONTRADICTED THE CHIP ABOVE IT, which reads this same stage: 823 on the chip over a funnel
+ *      opening at 622, because 201 of that agent's leads were texted and never called.
+ *
+ * The backend says the same thing at source — canonical-metrics.service.ts calls `dialed` "A CHANNEL
+ * STAT, never a funnel head". It still has a home on the card's stat row (calls dispatched / total
+ * SMS); it just is not the top of the funnel. */
 export function leadEntryStage(
   dir: string,
   lf: { contacted: number; dialed: number; connected: number } | undefined,
   fallbackContacted: number,
 ): { label: string; value: number } {
   const contacted = lf?.contacted ?? fallbackContacted;
-  if (dir === "Inbound") return { label: "Leads reached", value: contacted };
-  const dialed = lf?.dialed ?? 0;
-  const connected = lf?.connected ?? 0;
-  if (dialed > 0 && dialed >= connected) return { label: "Leads dialed", value: dialed };
-  return { label: "Leads contacted", value: contacted };
+  // `dir` is no longer read — kept in the signature because every call site passes it and the
+  // distinction may come back as a label-only difference ("reached" vs "contacted").
+  void dir;
+  return { label: "Leads reached", value: contacted };
 }
 
 /* Does this agent have ANY real activity in the window? Activity is ground truth for whether an agent
@@ -156,6 +165,38 @@ export interface Basis {
   afterHours?: number;
 }
 
+/* THE ROOFTOP'S OWN DISTINCT-LEAD RUNGS, served by the canonical API — NOT the sum of the agent rows.
+ * A lead worked by BOTH Sales Inbound and Sales Outbound is genuinely reached/engaged/qualified on
+ * both agent cards, but it is ONE lead at the rooftop, so adding the cards double-counts the overlap:
+ * team 3d3deabc98 sums to 270 qualified where the rooftop's distinct answer is 253. (Vendor-internal
+ * measurement read off the canonical endpoint — not an audited industry figure.)
+ *
+ * `dept` and `agentTypes` are the SCOPE this triple was computed over, carried so the client can PROVE
+ * a given agent list is exactly that scope before substituting — see rooftopRungsFor(). They are not
+ * display data, and nothing may hardcode "sales" from them: the API decides its own scope.
+ *
+ * Absent whenever the canonical call did not land (older deploy, no token, API down, or the call was
+ * made without a Spyne credential). Every consumer then keeps summing the agent rows, which is the
+ * pre-existing behaviour. */
+export interface RooftopRungs {
+  /** The department the API was asked for — "sales" today (see route.ts). Read it, never assume it. */
+  dept: string;
+  /** The agent types the API actually counted, narrowed to those with lead activity in the window. */
+  agentTypes: string[];
+  leadsAttempted: number;
+  engaged: number;
+  qualified: number;
+  /** The same three for the prior equal-length window. Absent when the API sent no `previous` block. */
+  prior?: { leadsAttempted: number; engaged: number; qualified: number };
+  /** The API's own period-over-period %, per field, null when the prior window was empty (its contract
+   *  matches pctDelta's: a dash, never a fabricated "+256%" off a base of nothing). */
+  deltaPct?: { leadsAttempted: number | null; engaged: number | null; qualified: number | null };
+  /** "Qualified, NOT yet booked" — the hero tile's and the ROI PDF's number, served directly rather
+   *  than subtracted. `qualified - booked` is the WRONG answer: not every booked lead qualified
+   *  (see CanonicalHotLeads in lib/spyne/consoleReports.ts). 222 where the subtraction gave 234. */
+  hotLeads?: number;
+}
+
 export interface FetchResult {
   agents: AgentData[];
   hasData: boolean; // the SELECTED window has rows — drives inline "empty window" notes, not the gate
@@ -183,6 +224,12 @@ export interface FetchResult {
    * CALLS. The two answer different questions and the tile asks the first one. Distinct at rooftop
    * level, so it is never the sum of the agent rows. Absent when the canonical API is unavailable. */
   capturedAfterHours?: number;
+  /* The canonical rooftop rungs + the scope they were computed over. Same contract as
+   * capturedAfterHours above: present only when the canonical API answered, absent otherwise, and
+   * never partially filled. Read it through rooftopRungsFor() — the raw object carries a SCOPE, and
+   * handing a department- or subset-filtered view a figure computed over a different agent set swaps
+   * an over-count for a flatly wrong number. */
+  rooftop?: RooftopRungs;
   prior: Record<string, Basis>; // per-agent-id totals for the prior window (for fleet deltas)
   // The window the server actually resolved (store-local when a timezone was known) + that timezone.
   // Informational — lets the UI label the period / note the zone. Absent on the mock/error fallback.
@@ -230,9 +277,18 @@ export interface FleetSplit {
 // from the prior-window basis. Dollar figures are intentionally absent (v3: counts, not $).
 export interface FleetLive {
   calls: number;
+  /* THE THREE DISTINCT-LEAD RUNGS. When `rungsAreDistinct` is true these are the rooftop's own
+     distinct counts from the canonical API; otherwise they are the agent rows added up, which
+     double-counts any lead two agents both worked. See aggregateFleet. */
   leads: number; // distinct leads touched/contacted (funnel entry) — the "Leads touched" MAIN tile
   conversations: number;
   qualified: number;
+  /* Are `leads` / `conversations` / `qualified` (and the funnel's first three stages, and their three
+     deltas) the ROOFTOP'S DISTINCT counts rather than the sum of the agent rows? Exposed so no
+     consumer has to re-derive the gate — re-deriving it is how the Overview tile, the funnel and the
+     ROI PDF drifted apart in the first place. False is a correct, coarser answer to the same question
+     (an over-count bounded by the cross-agent overlap), NOT a different metric. */
+  rungsAreDistinct: boolean;
   appointments: number;
   /* The part of `appointments` that belongs to NO agent, so anywhere the total is shown beside a
      per-agent or per-direction breakdown it can be named instead of read as an arithmetic error.
@@ -320,7 +376,104 @@ export function assistedApptsFor(feed: { appointmentsAssistedBy?: { sales: numbe
   return n(by.sales) + n(by.service) + n(by.unknown);
 }
 
-export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>, unattributedAppointments = 0, assistedTotal?: number): FleetLive {
+/* Re-admit the server's `rooftop` object across the JSON boundary. The response is parsed as
+ * Partial<FetchResult>, so every field is a CLAIM, not a guarantee — an older deploy, a truncated body
+ * or a half-built object would otherwise hand rooftopRungsFor() a scope it cannot trust and open the
+ * gate over nonsense. Anything that is not a complete, finite triple with a scope is dropped, and the
+ * UI goes back to summing. */
+function normalizeRooftop(raw: unknown): RooftopRungs | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const leadsAttempted = num(r.leadsAttempted), engaged = num(r.engaged), qualified = num(r.qualified);
+  if (leadsAttempted === undefined || engaged === undefined || qualified === undefined) return undefined;
+  if (typeof r.dept !== "string" || !r.dept) return undefined;
+  if (!Array.isArray(r.agentTypes) || !r.agentTypes.every((t) => typeof t === "string")) return undefined;
+  const triple = (v: unknown) => {
+    if (!v || typeof v !== "object") return undefined;
+    const o = v as Record<string, unknown>;
+    const a = num(o.leadsAttempted), b = num(o.engaged), c = num(o.qualified);
+    return a === undefined || b === undefined || c === undefined ? undefined : { leadsAttempted: a, engaged: b, qualified: c };
+  };
+  // deltaPct keeps null ("no prior basis") as a VALUE — dropping it to undefined would silently fall
+  // through to a summed prior, which is the mismatch rungDelta exists to avoid.
+  const pct = (v: unknown) => {
+    if (!v || typeof v !== "object") return undefined;
+    const o = v as Record<string, unknown>;
+    const g = (k: string) => (o[k] === null ? null : num(o[k]));
+    const a = g("leadsAttempted"), b = g("engaged"), c = g("qualified");
+    return a === undefined || b === undefined || c === undefined ? undefined : { leadsAttempted: a, engaged: b, qualified: c };
+  };
+  return {
+    dept: r.dept,
+    agentTypes: r.agentTypes as string[],
+    leadsAttempted, engaged, qualified,
+    prior: triple(r.prior),
+    deltaPct: pct(r.deltaPct),
+    hotLeads: num(r.hotLeads),
+  };
+}
+
+/* THE ROOFTOP'S DISTINCT RUNGS — but ONLY when `agents` is exactly the agent set the canonical API
+ * computed them over. Mirrors unattributedApptsFor()/assistedApptsFor(): the caller hands over the
+ * scope it is rendering and gets back that scope's own figure, or undefined.
+ *
+ * WHY A SET COMPARISON AND NOT THE DEPARTMENT SELECTOR. The canonical overview is fetched for
+ * dept="sales" only (route.ts), and buildResult overlays it per agent BY AGENT TYPE, so Service agents
+ * keep the aggregate's own numbers. On a dept="all" view of a rooftop that also runs Service, the
+ * sales-only rooftop figure is not that view's answer — substituting it would DELETE every Service
+ * lead from the rung, which is worse than the over-count it replaces. The department selector cannot
+ * see that; comparing the agents on screen against the agents the API says it counted can, and the
+ * same single predicate also catches a one-department, one-direction or one-agent subset, and any
+ * call site that does not exist yet. It fails CLOSED: anything unrecognised falls back to summing.
+ *
+ * Idle agents are excluded on both sides. An agent the API reports with no lead activity cannot move
+ * the rooftop number, and agentsForAccount() deliberately keeps a declared-but-idle agent on the CSM
+ * sheet — comparing raw lists would read that as a mismatch and close the gate for no reason. */
+export function rooftopRungsFor(
+  feed: { rooftop?: RooftopRungs } | null | undefined,
+  dept: string,
+  agents: AgentData[],
+): RooftopRungs | undefined {
+  const r = feed?.rooftop;
+  if (!r) return undefined;                                   // older deploy, no token, or the canonical call failed
+  if (dept !== "all" && dept !== r.dept) return undefined;     // e.g. the Service tab: a sales-only figure is not its rooftop
+  /* FAIL CLOSED ON AN UNKNOWN AGENT TYPE. This was `.map(...).filter(Boolean)`, which silently DROPPED
+     any agentType this build cannot map. A backend that starts counting a new agent type would then
+     widen the rooftop total while the predicate below still saw a matching set — so the gate would open
+     over a total covering an agent that is not on screen. That is exactly the deletion this helper
+     exists to prevent, arriving by the one path that looked harmless, and it contradicted the "fails
+     CLOSED" contract stated above. An unmappable type now closes the gate and we keep summing. */
+  const mapped = r.agentTypes.map((t) => ID_BY_AGENT_TYPE[t]);
+  if (mapped.some((id) => !id)) return undefined;              // the API counted an agent type this build cannot map
+  const covered = new Set(mapped);
+  if (!covered.size) return undefined;                         // API counted nobody — nothing to substitute
+  const live = agents.filter(hasAgentActivity);
+  if (live.some((a) => !covered.has(a.id))) return undefined;  // an agent on screen the API never counted (e.g. Service on "All")
+  const present = new Set(live.map((a) => a.id));
+  for (const id of covered) if (!present.has(id)) return undefined; // a filtered subset of the scope
+  return r;
+}
+
+/* The leads a distinct total and its Inbound/Outbound rows DISAGREE about: those worked by both
+ * agents, counted once in the total and twice across the split. Once the rungs are the rooftop's own
+ * distinct counts the bracket beside them stops adding up (253 over Inbound+Outbound = 270 on team
+ * 3d3deabc98) — a dealer reads that as an arithmetic error unless it is named, which is the same rule
+ * the appointments row already follows with its "no agent" residue. Derived from the two values
+ * ACTUALLY RENDERED, never from a second source, so it can never drift from the rows beside it.
+ * There is no canonical per-direction rooftop figure to fix the split itself with: the overview is
+ * fetched without a `direction`, so the split stays agent-summed by necessity. */
+export function workedByBoth(total: number, inbound: number, outbound: number): number {
+  return Math.max(0, inbound + outbound - total);
+}
+
+/* ★ `rungs` must be scoped THE SAME WAY as `agents` — call rooftopRungsFor() with the same list and
+ * the same dept, on the same line. Nothing in the type system enforces that pairing (the same shape of
+ * mistake the ★ note on `unattributedAppointments` below exists for), and rooftopRungsFor() is what
+ * decides whether substituting is safe at all. This function does NO scope inference of its own:
+ * guessing from `agents.length` or a department string is exactly the guess that would make a filtered
+ * view print a number that does not match the agent cards under it. */
+export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis>, unattributedAppointments = 0, assistedTotal?: number, rungs?: RooftopRungs): FleetLive {
   const sum = (f: (a: AgentData) => number) => agents.reduce((s, a) => s + f(a), 0);
   const calls = sum((a) => a.metrics.calls);
   const connectedCalls = sum((a) => a.metrics.conversations); // connected CALLS — the answer-rate basis
@@ -340,14 +493,24 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const talkMinutes = sum((a) => a.metrics.talkMinutes);
   const optOuts = sum((a) => a.metrics.optOuts);
 
-  // Unique-lead stages (distinct leads, summed across agents). The displayed "Conversations"/"Qualified"
-  // counts + the funnel all use these, so a given label shows ONE number everywhere. connectRate stays on
-  // connected CALLS (it's an answer rate). Falls back to event counts when no agent carries leadFunnel.
+  /* Unique-lead stages. The displayed "Leads touched"/"Conversations"/"Qualified" counts AND the funnel
+   * all read these three locals, so a given label shows ONE number everywhere — which is also why all
+   * three switch basis together or none does: replacing only `qualified` can break the monotonic
+   * contract (reached >= engaged >= qualified) that LiveFunnelCard and the ROI PDF divide by.
+   *
+   * PREFERRED BASIS: the rooftop's OWN distinct counts, when the caller proved its agent list is the
+   * scope the canonical API measured (see rooftopRungsFor). Summing the agent rows counts a lead worked
+   * by two agents twice — real on both cards, one lead at the rooftop. Team 3d3deabc98: summed 270
+   * qualified vs the rooftop's distinct 253, a 17-lead overlap. The comment that used to sit here
+   * justified the sum as correct; it is correct per AGENT and wrong at rooftop grain.
+   *
+   * FALLBACK, verbatim as it shipped: sum the agent leadFunnels, or event counts when no agent carries
+   * one. connectRate stays on connected CALLS either way (it is an answer rate, not a lead count). */
   const hasLeadFunnel = agents.some((a) => a.leadFunnel);
   const lf = (pick: (f: NonNullable<AgentData["leadFunnel"]>) => number) =>
     agents.reduce((s, a) => s + (a.leadFunnel ? pick(a.leadFunnel) : 0), 0);
-  const conversations = hasLeadFunnel ? lf((f) => f.connected) : connectedCalls; // unique connected leads
-  const qualified = hasLeadFunnel ? lf((f) => f.qualified) : sum((a) => a.metrics.qualified); // unique qualified leads
+  const conversations = rungs?.engaged ?? (hasLeadFunnel ? lf((f) => f.connected) : connectedCalls); // unique connected leads
+  const qualified = rungs?.qualified ?? (hasLeadFunnel ? lf((f) => f.qualified) : sum((a) => a.metrics.qualified)); // unique qualified leads
   /* Rooftop AI-booked = every agent's, PLUS the bookings no agent owns. A meeting with no call, chat or
    * conversation behind it cannot be attributed to a direction, so it appears on no agent card — but it
    * is a real appointment and it IS in the rooftop list, so leaving it out of the rooftop number would
@@ -383,8 +546,9 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const queryResolved = agents.filter(isInbound).reduce((s, a) => s + (a.report?.callFlow?.handledByAI ?? 0), 0);
   const queryConversations = agents.filter(isInbound).reduce((s, a) => s + a.metrics.conversations, 0);
   const queryResolutionRate = queryConversations > 0 ? Math.min(100, Math.round((100 * queryResolved) / queryConversations)) : null;
-  // Leads touched = distinct leads the AI contacted (funnel entry). Unique-lead basis when available.
-  const leads = hasLeadFunnel ? lf((f) => f.contacted) : sum((a) => a.report?.leadsAttempted ?? 0);
+  // Leads touched = distinct leads the AI contacted (funnel entry). Rooftop-distinct when the gate is
+  // open (see `conversations`/`qualified` above), else the unique-lead sum, else event counts.
+  const leads = rungs?.leadsAttempted ?? (hasLeadFunnel ? lf((f) => f.contacted) : sum((a) => a.report?.leadsAttempted ?? 0));
   // Response time = the Sales-Inbound speed-to-lead avg (only slot with a new-lead first-response funnel).
   const responseTimeSec = agents.find((a) => a.id === "sales_ib")?.report.speedToLead?.avgSec ?? null;
   // Speed-to-Lead is a Sales-Inbound capability: it's ENABLED whenever the rooftop runs Sales Inbound.
@@ -419,11 +583,30 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
   const wAvg = (f: (a: AgentData) => number) => (calls ? agents.reduce((s, a) => s + f(a) * a.metrics.calls, 0) / calls : 0);
   const pSum = (f: (b: Basis) => number) => agents.reduce((s, a) => s + (prior?.[a.id] ? f(prior[a.id]) : 0), 0);
 
+  /* DELTA FOR A DISTINCT RUNG. Both halves of the division have to share one definition. Once the
+   * CURRENT value is the rooftop's distinct count, dividing it by the agent-summed prior puts two
+   * different definitions on either side of one division — worse than either alone, and the exact
+   * defect the canonical prior-window overlay in build.ts was written to prevent.
+   * Order: the API's own deltaPct (already null, not 0, for an empty prior window — same contract as
+   * pctDelta), then its `previous` rooftop block, then NULL. Null renders as "New"/a dash, which is
+   * honest; a mismatched percentage is not. Without the rungs, the summed delta exactly as before. */
+  const rungDelta = (
+    curr: number,
+    fromApi: (d: NonNullable<RooftopRungs["deltaPct"]>) => number | null,
+    fromPrior: (p: NonNullable<RooftopRungs["prior"]>) => number,
+    fromSum: (b: Basis) => number,
+  ): number | null => {
+    if (!rungs) return pctDelta(curr, pSum(fromSum));
+    if (rungs.deltaPct) return fromApi(rungs.deltaPct);
+    if (rungs.prior) return pctDelta(curr, fromPrior(rungs.prior));
+    return null;
+  };
+
   // Funnel: every stage is distinct leads (monotonic: contacted ≥ connected ≥ qualified ≥ appt), with
   // the canonical wordings. Falls back to activity volumes only when no agent carries leadFunnel.
   const funnel = hasLeadFunnel
     ? [
-        { label: "Leads reached", value: lf((f) => f.contacted) },
+        { label: "Leads reached", value: leads },
         { label: "Real conversations", value: conversations },
         { label: "Qualified leads", value: qualified },
         { label: "Appointments — AI-booked", value: appointments },
@@ -439,6 +622,7 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     leads,
     conversations,
     qualified,
+    rungsAreDistinct: rungs != null,
     appointments,
     // Derived from the two direction splits rather than from unattributedAppointments directly, so it is
     // whatever the breakdown ACTUALLY leaves over — it cannot drift from the rows beside it.
@@ -453,6 +637,10 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     queryResolutionRate,
     responseTimeSec,
     stlEnabled,
+    /* A small residual over-count survives here by necessity when the rungs ARE distinct: the
+       denominator is the rooftop's distinct conversations, but `transfers` is agent-summed and the API
+       serves no rooftop equivalent, so a lead both agents transferred is subtracted twice. Bounded by
+       the cross-agent overlap and in the conservative direction (the ratio reads low, never high). */
     handledEndToEndPct: conversations > 0 ? Math.max(0, Math.round(((conversations - transfers) / conversations) * 100)) : null,
     afterHours,
     talkMinutes,
@@ -466,10 +654,10 @@ export function aggregateFleet(agents: AgentData[], prior?: Record<string, Basis
     answerRateInbound: inboundCalls ? Math.round((inboundAnswered / inboundCalls) * 100) : null,
     deltas: {
       appointments: pctDelta(appointments, pSum((b) => b.appointments)),
-      leads: pctDelta(leads, pSum((b) => b.leads)),
+      leads: rungDelta(leads, (d) => d.leadsAttempted, (p) => p.leadsAttempted, (b) => b.leads),
       calls: pctDelta(calls, pSum((b) => b.calls)),
-      conversations: pctDelta(conversations, pSum((b) => b.conversations)),
-      qualified: pctDelta(qualified, pSum((b) => b.qualified)),
+      conversations: rungDelta(conversations, (d) => d.engaged, (p) => p.engaged, (b) => b.conversations),
+      qualified: rungDelta(qualified, (d) => d.qualified, (p) => p.qualified, (b) => b.qualified),
       sms: pctDelta(smsSent, pSum((b) => b.sms)),
       handoffs: pctDelta(handoffs, pSum((b) => (b.transfers ?? 0) + (b.callbacks ?? 0))),
       talkMinutes: pctDelta(talkMinutes, pSum((b) => b.talkMinutes ?? 0)),
@@ -557,6 +745,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
         /* This object is an explicit ALLOW-LIST, not a spread — a field the server adds is dropped
            here unless it is named. */
         capturedAfterHours: typeof j.capturedAfterHours === "number" ? j.capturedAfterHours : undefined,
+        rooftop: normalizeRooftop(j.rooftop),
         start: j.start,
         end: j.end,
         timezone: j.timezone ?? null,

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { parseReportTs } from "@/lib/reports/storeTime";
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
@@ -1544,16 +1545,33 @@ export function HighlightRow({ kind, text, value }: { kind: "win" | "miss"; text
  * The list of leads behind an appointment count, and the upcoming-bookings card. `MeetingsList` is the
  * shared row renderer; `MeetingsModal` is the click-through that self-fetches via /api/meetings. */
 
-// Format a meeting's ISO start time in the meeting's own timezone, e.g. "Mon, Jun 16 · 2:30 PM".
+/* Format a meeting's start time in the rooftop's timezone, e.g. "Mon, Jun 16 · 2:30 PM".
+ *
+ * parseReportTs, not `new Date(iso)`: half the rows reaching this come from ClickHouse as a NAIVE
+ * "YYYY-MM-DD HH:MM:SS" with no zone marker, which `new Date` reads as the VIEWER's local time — so the
+ * snapshot path was shifting by whatever offset the person reading it happened to be in, on top of the
+ * tz bug. The other three formatters in the report already carried this normaliser; this one did not.
+ *
+ * The catch arm is Intl with no timeZone (browser-local) rather than UTC, unlike storeTime.ts's helpers.
+ * That is only reached on a malformed IANA string, and changing it is not part of this fix. */
 function formatMeetingWhen(iso: string, tz?: string | null): string {
   if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  const d = parseReportTs(iso);
+  if (!d) return iso;
   const opts: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  /* NO ZONE → UTC, NEVER THE VIEWER'S. `timeZone: undefined` means the BROWSER's zone, which would make
+     this string depend on who is looking: a CSM in Bengaluru and the dealer in California would read
+     different times off the same row, and neither would be labelled. That is strictly worse than being
+     uniformly UTC, and it is a live path — /api/meetings/route.ts toMeeting still emits `tz: null`.
+     It also matters more since parseReportTs landed here: a naive ClickHouse "YYYY-MM-DD HH:MM:SS" used
+     to be parsed as viewer-local AND formatted viewer-local, so the digits round-tripped unchanged and
+     the output happened to be viewer-independent. Parsing as UTC (correct) while formatting local is
+     not. Falling back to UTC restores viewer-independence and matches lib/reports/storeTime.ts, whose
+     documented degradation is the UTC wall-clock. */
   try {
-    return new Intl.DateTimeFormat("en-US", { ...opts, timeZone: tz || undefined }).format(d);
+    return new Intl.DateTimeFormat("en-US", { ...opts, timeZone: tz || "UTC" }).format(d);
   } catch {
-    return new Intl.DateTimeFormat("en-US", opts).format(d);
+    return new Intl.DateTimeFormat("en-US", { ...opts, timeZone: "UTC" }).format(d);
   }
 }
 function meetingStatusColor(s: string): string {

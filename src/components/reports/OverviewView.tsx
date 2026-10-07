@@ -36,7 +36,7 @@ import {
 } from "@/components/reports/kitV3";
 import { useScenario, type ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
-import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser } from "@/components/reports/liveData";
+import { fetchAgents, fetchActionItems, fetchActionItemStats, fetchConversations, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, rooftopRungsFor, workedByBoth, addDay, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ActionItem, type ActionItemStats, type ActionItemCloser } from "@/components/reports/liveData";
 import { useDateRange, useVariant, reportNavQuery, type Dept } from "@/components/reports/dateRange";
 import { exportRoiPdf } from "@/components/reports/roiPdf";
 import type { QualifiedLead } from "@/app/api/reports/qualified-leads/route";
@@ -52,6 +52,17 @@ const OVERVIEW_SECTION_IDS = ["value", "agents", "work"];
 // Customize manifest for the NEW Live overview — ids/labels come straight from LiveOverview so they can
 // never drift from what actually renders.
 const LIVE_SECTION_IDS = LIVE_SECTIONS.map((s) => s.id);
+
+/* The "Worked by both" row for a tile whose headline is a DISTINCT lead count over an Inbound/Outbound
+   split that is still agent-summed (there is no canonical per-direction rooftop figure to fix the split
+   with — the overview is fetched without a `direction`). Computed from the two values the tile actually
+   renders, so it can never drift from the rows beside it. undefined — the row is simply absent — when
+   they already add up, which is every rooftop with no cross-agent overlap and every scope where the
+   rungs fell back to summing. */
+const overlapRow = (total: number, inbound: number, outbound: number): string | undefined => {
+  const n = workedByBoth(total, inbound, outbound);
+  return n > 0 ? fmtInt(n) : undefined;
+};
 
 // "internal" (/reports/ root) → the By-agent drill-down lives in the SAME iframe, keep navigating there
 // via router.push. "parent" (/overview/, standalone) → By-agent is a DIFFERENT parent-console iframe now,
@@ -207,15 +218,25 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
    * aggregateFleet sums each agent's after-hours CALLS, which answers "when is the phone ringing";
    * the "Captured after-hours" tile asks "how many CUSTOMERS did we catch while the floor was shut"
    * — a different question, and a lead-grain answer that is distinct rather than a sum of agents.
-   * Only for a SALES-scoped or whole-rooftop view: the canonical figure covers the sales agents, so
-   * handing it to a Service-only tile would credit it the wrong department's leads. */
+   *
+   * GATE TIGHTENED (was `dept !== "service"`): the same rooftopRungsFor() scope check the three
+   * distinct rungs now use. The old gate let a dept="all" view take the figure, but the canonical
+   * overview is fetched SALES-ONLY (route.ts) — so on a rooftop that also runs Service it put a
+   * sales-only customer count on a tile covering both departments. Same question, same answer, one
+   * rule. Called out rather than folded in: this changes what that tile shows on "All" for a
+   * Service-running rooftop (back to the agent-summed after-hours CALLS, today's Service behaviour). */
   const fleet = useMemo(() => {
-    const f = aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept));
+    const rungs = rooftopRungsFor(feed, dept, agents);
+    const f = aggregateFleet(agents, feed?.prior, unattributedApptsFor(feed, dept), assistedApptsFor(feed, dept), rungs);
     const rooftopAfterHours = feed?.capturedAfterHours;
-    return typeof rooftopAfterHours === "number" && dept !== "service"
+    return rungs && typeof rooftopAfterHours === "number"
       ? { ...f, afterHours: rooftopAfterHours }
       : f;
   }, [agents, feed, dept]);
+  /* "Qualified, not yet booked" — the canonical count, in scope only. Feeds the hero tile and the ROI
+   * PDF, both of which print that exact phrase. undefined when the gate is closed or the API did not
+   * serve it; both consumers have their own documented behaviour for that case. */
+  const qualifiedNotBooked = useMemo(() => rooftopRungsFor(feed, dept, agents)?.hotLeads, [feed, dept, agents]);
 
   const hasTeam = teamId !== "" || sampleMode;
 
@@ -439,18 +460,18 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                 serviceMetrics.ts's NO_TWIN_ON_OLD_OVERVIEW (single source for this decision — not
                 re-decided here). Hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
+              <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} overlap={overlapRow(fleet.leads, split.inbound.leads, split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
             )}
             {/* Real conversations — NO TWIN. ov-prod's Service Overview never reads realConversations at
                 all (see NO_TWIN_ON_OLD_OVERVIEW). Hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
+              <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} overlap={overlapRow(fleet.conversations, split.inbound.conversations, split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
             )}
             {/* Qualified leads — no service-metrics twin (Classification stays available:false pending
                 RETCONVAI-5010). Hidden rather than shown from the old ClickHouse source once the flag is on,
                 so this page never shows a number the new page can't back. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.qualified" ctrl={ctrl}><ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} delta={fleet.deltas.qualified} accent="violet" subtext={<>concrete buying intent</>} /></Hideable>
+              <Hideable id="tile.qualified" ctrl={ctrl}><ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} overlap={overlapRow(fleet.qualified, split.inbound.qualified, split.outbound.qualified)} delta={fleet.deltas.qualified} accent="violet" subtext={<>concrete buying intent</>} /></Hideable>
             )}
             <Hideable id="tile.appts" ctrl={ctrl}>
               {serviceMetricsOn ? (
@@ -583,7 +604,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                           <div className="min-w-0">
                             <p className="truncate text-[12.5px] font-semibold text-[#111]">{a.customer}{a.vehicle ? <span className="ml-2 text-[10.5px] font-normal text-[#9ca3af]">{a.vehicle}</span> : null}</p>
                           </div>
-                          <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when) : ""}</p>
+                          <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when, feed?.timezone) : ""}</p>
                         </div>
                       ))
                     : namedAppts.slice(0, 6).map((a, i) => (
@@ -592,7 +613,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                             <p className="truncate text-[12.5px] font-semibold text-[#111]">{a.customer}{a.vehicle ? <span className="ml-2 text-[10.5px] font-normal text-[#9ca3af]">{a.vehicle}</span> : null}</p>
                             <p className="truncate text-[10.5px] font-medium" style={{ color: a.assisted ? "#6d28d9" : "#059669" }}>{a.how}</p>
                           </div>
-                          <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{fmtWhenShort(a.when)}</p>
+                          <p className="flex-none text-[11px] tabular-nums text-[#6b7280]">{fmtWhenShort(a.when, feed?.timezone)}</p>
                         </div>
                       ))}
                   {!serviceMetricsOn && namedAppts.length > 6 && <p className="text-[11px] font-semibold text-[#9ca3af]">+{namedAppts.length - 6} more on the Appointments tab</p>}
@@ -621,7 +642,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                               <p className="truncate text-[12.5px] font-semibold text-[#111]">{it.customer}</p>
                               <p className="truncate text-[10.5px] text-[#6b7280]">{it.what}</p>
                             </div>
-                            <p className={`flex-none text-[11px] tabular-nums ${it.isLate ? "text-[#dc2626]" : "text-[#6b7280]"}`}>{it.due ? fmtWhenShort(it.due) : ""}</p>
+                            <p className={`flex-none text-[11px] tabular-nums ${it.isLate ? "text-[#dc2626]" : "text-[#6b7280]"}`}>{it.due ? fmtWhenShort(it.due, feed?.timezone) : ""}</p>
                           </div>
                         ))}
                       </div>
@@ -677,8 +698,17 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
       if (spyneToken) qs.set("auth_key", spyneToken);
       if (spyneEnv) qs.set("env", spyneEnv);
 
+      /* "QUALIFIED, NOT YET BOOKED" — AND NOTHING ELSE UNDER THAT LABEL.
+         This used to be seeded from `fleet.qualified`, which is ALL qualified leads: on any failed
+         fetch the PDF printed every lead who had ALREADY BOOKED as still-unbooked pipeline, beside the
+         bookings themselves in the next stat column, with an empty named list at the back — a document
+         that contradicts itself in a CSM's hand. That is a DIFFERENT metric, not a stale one, so there
+         is no fallback to it. Order: the endpoint's own total, then the canonical count already on the
+         feed (same definition, scope-checked), then null — and roiPdf drops the stat and both
+         sentences rather than print a number under a label it does not mean. A missing number in a
+         dealer-facing document is recoverable; a confident wrong one is not. */
       let qualified: QualifiedLead[] = [];
-      let qualifiedTotal = fleet.qualified;
+      let qualifiedTotal: number | null = qualifiedNotBooked ?? null;
       try {
         const r = await fetch(`/api/reports/qualified-leads?${qs}`);
         if (r.ok) {
@@ -692,6 +722,9 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
         accountName: account.name, periodLabel, dept, fleet,
         namedAppts, qualified, qualifiedTotal,
         tzLabel: feed.timezone ? tzShortLabel(feed.timezone) : undefined,
+        // The IANA zone itself — tzLabel ("PDT") is prose, Intl needs the zone. Without this the PDF
+        // printed a Pacific 8:30 PM appointment as "Oct 6 · 3:30 AM".
+        tz: feed.timezone ?? null,
       });
     } finally {
       setExporting(false);
@@ -797,8 +830,13 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                   serviceMode={dept === "service"}
                   variant={variant}
                   serviceMetricsOverlay={serviceMetricsOn ? svcMetrics : null}
+                  qualifiedNotBooked={qualifiedNotBooked}
                   warmLeads={warmLeads}
                   namedAppts={namedAppts}
+                  /* The rooftop's zone for every appointment time, day heading, day grouping and the
+                     "upcoming" cutoff inside the cards. null (no Spyne token / tz lookup failed) → the
+                     cards render in UTC exactly as they did before. */
+                  tz={feed?.timezone ?? null}
                   aiStats={aiStats}
                   workItems={createdWork}
                   onOpenAgent={openAgent}
@@ -862,7 +900,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                     <span className="font-semibold text-[#111]">{a.customer}</span>
                     {a.vehicle && <span className="ml-2 text-[11px] text-[#6b7280]">{a.vehicle}</span>}
                   </div>
-                  <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when) : ""}</span>
+                  <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{a.when ? fmtWhenShort(a.when, feed?.timezone) : ""}</span>
                 </div>
               ))}
             </div>
@@ -870,7 +908,7 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
             <p className="text-[12.5px] text-[#6b7280]">No appointment details for {periodLabel} yet — the counts above are correct; the named list syncs shortly.</p>
           )
         ) : namedAppts.length > 0 ? (
-          <NamedApptsTable items={namedAppts} teamId={teamId} />
+          <NamedApptsTable items={namedAppts} teamId={teamId} tz={feed?.timezone} />
         ) : (
           <p className="text-[12.5px] text-[#6b7280]">No appointment details for {periodLabel} yet — the counts above are correct; the named list syncs shortly.</p>
         )}

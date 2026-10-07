@@ -520,7 +520,7 @@ export const REPORTS: ReportDef[] = [
             <RankBars rows={byAgent} accent="#15803d" />
           </Card>
           <Card title="Booked appointments" sub={`${c.namedAppts.length} named customers · ${c.periodLabel}`} pad={false}>
-            <NamedApptsTable items={c.namedAppts} teamId={c.teamId} />
+            <NamedApptsTable items={c.namedAppts} teamId={c.teamId} tz={c.timezone} />
           </Card>
         </div>
       );

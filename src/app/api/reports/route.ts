@@ -509,6 +509,7 @@ export async function GET(request: Request): Promise<Response> {
     breakdown: (bd.data ?? []) as BreakdownRow[],
     priorDaily: pri,
     callbacks,
+    timezone, // the one server-formatted timestamp (callback `due`) — null → UTC, as before
     campaigns,
     outcomes,
     namedAppointments: windowedAppointments,

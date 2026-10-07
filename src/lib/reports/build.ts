@@ -8,7 +8,8 @@
  * pages keep calling aggregateFleet(agents, prior). */
 
 import { AGENTS as MOCK_AGENTS, type AgentData, type NamedAppt, type WarmLeadItem } from "@/components/reports/data";
-import type { FetchResult, Basis } from "@/components/reports/liveData";
+import { fmtWhenShortIn } from "./storeTime";
+import type { FetchResult, Basis, RooftopRungs } from "@/components/reports/liveData";
 import type { CanonicalOverview, CanonicalHotLeads, CanonicalLeadSources } from "@/lib/spyne/consoleReports";
 import { toLeadsBySource } from "@/lib/spyne/consoleReports";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "./schema";
@@ -95,6 +96,9 @@ export interface BuildInput {
   priorDaily: AgentDailyRow[]; // prior equal-length window, this team (basis for deltas)
   // rooftop-level detail (fed from ClickHouse by scripts/backfill.ts); attached to the relevant agents below.
   callbacks?: CallbackRow[];
+  /* The rooftop's IANA timezone, for the one server-formatted timestamp below (callback `due`).
+   * Optional and null-tolerant — absent → UTC, the previous behaviour. */
+  timezone?: string | null;
   campaigns?: CampaignRow[];
   // Outbound disposition mix (from card 12231 via report_outcomes); attached to the matching outbound
   // agent. Replaces the dead Q12227 `outbound_outcome` path (that column never existed in Q12227).
@@ -133,17 +137,18 @@ export interface BuildInput {
 // canonical: apptLeads = AI-booked (source='spyne', PRIMARY); apptLeadsAssisted = AI-assisted (CRM, SECONDARY).
 export type LeadCounts = Record<string, { contacted: number; dialed: number; connected: number; qualified: number; apptLeads: number; apptLeadsAssisted: number; transferLeads: number; transferFailedLeads: number }>;
 
-// Format an ISO timestamp as a short, locale-stable "when" label (e.g. "Jun 11 · 9:30 AM" UTC).
-function fmtWhen(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "—";
-  const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
-  let h = d.getUTCHours();
-  const m = d.getUTCMinutes().toString().padStart(2, "0");
-  const ap = h >= 12 ? "PM" : "AM";
-  h = h % 12 || 12;
-  return `${mon} ${d.getUTCDate()} · ${h}:${m} ${ap}`;
+/* Format a timestamp as a short "when" label (e.g. "Jun 11 · 9:30 AM") IN THE STORE'S ZONE.
+ *
+ * Sole caller: the callback/follow-up `due` below. Pre-formatting a timestamp on the SERVER is itself the
+ * defect here — once it is a string the client can no longer re-zone it — so the zone has to be applied
+ * at this point or not at all. Appointment rows are deliberately NOT formatted here (they pass
+ * meeting_start through raw and the client formats them), which is why this is the follow-up surface and
+ * not the appointment one.
+ *
+ * Null timezone → UTC, exactly as before. NOTE nothing in the UI currently renders report.followUps, so
+ * this change has no visible signal; it is here for correctness, not for a screenshot. */
+function fmtWhen(iso: string | null, tz?: string | null): string {
+  return fmtWhenShortIn(iso, tz);
 }
 
 // The card sends `vehicle` as a JSON-encoded array of VIN/identifier strings — "[]" when empty,
@@ -161,7 +166,52 @@ function fmtVehicle(raw: string | null | undefined): string {
   return s;
 }
 
-export function buildResult({ canonical, canonicalHotLeads, canonicalLeadSources, daily, breakdown, priorDaily, callbacks, campaigns, outcomes, namedAppointments, apptDayCounts, warmLeads, onboardedSlots, onboardedNames, onboardedPhotos, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
+/* THE CANONICAL ROOFTOP RUNGS, PUBLISHED TO THE CLIENT WITH THE SCOPE THEY WERE MEASURED OVER.
+ *
+ * These are DISTINCT lead counts: the rooftop's own answer, not the sum of the agent rows, which
+ * double-counts every lead two agents both worked (consoleReports.ts: 326 contacts over-counted on the
+ * reference rooftop; 17 qualified on team 3d3deabc98). The client cannot derive them — only the API
+ * knows which leads overlap — so this is the one place they can enter the payload.
+ *
+ * `dept` and `agentTypes` ride along because the figures are NOT rooftop-wide. The overview is fetched
+ * for dept="sales" only (route.ts) and the per-agent overlay is matched by agentType, so Service agents
+ * keep the aggregate's own numbers. A client that substituted this triple into a dept="all" view of a
+ * Service-running rooftop would delete every Service lead from the rung. Carrying the scope lets
+ * rooftopRungsFor() check the agents on screen against the agents the API actually counted, instead of
+ * trusting a department string — and it self-maintains if the backend is later asked for another dept.
+ *
+ * agentTypes is narrowed to agents with lead activity: an agent the API counted as all-zero cannot move
+ * the rooftop number, so whether the caller renders it is irrelevant, and demanding its presence would
+ * close the gate over a declared-but-idle agent for no reason. The null check is explicit rather than a
+ * `> 0` truthiness test — the sibling canonical types use `number | null`, and a null slipping through
+ * would quietly shrink the covered set and open the gate over an agent the API did not count.
+ *
+ * Same contract as capturedAfterHours below: entirely absent when the canonical call did not land, so
+ * the no-API path is byte-identical to what shipped. */
+function rooftopRungs(canonical: CanonicalOverview | null | undefined, hot: CanonicalHotLeads | null | undefined): RooftopRungs | undefined {
+  if (!canonical) return undefined;
+  /* `degraded` names what the API could NOT serve. The exact vocabulary is not visible from this repo,
+     so this matches the field names we read and is a no-op otherwise — it can only ever fail closed
+     (back to summing), never open. */
+  const broken = new Set(canonical.degraded ?? []);
+  if (["rooftop", "leadsAttempted", "engaged", "qualified"].some((k) => broken.has(k))) return undefined;
+  const prev = canonical.previous;
+  return {
+    dept: canonical.dept,
+    agentTypes: canonical.agents.filter((a) => typeof a.leadsAttempted === "number" && a.leadsAttempted > 0).map((a) => a.agentType),
+    leadsAttempted: canonical.rooftop.leadsAttempted,
+    engaged: canonical.rooftop.engaged,
+    qualified: canonical.rooftop.qualified,
+    prior: prev ? { leadsAttempted: prev.rooftop.leadsAttempted, engaged: prev.rooftop.engaged, qualified: prev.rooftop.qualified } : undefined,
+    deltaPct: prev ? { leadsAttempted: prev.deltaPct.rooftop.leadsAttempted, engaged: prev.deltaPct.rooftop.engaged, qualified: prev.deltaPct.rooftop.qualified } : undefined,
+    /* "Qualified, not yet booked", served rather than subtracted — the hero tile and the ROI PDF both
+       print that exact phrase. Its own degraded array gates it independently: a missing hot-lead count
+       must not cost the rooftop its three rungs. */
+    hotLeads: hot && !(hot.degraded ?? []).includes("count") && typeof hot.count === "number" ? hot.count : undefined,
+  };
+}
+
+export function buildResult({ canonical, canonicalHotLeads, canonicalLeadSources, daily, breakdown, priorDaily, callbacks, timezone, campaigns, outcomes, namedAppointments, apptDayCounts, warmLeads, onboardedSlots, onboardedNames, onboardedPhotos, leadCounts, priorLeadCounts, sourceCounts }: BuildInput): FetchResult {
   /* "Do we have numbers for this window?" — NOT "does the aggregate have rows?".
    *
    * Once the canonical API supplies the rungs, a rooftop can be fully populated with an empty
@@ -176,7 +226,7 @@ export function buildResult({ canonical, canonicalHotLeads, canonicalLeadSources
   // service → service) — a service-heavy rooftop's callbacks must not leak onto the Sales cards.
   const callbackItems = (callbacks ?? []).map((c) => ({
     serviceType: (c.service_type ?? "").toLowerCase(),
-    customer: c.customer_name ?? "—", due: fmtWhen(c.callback_due), intent: c.intent ?? "", priority: c.priority ?? "",
+    customer: c.customer_name ?? "—", due: fmtWhen(c.callback_due, timezone), intent: c.intent ?? "", priority: c.priority ?? "",
   }));
   const campaignItems = (campaigns ?? []).map((c) => ({
     agentType: c.agent_type, name: c.campaign, useCase: c.use_case ?? "", enrolled: c.enrolled, appts: c.appointments,
@@ -775,6 +825,7 @@ export function buildResult({ canonical, canonicalHotLeads, canonicalLeadSources
     hasData,
     fetchedAt: Date.now(),
     capturedAfterHours: canonical?.rooftop.capturedAfterHours,
+    rooftop: rooftopRungs(canonical, canonicalHotLeads),
     prior,
     namedAppointments: namedApptsOut.length ? namedApptsOut : undefined,
     warmLeads: warmLeadsOut.length ? warmLeadsOut : undefined,
