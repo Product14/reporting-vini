@@ -3,6 +3,7 @@ import { getStoreTimeZone } from "@/lib/spyne/teamContext";
 
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { getSupabase, AGENT_LEAD_DAYS, REPORT_APPOINTMENTS } from "@/lib/reports/supabase";
+import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket, Meeting } from "@/components/reports/data";
 
@@ -282,12 +283,15 @@ export async function GET(request: Request): Promise<Response> {
     const rows = scope === "upcoming"
       ? await sbAppointments(teamId, service, "upcoming", startISO, endISO)
       : await sbAppointments(teamId, service, "window", bookedStartISO as string, bookedEndISO as string);
-    if (rows && rows.length) {
-      return Response.json({ meetings: rows, total: rows.length }, { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } });
+    /* Cancelled bookings are not listed (appointmentStatus.ts). The snapshot SQL already drops them; this
+     * covers rows synced before that change. scope=recent is the event poller's read and keeps its rows. */
+    const listed = rows && scope !== "recent" ? rows.filter((m) => !isCancelledMeeting(m.status)) : rows;
+    if (listed && listed.length) {
+      return Response.json({ meetings: listed, total: listed.length }, { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } });
     }
   }
 
-  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId, token: spyneToken, env: spyneEnv });
+  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId, token: spyneToken, env: spyneEnv, includeCancelled: scope === "recent" });
   /* `result.error` means the live Spyne call itself failed (bad/expired token, Spyne outage, …) — NOT
    * that the rooftop genuinely has zero appointments. Both used to render identically as `{meetings:
    * [], total: 0}`, which is exactly what let a dead token look like "no bookings anywhere" fleet-wide

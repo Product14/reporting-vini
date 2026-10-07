@@ -9,6 +9,7 @@
 
 import { spyneGet, resolveToken, decodeTokenPayload } from "./client";
 import { runClickhouse, chEsc, hasClickhouseCreds } from "./clickhouse";
+import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
 import type { Meeting, MeetingsResult } from "@/components/reports/data";
 
 export type ServiceType = "sales" | "service";
@@ -244,8 +245,12 @@ export async function fetchMeetings(opts: {
   enterpriseId?: string | null; // explicit override (host-forwarded on the URL); else decoded from token
   token?: string | null;
   env?: string | null; // host-forwarded ?env=uat|stag|prod — which Spyne backend to call
+  /* Keep cancelled bookings in the result. Off by default: every report list sits under a count that
+   * excludes them (appointmentStatus.ts). Only scope=recent turns it on, so the appointment-event poller
+   * (vini-daily-calls) keeps reading the live feed exactly as before. */
+  includeCancelled?: boolean;
 }): Promise<MeetingsResult> {
-  const { teamId, service, startISO, endISO, sortOrder = "asc", bookedStartISO, bookedEndISO, leadIds, token, env } = opts;
+  const { teamId, service, startISO, endISO, sortOrder = "asc", bookedStartISO, bookedEndISO, leadIds, token, env, includeCancelled = false } = opts;
   // Prefer an explicit enterpriseId (the host scopes the iframe with ?enterprise_id=&team_id=). Fall back
   // to decoding it from the token — both point at the same rooftop in prod; the override lets local dev
   // (one shared token) query any enterprise/team the token is allowed to read.
@@ -269,6 +274,9 @@ export async function fetchMeetings(opts: {
     // we did not create (see dropPulledInHistoryMeetings). Applied here so every branch's `total` and every
     // listed row honour it.
     let meetings = await dropPulledInHistoryMeetings(teamId, results.flatMap((r) => r.meetings));
+    // Drop cancelled bookings here too, BEFORE the one-row-per-lead pick below — otherwise a lead holding
+    // a cancelled booking and a live one could be listed by the cancelled row.
+    if (!includeCancelled) meetings = meetings.filter((m) => !isCancelledMeeting(m.status));
     // `total` is the count the modal headlines. Defaults to the rows we list; the lead-scoped drill
     // overrides it with the authoritative booked-lead count so the number matches the tile even if a
     // lead's live meeting record didn't come back (deleted/rescheduled/non-spyne after Q12227 captured it).

@@ -18,6 +18,7 @@ import { CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCar
 import type { ReportVariant } from "@/components/reports/dateRange";
 import type { EvalOutcomes, EvalDirection } from "@/lib/spyne/evalPipeline";
 import type { AgentData, NamedAppt, WarmLeadItem } from "@/components/reports/data";
+import { closeRateParts, fleetCloseRateParts } from "@/components/reports/data";
 import { fetchConversations, type FetchResult, type FleetLive, type ActionItem, type ActionItemStats, type ReportMetrics, type Conversation } from "@/components/reports/liveData";
 import type { InsightsPayload } from "@/app/api/reports/insights/route";
 import type { DrillLead } from "@/app/api/reports/lead-drill/route";
@@ -90,6 +91,12 @@ export interface ReportDef {
  * space. Service runs an inbound and an outbound agent exactly as sales does, and both deserve the same
  * reports. */
 const scopedAgents = (c: ReportCtx) => c.agents;
+/* An agent on the Reports close-rate basis (Service, route.ts applyCustomerBasis): its conversations and
+ * qualified read the window-distinct customer counts the Agent report card shows, so the two tabs agree.
+ * Every other agent keeps the figures this library always showed. */
+const onBasis = (a: AgentData) => a.leadFunnel?.bookedLeads != null;
+const convOf = (a: AgentData) => (onBasis(a) ? a.leadFunnel!.connected : a.metrics.conversations);
+const qualOf = (a: AgentData) => (onBasis(a) ? a.leadFunnel!.qualified : a.metrics.qualified);
 const inboundAgent = (c: ReportCtx) => c.agents.find((a) => a.dir === "Inbound");
 const outboundAgent = (c: ReportCtx) => c.agents.find((a) => a.dir === "Outbound");
 /* report_objections carries two kinds of row. `theme` = what customers actually pushed back on.
@@ -513,7 +520,7 @@ export const REPORTS: ReportDef[] = [
               { label: "Booked by the AI", value: fmtInt(c.fleet.appointments), sub: "confirmed in your CRM", accent: "#15803d" },
               { label: "Booked after an AI conversation", value: fmtInt(c.fleet.appointmentsAssisted), sub: "your team closed these" },
               { label: "Qualified leads", value: fmtInt(c.fleet.qualified), sub: "showed buying intent" },
-              { label: "Close rate", value: fmtRate(c.fleet.appointments, c.fleet.qualified), sub: "appointments ÷ qualified leads", accent: "#813fed" },
+              { label: "Close rate", value: fmtRate(fleetCloseRateParts(c.agents, c.fleet).booked, fleetCloseRateParts(c.agents, c.fleet).qualified), sub: "appointments ÷ qualified leads", accent: "#813fed" },
             ]}
           />
           <Card title="Who booked them" sub="Appointments by agent">
@@ -747,7 +754,7 @@ export const REPORTS: ReportDef[] = [
               { label: "Hot leads waiting", value: fmtInt(hot.length), sub: "buying intent, no appointment", accent: "#dc2626" },
               { label: "Warm leads", value: fmtInt(c.warmLeads.length - hot.length), sub: "worth a follow-up", accent: "#d97706" },
               { label: "Qualified this period", value: fmtInt(c.fleet.qualified) },
-              { label: "Booked", value: fmtInt(c.fleet.appointments), sub: fmtRate(c.fleet.appointments, c.fleet.qualified) + " of qualified", accent: "#15803d" },
+              { label: "Booked", value: fmtInt(c.fleet.appointments), sub: fmtRate(fleetCloseRateParts(c.agents, c.fleet).booked, fleetCloseRateParts(c.agents, c.fleet).qualified) + " of qualified", accent: "#15803d" },
             ]}
           />
           {c.warmLeads.length > 0 && (
@@ -911,10 +918,10 @@ export const REPORTS: ReportDef[] = [
             rows={scopedAgents(c).map((a) => [
               <span key="n" className="font-semibold text-[#111]">{a.report.summary.person || a.name} <span className="font-normal text-[#9ca3af]">· {a.dir}</span></span>,
               fmtInt(a.leadFunnel?.contacted ?? a.report.leadsAttempted),
-              fmtInt(a.metrics.conversations),
-              fmtInt(a.metrics.qualified),
+              fmtInt(convOf(a)),
+              fmtInt(qualOf(a)),
               <b key="a" style={{ color: a.metrics.appointments ? "#15803d" : "#9ca3af" }}>{fmtInt(a.metrics.appointments)}</b>,
-              fmtRate(a.metrics.appointments, a.metrics.qualified),
+              onBasis(a) ? fmtRate(closeRateParts(a).booked, closeRateParts(a).qualified) : fmtRate(a.metrics.appointments, a.metrics.qualified),
               fmtDuration(a.metrics.talkMinutes),
             ])}
           />
@@ -924,8 +931,8 @@ export const REPORTS: ReportDef[] = [
             <StepFunnel
               stages={[
                 { label: a.dir === "Inbound" ? "Leads reached" : "Leads dialled", value: a.leadFunnel?.contacted ?? a.report.leadsAttempted },
-                { label: "Real conversations", value: a.metrics.conversations },
-                { label: "Qualified", value: a.metrics.qualified },
+                { label: "Real conversations", value: convOf(a) },
+                { label: "Qualified", value: qualOf(a) },
                 { label: "Appointments", value: a.metrics.appointments },
               ]}
             />
@@ -1953,7 +1960,7 @@ export function reportSheets(report: ReportDef, c: ReportCtx): ExportSheet[] {
     case "agent-scorecard":
       sheets.push({ name: "Agents", rows: [["Agent", "Direction", "Leads", "Conversations", "Qualified", "Appointments", "Talk minutes"],
         ...scopedAgents(c).map((a) => [a.report.summary.person || a.name, a.dir,
-          a.leadFunnel?.contacted ?? a.report.leadsAttempted, a.metrics.conversations, a.metrics.qualified,
+          a.leadFunnel?.contacted ?? a.report.leadsAttempted, convOf(a), qualOf(a),
           a.metrics.appointments, a.metrics.talkMinutes])] });
       break;
 

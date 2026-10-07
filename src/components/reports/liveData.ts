@@ -146,6 +146,10 @@ export interface LiveOpts {
   force?: boolean; // bypass the cache (used by the Refresh button)
   spyneToken?: string; // host-forwarded Spyne API token (prod); omit locally (server uses env)
   spyneEnv?: string; // host-forwarded ?env=uat|stag|prod — which Spyne backend the server should call
+  // Reports > Agent performance only: Service close rate as booked customers ÷ qualified customers, with
+  // callbacks on Outbound (route.ts applyCustomerBasis). Part of the cache key, so the Overview's
+  // response and this one never stand in for each other.
+  closeBasis?: "customers";
 }
 
 // Minimal per-agent totals for the prior equal-length window — the basis for real period deltas.
@@ -676,7 +680,8 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
  * range) because the server now resolves the actual dates in the store's timezone — the client no
  * longer knows the exact window up front. Custom date-picker ranges key by their explicit dates. */
 function cacheKeyFor(teamId: string, opts: LiveOpts): string {
-  return opts.start && opts.end ? `${teamId}|${opts.start}|${opts.end}` : `${teamId}|b:${opts.bucket ?? "last30"}`;
+  const key = opts.start && opts.end ? `${teamId}|${opts.start}|${opts.end}` : `${teamId}|b:${opts.bucket ?? "last30"}`;
+  return opts.closeBasis ? `${key}|basis:${opts.closeBasis}` : key;
 }
 
 /* Synchronously read a cached window without touching the network — lets the UI paint instantly when
@@ -706,6 +711,7 @@ export async function fetchAgents(opts: LiveOpts = {}): Promise<FetchResult> {
     ? { team_id: teamId, start: opts.start, end: opts.end }
     : { team_id: teamId, bucket: opts.bucket ?? "last30" };
   if (opts.spyneEnv) query.env = opts.spyneEnv;
+  if (opts.closeBasis) query.close_basis = opts.closeBasis;
 
   // Forward the host's Spyne token (prod) as a Bearer header so /api/reports can resolve timezone +
   // onboarded agents. Omitted locally → the server falls back to its env token.

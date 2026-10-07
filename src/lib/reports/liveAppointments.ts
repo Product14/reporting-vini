@@ -20,9 +20,14 @@
  * DEFINITIONS ARE ALREADY IDENTICAL, so this changes freshness and nothing else. Verified id-for-id on
  * Honda Universe (team 5895de05b): the API's source='spyne' set is exactly our rule — meetings.source
  * 'spyne' minus meta.source 'warm_transfer' and 'callback' — 326 = 326, with no row on either side the
- * other lacks. The API applies those exclusions server-side and does not expose meta.source. */
+ * other lacks. The API applies those exclusions server-side and does not expose meta.source.
+ *
+ * CANCELLED BOOKINGS ARE DROPPED HERE (2026-10-06), client-side, because the API returns them under
+ * source=spyne like any other — the same exclusion the spine and the snapshot apply (appointmentStatus.ts).
+ * Without it the tile kept a cancelled booking that its own drill-down listed in red. */
 import { spyneGet } from "@/lib/spyne/client";
 import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
+import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
 import type { Meeting } from "@/components/reports/data";
 
 /** agent_type label the report uses, e.g. "Service Outbound". Null when the API omitted agentData. */
@@ -54,6 +59,23 @@ export function countByAgent(meetings: Meeting[], start: string, end: string): {
     else unattributed++;
   }
   return { byAgent, unattributed };
+}
+
+/* Distinct booked customers per agent_type over one sub-window, by the same day test and agent rule as
+ * countByAgent. A meeting with no lead id cannot be matched to another, so it is tallied separately as
+ * one customer each. Used for the Reports close-rate basis (route.ts applyCustomerBasis). */
+export function bookedLeadsByAgent(meetings: Meeting[], start: string, end: string): { leads: Record<string, Set<string>>; noLead: Record<string, number> } {
+  const leads: Record<string, Set<string>> = {};
+  const noLead: Record<string, number> = {};
+  for (const m of meetings) {
+    const day = (m.bookedAt ?? "").slice(0, 10);
+    if (!day || day < start || day >= end) continue;
+    const at = agentTypeOf(m);
+    if (!at) continue;
+    if (m.leadId) (leads[at] ??= new Set()).add(m.leadId);
+    else noLead[at] = (noLead[at] ?? 0) + 1;
+  }
+  return { leads, noLead };
 }
 
 /* Bookings made in [start, end) — NOT appointments scheduled in it. Those are different sets and the
@@ -137,7 +159,7 @@ export async function fetchLiveAppointments(opts: {
       const batch = Array.isArray(res.data) ? res.data : [];
       for (const r of batch) {
         const day = (r.createdAt ?? "").slice(0, 10);
-        if (day && day >= start && day < end) out.push(toMeeting(r));
+        if (day && day >= start && day < end && !isCancelledMeeting(r.status)) out.push(toMeeting(r));
       }
       // Sorted newest-booking-first, so once a page ends before the window we have everything.
       const oldest = batch.length ? (batch[batch.length - 1].createdAt ?? "").slice(0, 10) : "";

@@ -107,7 +107,11 @@ export function ReportLibraryPanel({ navQuery, onOpenAgent, initialReportId }: {
   const params = useSearchParams();
   const [openId, setOpenId] = useState<string | null>(initialReportId ?? params.get("report"));
 
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
+  // closeBasis: Reports reads the Service close rate on one basis (booked customers ÷ qualified, see
+  // closeRateParts); the Overview does not send it.
+  const rangeOpts = custom
+    ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv, closeBasis: "customers" as const }
+    : { bucket, spyneToken, spyneEnv, closeBasis: "customers" as const };
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
   const [metrics, setMetrics] = useState<ReportMetrics | null>(null);
   const [actionStats, setActionStats] = useState<ActionItemStats | null>(null);

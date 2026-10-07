@@ -21,6 +21,7 @@
  * change applied to only one side yields a report with populated tiles and empty lists.
  */
 import { resellerScope } from "./enterpriseScope";
+import { notCancelledSql } from "./appointmentStatus";
 
 const esc = (v: string): string => String(v ?? "").replace(/'/g, "''").replace(/\\/g, "\\\\");
 
@@ -171,6 +172,8 @@ campaign_appts AS (
       -- warm_transfer/callback rows are pre-existing appointments, not ones this campaign booked
       -- (see notPulledInHistory)
       AND ${notPulledInHistory("m")}
+      -- a cancelled booking is not a campaign appointment (see appointmentStatus.ts)
+      AND ${notCancelledSql("m")}
     GROUP BY ac.campaignId
 ),
 campaign_outcomes AS (
@@ -576,6 +579,8 @@ meet AS (
       AND (m.source = 'spyne' OR m.meeting_id IN (SELECT meeting_id FROM assist_hit))
       -- never list a warm_transfer/callback row: we didn't create it (see notPulledInHistory)
       AND ${notPulledInHistory("m")}
+      -- …nor a cancelled one, in either half: a cancelled booking is not a booking (appointmentStatus.ts)
+      AND ${notCancelledSql("m")}
       AND m.service_type IN ('sales','service')
       AND m.meeting_id IS NOT NULL AND m.meeting_id != ''
       AND toDate(m.created_at) >= ${startFloor}

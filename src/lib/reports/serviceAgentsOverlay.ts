@@ -37,6 +37,10 @@ export function applyServiceAgentNumbers(agent: AgentData, n: ServiceAgentNumber
         connected: pick(n.conversations, lf.connected),
         qualified: pick(n.wantedService, lf.qualified),
         appt: pick(n.booked, lf.appt),
+        // The route's booked-customers numerator belongs to the route's qualified count. Once Om's API
+        // supplies the denominator (wanted service — inbound only today), close rate is Om's booked ÷
+        // wanted service, so drop it; while qualified stays ours, so does the numerator.
+        bookedLeads: n.wantedService === null ? lf.bookedLeads : undefined,
       }
     : lf;
   const report = entry === null ? agent.report : { ...agent.report, leadsAttempted: entry };

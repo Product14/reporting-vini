@@ -31,6 +31,7 @@ import {
   TrendBars,
 } from "@/components/reports/kit";
 import { fmtRate, fmtWhenShort, IntentOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
+import { closeRateParts } from "@/components/reports/data";
 import { useScenario, ScenarioView } from "@/components/reports/scenario";
 import { ReportAccessDenied } from "@/components/reports/accessState";
 import { fetchAgents, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/components/reports/liveData";
@@ -90,7 +91,11 @@ function AgentReportsView() {
   // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
   // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents;
   // spyneEnv picks which Spyne backend (uat/stag/prod) those calls hit.
-  const rangeOpts = custom ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv } : { bucket, spyneToken, spyneEnv };
+  // closeBasis: Reports reads the Service close rate on one basis (booked customers ÷ qualified, see
+  // closeRateParts); the Overview does not send it.
+  const rangeOpts = custom
+    ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv, closeBasis: "customers" as const }
+    : { bucket, spyneToken, spyneEnv, closeBasis: "customers" as const };
   // Live agents for the selected rooftop, overlaid from Metabase. Seed from the client cache so
   // navigating back paints instantly instead of flashing a skeleton; null === nothing cached (cold).
   const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
@@ -405,7 +410,9 @@ function AgentReportsView() {
     { label: entryStage.label, value: scale(entryStage.value) },
     { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
     { label: qualLabel, value: scale(a.leadFunnel?.qualified ?? m.qualified) },
-    { label: "Appointments — AI-booked", value: scale(m.appointments) },
+    // The step into this stage is the close rate, so it reads the same booked basis (closeRateParts):
+    // booked customers ÷ qualified, not appointment records ÷ qualified customers.
+    { label: "Appointments — AI-booked", value: scale(m.appointments), convFrom: scale(closeRateParts(a).booked) },
   ];
   const outcomeTiles = [
     { label: "Real conversations", value: scale(leadConnected), accent: "#2563eb" },
@@ -436,7 +443,7 @@ function AgentReportsView() {
         ...(tzLabel ? [["Timezone", tzLabel]] : []),
         [],
         ["Metric", "Value"],
-        ["Close rate", fmtRate(scale(m.appointments), scale(leadQualified))],
+        ["Close rate", fmtRate(scale(closeRateParts(a).booked), scale(leadQualified))],
         ["Turn rate", fmtRate(scale(leadQualified), scale(leadConnected))],
         [inbound ? "Total calls" : "Calls dispatched", scale(m.calls)],
         ["Talk time (minutes)", scale(m.talkMinutes)],
@@ -464,7 +471,7 @@ function AgentReportsView() {
         ["Stage", funnelCountHeader, "Conversion from prior stage"],
         ...funnelStages.map((s, i) => {
           const prev = i > 0 ? funnelStages[i - 1].value : null;
-          const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "";
+          const conv = prev && prev > 0 ? `${Math.round((100 * stepNumerator(s)) / prev)}%` : "";
           return [s.label, s.value, conv];
         }),
       ],
@@ -649,7 +656,7 @@ function AgentReportsView() {
           {
             kind: "rows",
             rows: [
-              ["Close rate", fmtRate(scale(m.appointments), scale(leadQualified))],
+              ["Close rate", fmtRate(scale(closeRateParts(a).booked), scale(leadQualified))],
               ["Turn rate", fmtRate(scale(leadQualified), scale(leadConnected))],
               [inbound ? "Total calls" : "Calls dispatched", `${scale(m.calls)} (${scale(m.talkMinutes)} min talk)`],
               ["Total SMS", scale(m.smsSent)],
@@ -664,7 +671,7 @@ function AgentReportsView() {
         heading: "Lead-to-appointment funnel",
         blocks: [{ kind: "rows", columns: ["Stage", funnelCountHeader, "Conversion from prior stage"], rows: funnelStages.map((s, i) => {
           const prev = i > 0 ? funnelStages[i - 1].value : null;
-          const conv = prev && prev > 0 ? `${Math.round((100 * s.value) / prev)}%` : "—";
+          const conv = prev && prev > 0 ? `${Math.round((100 * stepNumerator(s)) / prev)}%` : "—";
           return [s.label, fmtInt(s.value), conv];
         }) }, { kind: "rows", title: "Call breakdown", rows: outcomeTiles.map((t) => [t.label, fmtInt(t.value)]) }],
       },
@@ -1111,7 +1118,7 @@ function AgentReportsView() {
                       Fraction (never a rounded "0%") when the numerator is real but rounds to zero. */}
                   <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
                 </div>
-                <p className="text-[32px] font-extrabold tabular-nums leading-none text-[#813fed]">{fmtRate(scale(m.appointments), scale(leadQualified))}</p>
+                <p className="text-[32px] font-extrabold tabular-nums leading-none text-[#813fed]">{fmtRate(scale(closeRateParts(a).booked), scale(leadQualified))}</p>
               </div>
             </div>
 
@@ -1137,7 +1144,7 @@ function AgentReportsView() {
                   The hints stay direction-agnostic but follow the service overlay: on a service agent
                   reporting wantedService, the qualified stage IS "wanted service", so the denominator is
                   named that way instead (RETCONVAI-5066). */}
-              <ActivityStat label="Close rate" value={fmtRate(scale(m.appointments), scale(leadQualified))} hint={svcWanted ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
+              <ActivityStat label="Close rate" value={fmtRate(scale(closeRateParts(a).booked), scale(leadQualified))} hint={svcWanted ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
             </div>
 
             {/* tertiary: call breakdown — coverage split + outcome tiles, only what live volume gives us */}
@@ -1451,14 +1458,19 @@ function AgentReportsView() {
 /* ── Performance helpers ── */
 /* Lead → qualified → appointment funnel: narrowing proportional bars with the step-to-step conversion
  * rate, so the drop-off reads at a glance. */
-function PerfFunnel({ stages, appointmentsDrill }: { stages: { label: string; value: number }[]; appointmentsDrill?: () => void }) {
+type FunnelStage = { label: string; value: number; convFrom?: number };
+/* The numerator of the step conversion into a stage. `convFrom` lets a stage convert on a different
+ * count than the one it shows: the appointments stage shows bookings but converts on booked customers,
+ * which is the close rate (closeRateParts). Absent → the stage's own value, as before. */
+const stepNumerator = (s: FunnelStage) => s.convFrom ?? s.value;
+function PerfFunnel({ stages, appointmentsDrill }: { stages: FunnelStage[]; appointmentsDrill?: () => void }) {
   const max = Math.max(1, stages[0]?.value ?? 1);
   return (
     <div className="flex flex-col gap-2.5">
       {stages.map((s, i) => {
         const pct = Math.max(2, (s.value / max) * 100);
         const prev = i > 0 ? stages[i - 1].value : null;
-        const conv = prev && prev > 0 ? Math.round((s.value / prev) * 100) : null;
+        const conv = prev && prev > 0 ? Math.round((stepNumerator(s) / prev) * 100) : null;
         const isLast = i === stages.length - 1;
         // The appointments stage (last) drills into the leads behind the number.
         const drillable = isLast && !!appointmentsDrill;

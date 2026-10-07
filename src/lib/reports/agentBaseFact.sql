@@ -227,6 +227,8 @@ chat_booking_link AS (
             FROM dealer_leads.meetings FINAL
             WHERE is_active = 1 AND __deleted = 0 AND source = 'spyne'
               AND lower(JSONExtractString(ifNull(meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
+              -- a cancelled booking is not a booking (see appt_attribution / appointmentStatus.ts)
+              AND lower(ifNull(status, '')) NOT IN ('cancelled', 'cancellation_requested')
               AND (conversation_id IS NULL OR conversation_id = '')
               AND (call_id IS NULL OR call_id = '')
               AND lead_id IS NOT NULL AND lead_id != ''
@@ -808,6 +810,12 @@ assist_prior_touch AS (
 -- (server/roi-cron/eventRunner.cjs) and notWarmTransfer() in detailQueries.ts. Prod all-time has exactly
 -- three meta.source values — '' , 'warm_transfer' (4,975 / 48 teams), 'callback' (1,050) — so one equality
 -- test covers it; 'callback' rows are deliberately left alone.
+--
+-- canonical (2026-10-06): EXCLUDE cancelled meetings from every arm (the chat arm via chat_booking_link). A
+-- booking that was cancelled is not a booking; counting it kept the card above its real number and put a
+-- CANCELLED row in its own drill-down (Honda of Reseda, Service Outbound, 30d: 36 shown, 35 real —
+-- Freshdesk #24149). The status list is shared with the TS read paths and the detail queries via
+-- src/lib/reports/appointmentStatus.ts; this file can't import it, so keep the literals in step.
 appt_attribution AS (
     SELECT
         meeting_id,
@@ -822,6 +830,7 @@ appt_attribution AS (
         FROM dealer_leads.meetings AS m FINAL
         WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
           AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
+          AND lower(ifNull(m.status, '')) NOT IN ('cancelled', 'cancellation_requested')
           AND m.conversation_id IS NOT NULL AND m.conversation_id != ''
         UNION ALL
         -- PRIMARY: AI-booked — same source='spyne' meetings matched via call_id (when conv id absent).
@@ -832,6 +841,7 @@ appt_attribution AS (
             ON c.callId = m.call_id AND c.__deleted = 0
         WHERE m.is_active = 1 AND m.__deleted = 0 AND m.source = 'spyne'
           AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
+          AND lower(ifNull(m.status, '')) NOT IN ('cancelled', 'cancellation_requested')
           AND m.call_id IS NOT NULL AND m.call_id != ''
         UNION ALL
         -- PRIMARY: AI-booked — booked INSIDE A WEB CHAT. These meeting rows carry neither a
@@ -857,6 +867,7 @@ appt_attribution AS (
         WHERE m.is_active = 1 AND m.__deleted = 0
           AND ifNull(m.source, '') != 'spyne'
           AND lower(JSONExtractString(ifNull(m.meta, ''), 'source')) NOT IN ('warm_transfer', 'callback')
+          AND lower(ifNull(m.status, '')) NOT IN ('cancelled', 'cancellation_requested')
           -- ★ THE DEFINITION (2026-09-24, second pass): the AI had spoken to this lead before the store
           -- booked. Replaces meetings.ai_assisted = 1, which carries the right idea but is written on
           -- only ~23% of CRM bookings and reported 4 assists where this rule finds 38 (Covina Kia, 30d).

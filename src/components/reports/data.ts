@@ -95,7 +95,32 @@ export interface AgentData {
   // Unique-lead funnel stages (distinct leads over the window) — drives the Outreach→conversation→
   // qualified→appointment funnel on both the Overview (fleet sum) and per-agent pages. Set live by
   // build.ts; absent on mock agents (those funnels fall back to event-count metrics).
-  leadFunnel?: { contacted: number; dialed: number; connected: number; qualified: number; appt: number };
+  // bookedLeads: distinct CUSTOMERS the AI booked among those this agent worked in the window (Service
+  // only, set by the reports route). The close-rate numerator, same grain and population as `qualified`;
+  // absent → appointment records.
+  leadFunnel?: { contacted: number; dialed: number; connected: number; qualified: number; appt: number; bookedLeads?: number };
+}
+
+/* Close rate = AI-booked ÷ qualified, on ONE basis. For Service the route sets bookedLeads (customers it
+ * worked and booked) and folds them into qualified, so booked ⊆ qualified and the rate cannot pass 100%
+ * (Freshdesk #23995: Paragon Honda read 220% / 162%). Sales, mock and Om-overlay agents carry no
+ * bookedLeads and keep appointments ÷ qualified exactly as before. */
+export function closeRateParts(a: AgentData): { booked: number; qualified: number } {
+  return {
+    booked: a.leadFunnel?.bookedLeads ?? a.metrics.appointments,
+    qualified: a.leadFunnel?.qualified ?? a.metrics.qualified,
+  };
+}
+
+/* The rooftop close rate on the same basis. When any agent carries bookedLeads, sum the agents' own
+ * parts — a booking no agent owns is in no agent's qualified count, so it stays out of the rate rather
+ * than push it past 100%. Otherwise the fleet's appointments ÷ qualified, exactly as before. */
+export function fleetCloseRateParts(agents: AgentData[], fleet: { appointments: number; qualified: number }): { booked: number; qualified: number } {
+  if (!agents.some((a) => a.leadFunnel?.bookedLeads != null)) return { booked: fleet.appointments, qualified: fleet.qualified };
+  return agents.reduce((s, a) => {
+    const p = closeRateParts(a);
+    return { booked: s.booked + p.booked, qualified: s.qualified + p.qualified };
+  }, { booked: 0, qualified: 0 });
 }
 
 /* ────────────── Agent-wise report blocks (from the IB / OB mockups) ────────────── */
