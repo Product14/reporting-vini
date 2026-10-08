@@ -23,6 +23,11 @@ export const AGENT_TYPE_BY_ID: Record<AgentData["id"], string> = {
 };
 const COLORS = ["#6366f1", "#813fed", "#10b981", "#f59e0b", "#0ea5e9", "#94a3b8", "#ef4444", "#14b8a6"];
 
+/** The per-agent channel split: voice calls vs SMS threads, straight from the summed counts. Never mock. */
+export function channelSplitOf(calls: number, smsThreads: number): { voice: number; sms: number } {
+  return { voice: Number(calls) || 0, sms: Number(smsThreads) || 0 };
+}
+
 const pctDelta = (curr: number, prev: number): number => (prev ? Math.round(((curr - prev) / prev) * 100) : 0);
 function fmtHandle(sec: number): string {
   if (!sec) return "—";
@@ -519,7 +524,12 @@ export function buildResult({ canonical, canonicalHotLeads, canonicalLeadSources
     };
 
     // ── channel split (counts: voice calls vs sms threads) ──
-    if (calls || smsThreads) a.channelSplit = { voice: calls, sms: smsThreads };
+    /* ALWAYS assigned from the real counts (fixed 2026-10-09, audit A2 F12). This used to run only when
+       calls || smsThreads, and the mock-clearing block below only when the agent had NO rows — so an
+       agent with rows but no calls and no SMS threads (a chat-only day) kept the cloned MOCK_AGENTS split
+       (90/10, 62/38, 88/12, 55/45). Dream Nissan Midwest Service Inbound, 10-07, served {voice: 88,
+       sms: 12} beside metrics.calls = 0, and 22 digests printed a fabricated "Call 90" / "Call 88". */
+    a.channelSplit = channelSplitOf(calls, smsThreads);
 
     // ── hourly 7a–6p (12 buckets) from the hour breakdown ──
     const hours = rollupDim(bd, "hour");
