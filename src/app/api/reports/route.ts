@@ -2,7 +2,7 @@ import { getSupabase, AGENT_DAILY, AGENT_DAILY_BREAKDOWN, AGENT_LEAD_DAYS, REPOR
 import { buildResult, AGENT_TYPE_BY_ID } from "@/lib/reports/build";
 import type { AgentDailyRow, BreakdownRow, CallbackRow, CampaignRow, OutcomeRow, ReportAppointmentRow, WarmLeadRow } from "@/lib/reports/schema";
 
-import { fetchLiveAppointments, countByAgent, bookedLeadsByAgent } from "@/lib/reports/liveAppointments";
+import { fetchLiveAppointments, countByAgent, bookedLeadsByAgent, bookedInStoreWindow } from "@/lib/reports/liveAppointments";
 import type { AgentData } from "@/components/reports/data";
 import type { Basis } from "@/components/reports/liveData";
 import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
@@ -528,7 +528,7 @@ export async function GET(request: Request): Promise<Response> {
      * check against the appointments console, which reads that same API. Fetched across BOTH windows in
      * one call so the period delta compares live against live. Null = no credential or the call failed,
      * and every appointment number below then stays exactly as the aggregate had it. */
-    fetchLiveAppointments({ teamId, start: prior.start, end, token: spyneToken, env: spyneEnv }),
+    fetchLiveAppointments({ teamId, start: prior.start, end, token: spyneToken, env: spyneEnv, timezone }),
   ]);
   const { callbacks, campaigns, outcomes, appointments, warmLeads } = detail ?? EMPTY_DETAIL;
   // Named appointments are shown for the report window — filter the ~120d snapshot by booking date.
@@ -649,8 +649,12 @@ export async function GET(request: Request): Promise<Response> {
         direction: m.direction ?? (prev.direction ? prev.direction.toLowerCase() : null),
       };
     });
+    /* ★ STORE-LOCAL BOOKING DAY (fixed 2026-10-09, audit A2 F2) — the same day space as the snapshot
+     * filter above and the ETL. This used to take the UTC date prefix, so a Pacific rooftop's evening
+     * bookings counted on the next day: Honda of Downtown Los Angeles, Service, 2026-10-07 read 1 here
+     * against 4 in the digest and the appointments console (17:33-18:40 PT). */
     const booked: ReportAppointmentRow[] = liveAppts
-      .filter((m) => { const d = (m.bookedAt ?? "").slice(0, 10); return d >= start && d < end; })
+      .filter((m) => bookedInStoreWindow(m.bookedAt, timezone, start, end))
       .map((m) => {
         const prev = m.id ? snapshotByMeeting.get(m.id) : undefined;
         return {
@@ -797,7 +801,7 @@ export async function GET(request: Request): Promise<Response> {
     else curBooked.noLead[type] = (curBooked.noLead[type] ?? 0) + 1;
   }
   const appointmentsUnattributed = unattributedBy.sales + unattributedBy.service + unattributedBy.unknown;
-  const priByAgent = liveAppts ? countByAgent(liveAppts, prior.start, prior.end).byAgent : null;
+  const priByAgent = liveAppts ? countByAgent(liveAppts, prior.start, prior.end, timezone).byAgent : null;
   for (const agent of result.agents) {
     const type = AGENT_TYPE_BY_ID[agent.id];
     if (!type) continue;
@@ -814,7 +818,7 @@ export async function GET(request: Request): Promise<Response> {
     applyCustomerBasis(result.agents, result.prior,
       stageGaps(flagsCur, serviceOnly(curBooked).leads),
       // The prior window has booking rows only when the live fetch ran (same rule as its appointments).
-      liveAppts && flagsPri ? stageGaps(flagsPri, serviceOnly(bookedLeadsByAgent(liveAppts, prior.start, prior.end)).leads) : null);
+      liveAppts && flagsPri ? stageGaps(flagsPri, serviceOnly(bookedLeadsByAgent(liveAppts, prior.start, prior.end, timezone)).leads) : null);
   }
 
   return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved, ...(!canonicalResolved && !result.hasData ? { degraded: true } : {}) }, {
