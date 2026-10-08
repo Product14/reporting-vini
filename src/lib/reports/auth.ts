@@ -43,17 +43,43 @@
 
 import { decodeTokenPayload } from "@/lib/spyne/client";
 
+/* A dealer's Spyne session token may also arrive in a dedicated header, so a SERVICE caller can send
+ * BOTH credentials in headers — `Authorization: Bearer <CRON_SECRET>` to authorize, and
+ * `X-Spyne-Token: <token>` for the downstream Spyne calls — instead of putting the token in the URL
+ * (`?auth_key=`), where every proxy and request log records it (audit A3-20). The URL params keep
+ * working; the header is simply read first. */
+const SPYNE_TOKEN_HEADERS = ["x-spyne-token", "x-auth-key"] as const;
+function spyneTokenHeader(request: Request): string | null {
+  for (const h of SPYNE_TOKEN_HEADERS) {
+    const v = request.headers.get(h);
+    if (v && v.trim()) return v;
+  }
+  return null;
+}
+
 // Read the bearer credential from the same sources the enrichment path uses: the Authorization header
-// first, then the auth_key/spyne_token/token query params. "Bearer " prefix stripped.
+// first, then the X-Spyne-Token header, then the auth_key/spyne_token/token query params. "Bearer "
+// prefix stripped.
 export function readBearer(request: Request): string | null {
   const url = new URL(request.url);
   const src = request.headers.get("authorization")
+    || spyneTokenHeader(request)
     || url.searchParams.get("auth_key")
     || url.searchParams.get("spyne_token")
     || url.searchParams.get("token")
     || "";
   const t = src.replace(/^Bearer\s+/i, "").trim();
   return t || null;
+}
+
+/* True when the request is authorized by the shared service secret (CRON_SECRET as the bearer or as
+ * ?key=). Such a caller may read ANY team, so nothing about the rooftop — in particular its enterprise —
+ * can be inferred from its credential; see lib/reports/enterprise.ts. */
+export function isServiceRequest(request: Request): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+  const keyParam = new URL(request.url).searchParams.get("key");
+  return readBearer(request) === secret || keyParam === secret;
 }
 
 /* The Spyne session token to use for DOWNSTREAM Spyne API calls (live meetings, store timezone,
@@ -70,6 +96,7 @@ export function spyneTokenFrom(request: Request): string | null {
   const secret = process.env.CRON_SECRET;
   const candidates = [
     request.headers.get("authorization"),
+    spyneTokenHeader(request),
     url.searchParams.get("auth_key"),
     url.searchParams.get("spyne_token"),
     url.searchParams.get("token"),
