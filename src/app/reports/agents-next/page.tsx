@@ -1,0 +1,2083 @@
+"use client";
+
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import {
+  
+  AGENTS as MOCK_AGENTS,
+  AgentData,
+  agentById,
+  Bucket,
+  Meeting,
+  MeetingsList,
+  BUCKET_LABELS,
+  CalibratingBanner,
+  Card,
+  ComingSoon,
+  EmptyState,
+  DateFilter,
+  fmtInt,
+  GhostPreview,
+  HOUR_LABELS,
+  DayTrend,
+  MeetingsModal,
+  ProgressBar,
+  RAG_STYLE,
+  ReportTopBar,
+  SectionLabel,
+  StepList,
+  Td,
+  Th,
+  TrendBars,
+} from "@/components/reports/kit";
+import { fmtRate, fmtWhenShort, IntentOutcomeTable, WarmLeadChips } from "@/components/reports/kitV3";
+import { closeRateParts } from "@/components/reports/data";
+import { useScenario, ScenarioView } from "@/components/reports/scenario";
+import { ReportAccessDenied } from "@/components/reports/accessState";
+import { fetchAgents, fetchCampaignFunnel, fetchServiceInbound, fetchMeetings, fetchReportMetrics, fetchActionItems, fetchActionItemStats, fetchAllActionItems, agentsForAccount, hasAgentActivity, addDay, rangeFor, peekAgents, tzShortLabel, leadEntryStage, type FetchResult, type ReportMetrics, type ActionItem, type ActionItemStats } from "@/lib/reports/agentsNext/liveData";
+import { useDateRange, useDept, useVariant, reportNavQuery } from "@/components/reports/dateRange";
+import { goCrossPage } from "@/components/reports/parentNav";
+import { StlUpsell } from "@/components/reports/upsell";
+import { ExportMenu } from "@/components/reports/ExportMenu";
+import { useOutcomes, OutcomeKpis, CallFlowCard, AppointmentLeakCard, HandoffsCard, ConversationQualityCard } from "@/components/reports/outcomes";
+import { MoreReports, LeadsByTypeCard } from "@/components/reports/library";
+import { ReportLibraryPanel } from "@/components/reports/libraryPanel";
+import { downloadCSV, downloadXLSX, exportFilenameStem, CANONICAL_DEFINITIONS, CANONICAL_DEFINITION_ROWS, type ExportSheet, type PdfSection } from "@/components/reports/exportReport";
+import { buildPdfReport } from "@/components/reports/printToPdf";
+import { track } from "@/lib/analytics";
+import { useServiceOverviewOverlay, useServiceAgentsOverlay, shouldUseServiceMetrics } from "@/lib/serviceMetrics";
+import { applyServiceAgentsOverlay, serviceReportsOmOn } from "@/lib/reports/serviceAgentsOverlay";
+import type { CampaignFunnel } from "@/lib/reports/agentsNext/campaignFunnel";
+import type { ServiceInboundNumbers } from "@/lib/reports/agentsNext/serviceInbound";
+import type { NamedAppt } from "@/components/reports/data";
+import { AppointmentsByStatusModal } from "@/components/reports/agentsNext/AppointmentsByStatusModal";
+
+/* ── THE SERVICE CARDS' SOURCE NUMBERS ────────────────────────────────────────────────────────────────
+ * A Service card on the console page it must match (decided 2026-10-08): everything the card shows from
+ * that page, built once so the chip, funnel, tiles, rates, Booked list and exports read one object.
+ * Counts are raw; the page applies its own scale() when it shows them. Rates are formatted here. */
+interface CardFunnel {
+  /** The console page these numbers are the same as. */
+  source: "Campaigns" | "Service Overview";
+  /** "Same as Campaigns · Sep 8 – Oct 7 (UTC)": the source's window, which the date picker does not move. */
+  windowLabel: string;
+  flow: string;
+  chip: { label: string; value: number };
+  stages: { label: string; value: number }[];
+  tiles: { label: string; value: number; accent: string }[];
+  /** Replaces the activity row's calls tile when the source page has its own calls count. */
+  callsStat?: { label: string; value: number; hint: string };
+  rates: { label: string; value: string; hint: string; accent: string }[];
+  closeRate: string;
+  bookedLabel: string;
+  booked: number;
+  appointments: NamedAppt[];
+  hasData: boolean;
+  caption: string;
+}
+
+// "Sep 8" for a YYYY-MM-DD calendar date, shifted by whole days.
+const fmtDay = (iso: string, shift = 0) => {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + shift);
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(d);
+};
+
+/** Service outbound on the Campaigns page's funnel: Enrolled → Connected → Engaged → Booked, step-to-step
+ * rates, Connected ÷ Enrolled as "Answer rate" (the results page uses Connect rate for Engaged ÷ Enrolled).
+ * The window's end is exclusive (today), so the label's last day is the day before it. */
+function obCardFunnel(f: CampaignFunnel): CardFunnel {
+  const close = fmtRate(f.booked, f.engaged);
+  return {
+    source: "Campaigns",
+    windowLabel: `Same as Campaigns · ${fmtDay(f.window.start)} – ${fmtDay(f.window.end, -1)} (UTC)`,
+    flow: "Enrolled → booked",
+    chip: { label: "Enrolled", value: f.enrolled },
+    stages: [
+      { label: "Enrolled", value: f.enrolled },
+      { label: "Connected", value: f.connected },
+      { label: "Engaged", value: f.engaged },
+      { label: "Booked", value: f.booked },
+    ],
+    tiles: [
+      { label: "Connected", value: f.connected, accent: "#2563eb" },
+      { label: "Engaged", value: f.engaged, accent: "#813fed" },
+    ],
+    rates: [
+      { label: "Answer rate", value: fmtRate(f.connected, f.enrolled), hint: "connected ÷ enrolled", accent: "#2563eb" },
+      { label: "Engagement rate", value: fmtRate(f.engaged, f.connected), hint: "engaged ÷ connected", accent: "#813fed" },
+      { label: "Close rate", value: close, hint: "booked ÷ engaged", accent: "#059669" },
+    ],
+    closeRate: close,
+    bookedLabel: "Booked",
+    booked: f.booked,
+    appointments: f.appointments,
+    hasData: f.enrolled > 0 || f.booked > 0,
+    caption: "These steps and their rates use the Campaigns page's own counts and window, so they match it. Calls, SMS and the sections below follow the date picker.",
+  };
+}
+
+/** Service inbound on the Service Overview's inbound block: Callers → Qualified → Visits booked, with the
+ * Overview's Calls in the activity row (and its "1 in every N calls booked a visit"). */
+function ibCardFunnel(n: ServiceInboundNumbers): CardFunnel {
+  const close = fmtRate(n.booked, n.qualified);
+  const tz = tzShortLabel(n.window.timezone) || n.window.timezone;
+  return {
+    source: "Service Overview",
+    windowLabel: `Same as Service Overview · ${fmtDay(n.window.startLocal)} – ${fmtDay(n.window.endLocal)} (${tz})`,
+    flow: "Callers → booked",
+    chip: { label: "Callers", value: n.callers },
+    stages: [
+      { label: "Callers", value: n.callers },
+      { label: "Qualified", value: n.qualified },
+      { label: "Visits booked", value: n.booked },
+    ],
+    tiles: [
+      { label: "Callers", value: n.callers, accent: "#2563eb" },
+      { label: "Qualified", value: n.qualified, accent: "#813fed" },
+    ],
+    callsStat: {
+      label: "Calls",
+      value: n.calls,
+      hint: n.booked > 0 ? `1 in every ${Math.round(n.calls / n.booked)} calls booked a visit` : "same as Service Overview",
+    },
+    rates: [
+      { label: "Turn rate", value: fmtRate(n.qualified, n.callers), hint: "qualified ÷ callers", accent: "#813fed" },
+      { label: "Close rate", value: close, hint: "visits booked ÷ qualified", accent: "#059669" },
+    ],
+    closeRate: close,
+    bookedLabel: "Visits booked",
+    booked: n.booked,
+    appointments: n.appointments,
+    hasData: n.calls > 0 || n.booked > 0,
+    caption: "Calls, callers, qualified and visits booked use the Service Overview's own counts and window, so they match it. SMS and the sections below follow the date picker.",
+  };
+}
+
+// Human labels for the "missed opportunities" categories pushed from ClickHouse (report_missed_opportunities).
+const MISSED_LABELS: Record<string, string> = {
+  voicemail: "Went to voicemail",
+  no_answer: "No answer",
+  abandoned: "Abandoned (silence)",
+  sms_failed: "SMS failed to deliver",
+};
+
+/* Reports > Agent performance, next. Started as a copy of ../agents/page.tsx, which stays untouched so
+ * the two can be switched per rooftop (src/proxy.ts, AGENTS_REPORT_NEXT_TEAMS). Data comes from the
+ * copied logic in src/lib/reports/agentsNext and /api/reports-next. Anything this page needs changed in
+ * a shared module gets copied first, never edited in place, so the old page cannot move. */
+
+// useSearchParams() (to read ?agent=) needs a Suspense boundary above it.
+// data-agents-view marks which page rendered, since a proxy rewrite keeps the /reports/agents URL.
+export default function AgentReportsNextPage() {
+  return (
+    <Suspense fallback={null}>
+      <div data-agents-view="next" className="contents">
+        <AgentReportsView />
+      </div>
+    </Suspense>
+  );
+}
+
+function AgentReportsView() {
+  const searchParams = useSearchParams();
+  const paramAgent = searchParams.get("agent"); // the agent the overview "who drove it" link picked
+  // Selected window comes from the URL so it persists when arriving from the Overview tab (and back).
+  const { bucket, custom, setPreset, setCustom } = useDateRange();
+  const { dept, locked } = useDept(); // top-level scope (shared header, URL-persisted) — scopes the agent pills
+  // open on the agent passed in; the picker on the page then drives selection locally.
+  // An invalid/absent id is corrected by the validity effect below once agents load.
+  const [activeId, setActiveId] = useState<string>(paramAgent || "sales_ib");
+  /* The console's Reports tab iframes THIS route (see parentNav.ts: reports → /reports/agents), so the
+   * report library has to live here rather than at a route of its own — a separate page would need a
+   * parent-console change in another repo before a dealer could ever reach it. Same URL, two views. */
+  const [view2, setView2] = useState<"agent" | "library">(searchParams.get("view") === "reports" ? "library" : "agent");
+  // Which library report to open when the switch flips — set by the "More reports" cards, null for the gallery.
+  const [libraryReport, setLibraryReport] = useState<string | null>(null);
+  // True once the user has clicked a pill — stops the activity-based default below from overriding an
+  // explicit choice (e.g. deliberately opening a quiet agent).
+  const userPickedRef = useRef(false);
+  // when set, the appointment-count drill-down modal is open (lists the leads behind the number)
+  const [apptModal, setApptModal] = useState<{ service: "sales" | "service"; agentType: string; title: string; sub: string } | null>(null);
+  // Resolved up-front (before the effects/handlers below that reference teamId for analytics).
+  const { scenario, view, teamId, account, spyneToken, spyneEnv, enterpriseId } = useScenario();
+
+  // custom range (inclusive end) overrides the preset bucket; end is made exclusive for Metabase.
+  // spyneToken (host-forwarded, prod) rides along so the server can resolve timezone + onboarded agents;
+  // spyneEnv picks which Spyne backend (uat/stag/prod) those calls hit.
+  // closeBasis: Reports reads the Service close rate on one basis (booked customers ÷ qualified, see
+  // closeRateParts); the Overview does not send it.
+  const rangeOpts = custom
+    ? { start: custom.start, end: addDay(custom.end), spyneToken, spyneEnv, closeBasis: "customers" as const }
+    : { bucket, spyneToken, spyneEnv, closeBasis: "customers" as const };
+  // Live agents for the selected rooftop, overlaid from Metabase. Seed from the client cache so
+  // navigating back paints instantly instead of flashing a skeleton; null === nothing cached (cold).
+  const [feed, setFeed] = useState<FetchResult | null>(() => peekAgents({ teamId, ...rangeOpts }));
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30000); // tick the "synced X ago" label
+    return () => clearInterval(t);
+  }, []);
+  // Engagement: fires once per opened agent report (the rooftop is resolved by mount).
+  useEffect(() => { track("report_viewed", { tab: "agents", team_id: teamId }); }, [teamId]);
+  useEffect(() => {
+    if (!teamId) { setFeed(null); return; } // no rooftop selected → no data
+    let on = true;
+    // show cached data immediately (stale-while-revalidate); only blank to the skeleton when cold
+    const cached = peekAgents({ teamId, ...rangeOpts });
+    setFeed(cached);
+    fetchAgents({ teamId, ...rangeOpts })
+      .then((res) => { if (on) setFeed(res); })
+      .catch(() => { if (!on) return; track("report_load_failed", { tab: "agents", team_id: teamId }); if (!cached) setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, bucket, custom]);
+  // Coming-soon metrics (transfer success, calls-by-reason, highlights/missed) from /api/reports/metrics
+  // — a rooftop-level snapshot pushed from ClickHouse, separate from the Q12227 feed. Each widget falls
+  // back to its "coming soon" placeholder when this is null/empty, so a missing push never breaks render.
+  const [metrics, setMetrics] = useState<ReportMetrics | null>(null);
+  useEffect(() => {
+    let on = true;
+    Promise.resolve(teamId ? fetchReportMetrics(teamId, spyneToken) : null)
+      .then((mx) => { if (on) setMetrics(mx); })
+      .catch(() => { if (on) setMetrics(null); });
+    return () => { on = false; };
+  }, [teamId, spyneToken]);
+  // Self-heal a degraded fetch (fetchAgents already retried 3× in-line): re-hit the server ONCE more
+  // shortly after so the report fills in on its own. Depends on the degraded BOOLEAN (not fetchedAt) so a
+  // still-degraded retry can't re-trigger it — never a perpetual poll. 401s aren't degraded → never fires.
+  useEffect(() => {
+    if (!teamId || feed?.degraded !== true) return;
+    let on = true;
+    const t = setTimeout(() => {
+      fetchAgents({ teamId, ...rangeOpts, force: true }).then((res) => { if (on) setFeed(res); }).catch(() => {});
+    }, 4000);
+    return () => { on = false; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId, bucket, custom, feed?.degraded]);
+  const refresh = () => {
+    if (!teamId) return;
+    track("report_refreshed", { tab: "agents", team_id: teamId });
+    setFunnelNonce((n) => n + 1);
+    setFeed(null);
+    fetchAgents({ teamId, ...rangeOpts, force: true })
+      .then(setFeed)
+      .catch(() => { track("report_load_failed", { tab: "agents", team_id: teamId }); setFeed({ agents: [], hasData: false, fetchedAt: Date.now(), prior: {} }); });
+  };
+  // Scope the live feed (and the no-crash mock skeleton) to the agents this rooftop actually runs.
+  // Sumit, 29-Sep: Service agents' headline numbers read Om's service-metrics API, same source as the
+  // Overview, for the rooftops on NEXT_PUBLIC_SERVICE_REPORTS_OM_TEAMS. The full report is untouched.
+  const serviceOmOn = serviceReportsOmOn(teamId) && dept !== "sales";
+  const svcAgents = useServiceAgentsOverlay({
+    enabled: serviceOmOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: feed?.start,
+    rangeEndExclusive: feed?.end,
+    timezone: feed?.timezone ?? undefined,
+  });
+  /* THE TWO SERVICE CARDS READ THE CONSOLE PAGES THEY MUST MATCH (decided 2026-10-08), with those
+     pages' definitions AND windows, so the counts are the same on every rooftop:
+       Service outbound ← the Campaigns page's funnel (campaignFunnel.ts), its last 30 UTC days to yesterday.
+       Service inbound  ← the Service Overview's inbound block (serviceInbound.ts), its last 30 days plus
+                          today, rooftop-local.
+     Fetched live, apart from the cached report, so both pages read the same moment, and only when
+     Service is in view. Keyed by rooftop so a stale answer is never shown for another; absent (loading
+     or failed) = the card shows its own numbers as before. Sales is untouched (user, 2026-10-08).
+     Om's overlay is not applied to a card while its source is present, so no number on that card comes
+     from a second definition. */
+  const funnelKey = `${teamId}|${dept}`;
+  const [funnelNonce, setFunnelNonce] = useState(0);
+  const [funnelState, setFunnelState] = useState<{ key: string; ob: CampaignFunnel | null; ib: ServiceInboundNumbers | null }>({ key: "", ob: null, ib: null });
+  useEffect(() => {
+    if (!teamId || dept === "sales") return;
+    let on = true;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    // An empty answer (the server already retried its queries) gets one more try a few seconds later,
+    // so a passing blip does not leave a card on its fallback numbers for the whole visit.
+    const withRetry = <T,>(load: () => Promise<T | null>, apply: (v: T | null) => void) => {
+      void load().then((v) => {
+        if (!on) return;
+        apply(v);
+        if (v === null) timers.push(setTimeout(() => { void load().then((again) => { if (on && again !== null) apply(again); }); }, 4000));
+      });
+    };
+    withRetry(() => fetchCampaignFunnel(teamId, { spyneToken, spyneEnv }), (ob) =>
+      setFunnelState((prev) => ({ key: funnelKey, ob, ib: prev.key === funnelKey ? prev.ib : null })));
+    withRetry(() => fetchServiceInbound(teamId, { enterpriseId, spyneToken, spyneEnv }), (ib) =>
+      setFunnelState((prev) => ({ key: funnelKey, ob: prev.key === funnelKey ? prev.ob : null, ib })));
+    return () => { on = false; timers.forEach(clearTimeout); };
+  }, [teamId, dept, enterpriseId, spyneToken, spyneEnv, funnelKey, funnelNonce]);
+  const svcObFunnel = funnelState.key === funnelKey ? funnelState.ob : null;
+  // No live inbound agent: the Overview shows its upsell, not numbers, so there is nothing to match.
+  const svcIbNumbers = funnelState.key === funnelKey && funnelState.ib?.hasLiveAgent ? funnelState.ib : null;
+  const cardFunnelFor = (id: string): CardFunnel | null =>
+    id === "service_ob" && svcObFunnel ? obCardFunnel(svcObFunnel)
+      : id === "service_ib" && svcIbNumbers ? ibCardFunnel(svcIbNumbers)
+      : null;
+  /* Which cards show. Exactly the original choice — the onboarded/activity rule (feed.baseSlots), then
+     agentsForAccount (CSM sheet or activity in the picker window) — plus any Service card whose console
+     source page has numbers: those numbers ignore the picker and the onboarded flag, as the console
+     does, so a quiet window, a stale sheet or a "not onboarded" flag must not hide them. */
+  const AGENTS = useMemo(() => {
+    const all = feed?.agents ?? [];
+    const base = feed?.baseSlots ? all.filter((ag) => feed.baseSlots!.includes(ag.id)) : all;
+    const kept = agentsForAccount(base, account);
+    const sourced = all.filter((ag) => !kept.includes(ag)
+      && ((ag.id === "service_ob" && (svcObFunnel?.enrolled ?? 0) > 0)
+        || (ag.id === "service_ib" && ((svcIbNumbers?.calls ?? 0) > 0 || (svcIbNumbers?.booked ?? 0) > 0))));
+    return applyServiceAgentsOverlay([...kept, ...sourced], { loading: false, inbound: svcIbNumbers ? null : svcAgents.inbound, outbound: svcObFunnel ? null : svcAgents.outbound });
+    // The overlay's two blocks are stable state references; the wrapper object is not.
+  }, [feed, account, svcAgents.inbound, svcAgents.outbound, svcObFunnel, svcIbNumbers]);
+  const hasTeam = teamId !== "";
+  // Carries team scope + the selected window into the tab links and the back arrow, so the window
+  // survives navigation back to the Overview tab.
+  const { variant } = useVariant(); // staged-rollout switch (header toggle)
+  const navQuery = reportNavQuery(teamId, bucket, custom, dept, locked, variant);
+  // Gated on lifetime "ever live", NOT the selected window — a live rooftop with an empty window (e.g.
+  // "Today" before its first synced call) renders the report with zeros instead of the on-its-way gate.
+  // Falls back to hasData when everLive is absent (mock/error response) → prior window-scoped behavior.
+  // A degraded fetch (transient outage / cold-start timeout) is NOT "never live" — hold the syncing
+  // state and let the re-arm effect retry, rather than flip to the on-its-way gate.
+  const degraded = feed?.degraded === true;
+  // A DENIED read (401/403) is not a rooftop without data — it is a session that can't read this rooftop.
+  // It carries neither everLive nor hasData, so without this it fell through to the coming-soon gate and
+  // told a live dealer their agents hadn't started. Handled first, and never as "no data" (see
+  // ReportAccessDenied for the Paragon Honda case).
+  const unauthorized = feed?.unauthorized === true;
+  const comingSoon = hasTeam && feed !== null && !degraded && !unauthorized && !(feed.everLive ?? feed.hasData); // rooftop selected, never live yet
+  const skeleton = useMemo(() => agentsForAccount(MOCK_AGENTS, account), [account]);
+  // A live rooftop whose feed has RESOLVED but carries no agents for the selected window. We must NOT
+  // fall back to the mock skeleton's numbers here (that rendered a fake "168 leads attempted" report for
+  // a real dealer) — this drives the empty/zero state instead. The skeleton is used ONLY for the
+  // pre-load / never-selected state below (so `a` is always a valid object and the JSX can't crash).
+  /* Service view with no Service agent (yet): the page used to take `a` from an empty list and crash
+     (the original page still does). Treated like an empty feed instead — the "no activity" state — until
+     the Service cards' source numbers arrive and bring their agents in (AGENTS above). Service only;
+     Sales is untouched. */
+  const serviceViewEmpty = dept === "service" && AGENTS.length > 0 && !AGENTS.some((ag) => ag.dept === "Service");
+  const feedEmpty = hasTeam && feed !== null && (AGENTS.length === 0 || serviceViewEmpty);
+  // Use real agents when present; otherwise the skeleton is a crash-safety placeholder only — when a live
+  // feed has resolved empty (feedEmpty), the render gates below show the empty state, never the skeleton's
+  // mock metrics/pills.
+  // Scope the agent pills to the top-level dept when one is chosen; fall back to the full set if this
+  // rooftop runs no agent in that dept, so `visibleAgents` is never empty (agentById → agents[0]).
+  /* STRICT department scope. The URL says sales or service and that is the whole answer: sales shows
+   * Sales Inbound and Sales Outbound, service shows Service Inbound and Service Outbound, and neither
+   * ever shows the other's agents. The previous fallback — "if this department has no agents, show them
+   * all" — meant a service rooftop with no service agent configured silently rendered the SALES agents
+   * under a Service header, which is the one thing a departmental report must never do. A department
+   * with nothing live now renders its empty state instead. */
+  const visibleAgents = useMemo(() => {
+    const base = AGENTS.length && !serviceViewEmpty ? AGENTS : skeleton;
+    if (dept === "all") return base;
+    const scoped = base.filter((ag) => ag.dept.toLowerCase() === dept);
+    // Crash-safety placeholder only (never shown as numbers: feedEmpty drives the empty state).
+    return scoped.length || dept !== "service" ? scoped : MOCK_AGENTS.filter((ag) => ag.dept === "Service");
+  }, [AGENTS, skeleton, dept, serviceViewEmpty]);
+  const a = useMemo(() => agentById(activeId, visibleAgents), [activeId, visibleAgents]);
+  // keep the selected agent valid when the rooftop (and thus its agent set) changes, and default to an
+  // agent that actually has activity in this window so the page never lands on an empty agent while the
+  // rooftop is busy elsewhere (the "overview shows activity but by-agent doesn't" trap).
+  useEffect(() => {
+    if (!visibleAgents.length) return;
+    // dropped/invalid selection → fall back to the first agent
+    if (!visibleAgents.some((ag) => ag.id === activeId)) { setActiveId(visibleAgents[0].id); return; }
+    // Activity-based default: only when the user hasn't picked a pill and no explicit ?agent= was passed.
+    // If the current agent is empty for this window but another has activity, open the most-active one.
+    if (userPickedRef.current || paramAgent) return;
+    const current = agentById(activeId, visibleAgents);
+    if (hasAgentActivity(current)) return;
+    const score = (x: AgentData) => x.metrics.calls + x.metrics.smsSent + x.metrics.appointments + (x.leadFunnel?.contacted ?? x.report?.leadsAttempted ?? 0);
+    const best = visibleAgents.filter(hasAgentActivity).reduce<AgentData | null>((b, x) => (!b || score(x) > score(b) ? x : b), null);
+    if (best && best.id !== activeId) setActiveId(best.id);
+  }, [visibleAgents, activeId, paramAgent]);
+  const m = a.metrics;
+  const r = a.report;
+  const inbound = a.dir === "Inbound";
+  const live = view.hasData; // recently_live + repeat render the real report
+
+  // Highlights & missed are rooftop-level but direction-specific: wins are the AI's best booked calls in
+  // THIS agent's direction (report_highlights carries direction); "missed" (went-to-voicemail / no-answer /
+  // sms-failed) are OUTBOUND dial outcomes with no direction column — nonsensical on an inbound agent, so
+  // they're shown only on outbound agents.
+  const agentDir = inbound ? "inbound" : "outbound";
+  const agentSvc = a.id.startsWith("service") ? "service" : "sales";
+  /* Conversation-outcome evals for THIS agent — SALES only (the eval pipeline's sales cohort is the one
+   * this report models), scoped to this agent's direction. A Service agent skips the fetch entirely, so
+   * its report never shows sales evals. Independent of the main feed: an eval outage just hides the
+   * panels. */
+  const outcomesFeed = useOutcomes({
+    teamId,
+    enterpriseId,
+    dirs: [agentDir],
+    bucket: custom ? undefined : bucket,
+    start: custom?.start,
+    end: custom ? addDay(custom.end) : undefined,
+    spyneToken,
+    spyneEnv,
+    enabled: hasTeam && agentSvc === "sales",
+  });
+  const outcomes = outcomesFeed.data[agentDir] ?? null;
+  // Drives the swap below: when the scorer has this agent's window, its flow REPLACES the older
+  // intent/outcome table; otherwise that table stays as the fallback.
+  const hasOutcomes = !!outcomes && outcomes.scored > 0;
+
+  /* RETCONVAI-5066 (coordinator, 28-Sep): the console's Service "Reports" tab iframes THIS route
+   * (see the comment above on view2 — "The console's Reports tab iframes THIS route"), so every number
+   * on this whole per-agent drill-down is dealer-facing and in scope for the same rule as Overview: a
+   * service-metrics twin or hidden. The page's own report library ships nothing new yet, so the only
+   * twins available today are the same three already used on Overview — Appointments (bookedBySpyne +
+   * bookingRate split), Action Items (openNow + list) and the upcoming-appointments list — none of the
+   * per-agent funnel/calls/conversations/outcomes/highlights/missed/library numbers below have one.
+   * Called unconditionally (rules of hooks) even though the early return below is the only path that
+   * reads it — Sales and flag-off Service never construct this fetch's request (enabled: false → EMPTY,
+   * no network call, see serviceMetrics.ts).
+   *
+   * Checker fix, 28-Sep: gate on the agent ACTUALLY SHOWN too, not only the top-level dept scope. This
+   * route can be opened with dept="all" (unlike Overview, which is host-locked to one department) — a
+   * dealer viewing the Service Inbound/Outbound pill with dept=all must still get the gated render, not
+   * the ClickHouse one, because `a`/`m`/`r` below are Service data regardless of what `dept` says. */
+  // Sumit, 28-Sep: the flag-on Service render below replaced the whole report with a summary that has no
+  // Download menu and no report library, and clients escalated. Reports stays on the full report (its
+  // exports included) until a service-metrics version carries the same downloads. Overview is unaffected.
+  const REPORTS_ON_SERVICE_METRICS = false;
+  const serviceMetricsFlagOn = REPORTS_ON_SERVICE_METRICS && process.env.NEXT_PUBLIC_SERVICE_METRICS_OLD_VIEW === "on";
+  const serviceMetricsOn = shouldUseServiceMetrics({ flagOn: serviceMetricsFlagOn, deptIsService: dept === "service", agentIsService: agentSvc === "service", hasTeam });
+  const svcMetrics = useServiceOverviewOverlay({
+    enabled: serviceMetricsOn,
+    enterpriseId,
+    teamId,
+    spyneToken,
+    spyneEnv,
+    bucket,
+    custom,
+    rangeStart: feed?.start,
+    rangeEndExclusive: feed?.end,
+    timezone: feed?.timezone ?? undefined,
+  });
+  /* The rebuilt page is for the two SALES agents only. Every restructured block below is gated on this,
+   * so a Service agent renders exactly the page it always did — no reordering, no removed cards. */
+  const isSales = agentSvc === "sales";
+  // Match the agent's direction AND service — a Sales agent must not show Service wins/misses and vice-versa
+  // (RETCONVAI-4150). KEEP rows whose direction/service_type is null/blank (legacy rows before 0020, or
+  // rooftops that don't populate it) so real wins never silently vanish from the card.
+  const agentHighlights = metrics
+    ? metrics.highlights.filter((h) => {
+        const d = (h.direction || "").toLowerCase();
+        const s = (h.service_type || "").toLowerCase();
+        return (d ? d === agentDir : true) && (s ? s === agentSvc : true);
+      })
+    : [];
+  const agentMissed = metrics
+    ? metrics.missed.filter((mm) => { const s = (mm.service_type || "").toLowerCase(); return s ? s === agentSvc : true; })
+    : [];
+  const showMissed = !inbound && agentMissed.length > 0;
+
+  // Live data is already a window total for the selected bucket (liveData re-queries per bucket),
+  // so it must not be re-scaled — factor=1 when live, 0 in the pre-live ghost states.
+  const factor = live ? 1 : 0;
+  const scale = (n: number) => Math.round(n * factor);
+  const periodLabel = custom ? (custom.start === custom.end ? custom.start : `${custom.start} – ${custom.end}`) : scenario === "repeat" ? BUCKET_LABELS[bucket] : view.liveLabel;
+  // Store-local window for the action-items scoreboard (created/closed within it); end is exclusive.
+  // Prefer the SERVER-resolved store-local dates (feed.start/end) for presets — the client-side
+  // rangeFor(bucket) computes a UTC window, which drifted this page's action-item counts off the
+  // dealer's calendar day (RETCONVAI-4152). rangeFor is only the cold-load fallback before feed lands.
+  const win = useMemo(
+    () => custom
+      ? { start: custom.start, end: addDay(custom.end) }
+      : (feed?.start && feed?.end ? { start: feed.start, end: feed.end } : rangeFor(bucket)),
+    [bucket, custom, feed?.start, feed?.end],
+  );
+  /* THE ROWS BEHIND THE APPOINTMENT TILE — the exact list the tile counted, not a second query.
+   *
+   * The tile's AI-booked number now comes from the live meetings API, and namedAppointments is built
+   * from that same live set server-side, so filtering it here makes the drill-down agree with the tile
+   * by construction. The modal's own fetch resolved its lead set from the stale aggregate AND kept one
+   * meeting per lead, so it undercounted twice over — Heiser Chevrolet showed 26 behind a tile of 36.
+   *
+   * Assisted rows are excluded: the tile is labelled "Appointments — AI-booked" and counts only those. */
+  const apptModalItems = useMemo(() => {
+    if (!apptModal) return null;
+    const dir = apptModal.agentType.endsWith("_ob") ? "Outbound" : "Inbound";
+    /* A Service card on its source page's numbers: Booked IS the length of that source's own list, so the
+       list is the number. Checked before Om's list for the same reason. */
+    const campaignRows = apptModal.agentType === "service_ob" ? svcObFunnel?.appointments
+      : apptModal.agentType === "service_ib" ? svcIbNumbers?.appointments
+      : undefined;
+    if (campaignRows) {
+      return campaignRows.map((ap) => ({
+        id: "", leadId: null,
+        customer: ap.customer, phone: ap.phone || null, vehicle: ap.vehicle,
+        when: ap.when ?? "", tz: feed?.timezone ?? null, status: ap.status,
+        serviceType: ap.serviceType, assignedTo: null, intent: null, bookedAt: ap.bookedAt,
+      }));
+    }
+    // Om's rooftops: the rows Om's bookedBySpyne counted, so list and tile share one source. Falls
+    // through to the old rows while Om's list can't be trusted (see agentDrilldownLists).
+    if (apptModal.service === "service") {
+      const om = dir === "Inbound" ? svcAgents.inboundList : svcAgents.outboundList;
+      if (om) return om;
+    }
+    return (feed?.namedAppointments ?? [])
+      .filter((a) => !a.assisted && a.serviceType === apptModal.service && a.channel === dir)
+      .map((a) => ({
+        id: "", leadId: null,
+        customer: a.customer, phone: a.phone || null, vehicle: a.vehicle,
+          /* The ROOFTOP's zone, not null. With null, formatMeetingWhen fell through to Intl with no
+           timeZone — i.e. the VIEWER's browser zone — so this drill-down showed a different time to
+           every person who opened it, and a different time from the table directly behind it. */
+        when: a.when ?? "", tz: feed?.timezone ?? null, status: a.status,
+        serviceType: a.serviceType, assignedTo: null, intent: null, bookedAt: a.bookedAt,
+      }));
+  }, [apptModal, feed?.namedAppointments, feed?.timezone, svcAgents.inboundList, svcAgents.outboundList, svcObFunnel, svcIbNumbers]);
+
+  // Window for the appointment drill-down — the same range the report shows (the server-resolved
+  // store-local dates when we have them, else the bucket name). The modal lists the meetings behind a count.
+  const meetingWindow: { start?: string; end?: string; bucket?: Bucket } =
+    feed?.start && feed?.end ? { start: feed.start, end: feed.end } : { bucket };
+  const openApptDrill = () => {
+    track("appointments_drilldown_opened", { tab: "agents", team_id: teamId, agent: a.id });
+    // A Service card's list follows its source page's window, not the picker, so the title says which.
+    const source = cardFunnelFor(a.id);
+    setApptModal({
+      service: a.id.startsWith("service") ? "service" : "sales",
+      agentType: a.id,
+      title: source ? `Appointments · ${source.windowLabel.replace(/^Same as [^·]+· /, "")}` : `Appointments · ${periodLabel}`,
+      sub: source
+        ? `${r.summary.person} · ${a.name} — the ${source.bookedLabel.toLowerCase()} the ${source.source} page counts`
+        : `${r.summary.person} · ${a.name} — the leads behind this number`,
+    });
+  };
+  // No activity to show for this agent in the selected window — covers both a quiet agent on an
+  // otherwise-busy window AND a fully-empty window on a live rooftop (e.g. "Today" before any calls
+  // sync). Either way show the NoActivity widen-prompt rather than a wall of zeros. (comingSoon is
+  // already handled above, so reaching here means the rooftop has been live.)
+  // Empty when EITHER the resolved live feed carries no agents at all (feedEmpty — never fall back to the
+  // mock skeleton's numbers) OR the selected agent had NO activity of any kind in the window. We gate on
+  // overall activity (leads, conversations, qualified, appts, SMS — not just CALLS): an inbound agent can
+  // have a busy SMS/lead day with zero calls, and a calls-only check wrongly hid it as "no activity"
+  // while the overview counted its leads. Both render the NoActivity widen-prompt rather than zeros.
+  // A Service card on its source page's numbers is never "no activity" while those have any: they ignore
+  // the date picker, so a quiet picker window must not hide them.
+  const funnelHasData = cardFunnelFor(a.id)?.hasData ?? false;
+  const agentEmpty = hasTeam && feed !== null && !funnelHasData && (feedEmpty || (live && !hasAgentActivity(a)));
+  // Unique-lead stage values (same basis everywhere on the page); event-count fallback when
+  // leadFunnel is absent (mock/no-backend).
+  const leadConnected = a.leadFunnel?.connected ?? m.conversations;
+  const leadQualified = a.leadFunnel?.qualified ?? m.qualified;
+  /* The "Warm leads" stat went with the campaigns table it was summed from. Warm leads ARE qualified
+     leads (Ishan, 2026-09-29), so the one list this page shows is Hot & warm leads — qualified and not
+     yet booked — served by /reports/hot-leads. */
+
+  // Shared between the JSX (PerfFunnel / outcome tiles / transfer-quality QCell) and the CSV/XLSX export
+  // below, so the exported numbers always match what's on screen. Every stage is a window-DISTINCT lead
+  // count (from leadFunnel) so the funnel stays monotonic (contacted ≥ connected ≥ qualified ≥
+  // appointments) and never double-counts a lead touched on multiple days. Falls back to event counts
+  // only if leadFunnel is absent. Canonical wordings: "Leads reached" (IB) / "Leads dialed" (OB) ·
+  // "Real conversations" · "Qualified leads" · "Appointments — AI-booked".
+  // Om's API numbers on a Service agent (see serviceAgentsOverlay.ts). Sumit 29-Sep: Service has no
+  // "qualified" field, it reads "Wanted service"; outbound's entry is a dial count, so it says so.
+  // This card's source-page numbers (Service outbound ← Campaigns, Service inbound ← Service Overview).
+  const cf = cardFunnelFor(a.id);
+  const svcOm = !cf && serviceOmOn && agentSvc === "service" && !!(inbound ? svcAgents.inbound : svcAgents.outbound);
+  // Overnight audit 30-Sep: Om returns neededService unavailable for outbound (under half of connected calls
+  // carry an intent), so the overlay keeps the legacy qualified count. Label it by what is shown, not by the flag.
+  const svcWanted = svcOm && (inbound ? svcAgents.inbound : svcAgents.outbound)?.wantedService != null;
+  const qualLabel = svcWanted ? "Wanted service" : "Qualified leads";
+  const entryStageRaw = leadEntryStage(a.dir, a.leadFunnel, r.leadsAttempted);
+  // Om, 29-Sep: the funnel's top has to count conversations, like the bar under it. Customers reached
+  // (leadsReached) and calls dialed (voice only) are different units, which is how Honda DTLA read 569
+  // conversations out of 545 reached (104%). conversationsReached = calls connected + SMS threads replied.
+  const svcNums = svcOm ? (inbound ? svcAgents.inbound : svcAgents.outbound) : null;
+  const entryStage = svcNums && svcNums.conversationsReached !== null
+    ? { label: "Conversations reached", value: svcNums.conversationsReached }
+    : svcOm && !inbound ? { label: "Calls dialed", value: m.calls } : entryStageRaw;
+  const funnelCountHeader = svcOm ? "Count" : "Leads (distinct)";
+  // A Service card on its source page: that page's steps, in its words (CardFunnel).
+  const funnelStages = cf
+    ? cf.stages.map((st) => ({ label: st.label, value: scale(st.value) }))
+    : [
+    { label: entryStage.label, value: scale(entryStage.value) },
+    { label: "Real conversations", value: scale(a.leadFunnel?.connected ?? m.conversations) },
+    { label: qualLabel, value: scale(a.leadFunnel?.qualified ?? m.qualified) },
+    // The step into this stage is the close rate, so it reads the same booked basis (closeRateParts):
+    // booked customers ÷ qualified, not appointment records ÷ qualified customers.
+    { label: "Appointments — AI-booked", value: scale(m.appointments), convFrom: scale(closeRateParts(a).booked) },
+  ];
+  // Transfers and callbacks are inbound operations, not on either source page; they follow the picker.
+  const inboundOps = inbound
+    ? [
+        { label: "Transferred", value: scale(r.callFlow.transferred), accent: "#059669" },
+        ...((r.callFlow.transfersFailed ?? 0) > 0 ? [{ label: "Transfers failed", value: scale(r.callFlow.transfersFailed ?? 0), accent: "#dc2626" }] : []),
+        { label: "Callbacks", value: scale(r.callFlow.callbacks ?? 0), accent: "#ea760c" },
+      ]
+    : [];
+  const outcomeTiles = cf
+    ? [...cf.tiles.map((t) => ({ ...t, value: scale(t.value) })), ...inboundOps]
+    : [
+    { label: "Real conversations", value: scale(leadConnected), accent: "#2563eb" },
+    { label: qualLabel, value: scale(leadQualified), accent: "#813fed" },
+    ...inboundOps,
+  ];
+  // Never blend Sales+Service — pick the transfer-quality row matching this agent's own service type.
+  const tqSvc = a.id.startsWith("service") ? "service" : "sales";
+  const tq = metrics?.transfer_quality.find((t) => t.service_type === tqSvc);
+  const showTransferQuality = tq?.success_rate != null && a.quality.fourthLabel.toLowerCase().includes("transfer");
+  // Rates and the calls tile from the source page (CardFunnel), read by the activity row, the header,
+  // the spreadsheet and the PDF, so they cannot disagree.
+  const cfRates = cf?.rates ?? null;
+  const cfCalls = cf?.callsStat ? { ...cf.callsStat, value: scale(cf.callsStat.value) } : null;
+  const headerCloseRate = cf?.closeRate ?? fmtRate(scale(closeRateParts(a).booked), scale(leadQualified));
+  // The appointment list and its headline: the source page's own booked rows on a Service card.
+  const apptRows = cf ? cf.appointments : r.namedAppointments;
+  const apptHeadline = cf ? scale(cf.booked) : scale(m.appointments);
+  // Day-on-day, Leads by source and the intent table restate the card's stages on other definitions.
+  const hideSvcObExtras = !!cf;
+
+  const buildExportSheets = (): ExportSheet[] => {
+    const tzLabel = feed?.timezone ? tzShortLabel(feed.timezone) : "";
+    const during = scale(Math.max(0, m.calls - m.afterHours));
+    const after = scale(m.afterHours);
+    const summary: ExportSheet = {
+      name: "Summary",
+      rows: [
+        [`${account.name || "Rooftop"} — ${r.summary.person || a.name}`],
+        ["Role", `${a.dept} · ${a.dir}`],
+        ["Period", periodLabel],
+        ...(tzLabel ? [["Timezone", tzLabel]] : []),
+        [],
+        ["Metric", "Value"],
+        ...(cf
+          ? [...(cfCalls ? [[cfCalls.label, cfCalls.value]] : []), ...cf.rates.map((x) => [x.label, x.value])]
+          : [
+              ["Close rate", fmtRate(scale(closeRateParts(a).booked), scale(leadQualified))],
+              ["Turn rate", fmtRate(scale(leadQualified), scale(leadConnected))],
+            ]),
+        [inbound ? "Total calls" : "Calls dispatched", scale(m.calls)],
+        ["Talk time (minutes)", scale(m.talkMinutes)],
+        ["Total SMS", scale(m.smsSent)],
+        // web chat — only when the rooftop actually runs it (see migration 0021)
+        ...(scale(m.chats ?? 0) > 0 ? [["Web chats", scale(m.chats ?? 0)]] : []),
+        ["Calls during hours", during],
+        ["Calls after hours", after],
+        [],
+        ...outcomeTiles.map((t) => [t.label, t.value]),
+        [],
+        [a.quality.primaryLabel, `${a.quality.primary}%`],
+        ["Avg handle time", a.quality.handleTime],
+        ["Opt-outs", scale(m.optOuts)],
+        ...(showTransferQuality && tq ? [[a.quality.fourthLabel, fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)]] : []),
+        [],
+        ...(cf
+          ? [[cf.bookedLabel, apptHeadline], ["Window", cf.windowLabel]]
+          : [
+              ["Total AI-booked appointments", scale(m.appointments)],
+              ...(scale(m.appointmentsAssisted ?? 0) > 0 ? [["AI-assisted (CRM)", scale(m.appointmentsAssisted ?? 0)]] : []),
+            ]),
+      ],
+    };
+
+    const funnel: ExportSheet = {
+      name: "Funnel",
+      rows: [
+        ["Stage", funnelCountHeader, "Conversion from prior stage"],
+        ...funnelStages.map((s, i) => {
+          const prev = i > 0 ? funnelStages[i - 1].value : null;
+          const conv = prev && prev > 0 ? `${Math.round((100 * stepNumerator(s)) / prev)}%` : "";
+          return [s.label, s.value, conv];
+        }),
+      ],
+    };
+
+    const dayOnDay: ExportSheet = {
+      name: "Day-on-day",
+      rows: [
+        ["Day", "Touched", "Qualified", "Appointments"],
+        ...r.dayOnDay.map((d) => [d.day, scale(d.touched), scale(d.qualified), scale(d.appts)]),
+      ],
+    };
+
+    // Service outbound on the Campaigns funnel leaves out the two sections it hides on screen.
+    const sheets = hideSvcObExtras ? [summary, funnel] : [summary, funnel, dayOnDay];
+
+    if (!hideSvcObExtras && r.leadsBySource?.length) {
+      sheets.push({
+        name: "Leads by source",
+        rows: [
+          ["Source", "Interacted", "Total leads", "Appts booked"],
+          ...r.leadsBySource.map((s) => [s.source, scale(s.engaged), scale(s.total), scale(s.appts)]),
+        ],
+      });
+    }
+
+    /* "Active campaigns" and "Outbound outcomes" REMOVED (Ishan, 2026-09-28). Both were built from
+       campaignLeadMappings, a lead universe that disagrees with every other number on this page — its
+       booked count read 77 against a calendar holding 9. Until those outcomes can be expressed over the
+       same reached-lead universe as the rest of the report, showing them put two contradictory answers
+       on one screen. */
+
+    if (r.warmLeads?.length) {
+      sheets.push({
+        name: "Warm leads",
+        rows: [
+          ["Customer", "Phone", "Tier", "Interest", "Campaign", "Last activity", "Service type"],
+          ...r.warmLeads.map((w) => [w.customer, w.phone, w.tier, w.interest, w.campaign, w.lastActivity ?? "", w.serviceType]),
+        ],
+      });
+    }
+
+    if (agentHighlights.length > 0 || showMissed) {
+      sheets.push({
+        name: "Highlights & missed",
+        rows: [
+          ["Wins — best booked calls"],
+          ["Title", "Occurred on"],
+          ...agentHighlights.map((h) => [h.title ?? "", h.occurred_on ?? ""]),
+          ...(showMissed
+            ? [
+                [],
+                ["Missed — outbound demand that slipped"],
+                ["Category", "Channel", "Count"],
+                ...agentMissed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]),
+              ]
+            : []),
+        ],
+      });
+    }
+
+    // The full appointment list behind "Total AI-booked" (report.namedAppointments → report_appointments).
+    // NOTE: this is a DIFFERENT source from the headline count above (m.appointments → report_lead_counts /
+    // agent_lead_days); both apply the SAME rules (source='spyne', warm_transfer/callback excluded,
+    // callback→outbound re-attribution) but at DIFFERENT GRAIN: the headline counts LEADS (canonical — the
+    // spine dedupes uniqExactIf(lead_id)), this sheet lists one row per MEETING. A lead with two bookings is
+    // 1 in the headline and 2 rows here, and the headline windows on the booking CONVERSATION's day while
+    // this list windows on the meeting's booked_at.
+    // That is why the reconciliation rows below are emitted: Honda of Downtown Los Angeles read 111 in the
+    // UI against 126 rows in this CSV and it looked like a bug. Most of that gap was the meta.source=
+    // 'callback' pulled-in-history rows (2.06 meetings/lead at that rooftop), now excluded upstream.
+    // A RESIDUAL REMAINS AND IS NOT FIXABLE HERE — it is an upstream lead-identity split, not a grain
+    // artefact: for the SAME call_id, meetings.lead_id and conversations.leadId frequently disagree (that
+    // rooftop, 30d: 16 of 99 spyne service meetings, 16.2%; fleet 30d: 82 of 1,808, 4.5%, 21 teams). This
+    // sheet attributes by the MEETING's lead, the spine headline by the CONVERSATION's lead, so the two
+    // credit the same booking to different leads and neither side is double-counting. After the callback
+    // fix the rooftop reads 88 (headline) against 93 booked leads / 94 rows here, and the set difference is
+    // 20 one way and 15 the other — the signature of re-attribution, not of miscounting.
+    // Not the modal's live Spyne re-fetch (that's drill-down freshness).
+    if (apptRows?.length) {
+      const aiBooked = apptRows.filter((ap) => !ap.assisted);
+      const aiAssisted = apptRows.length - aiBooked.length;
+      sheets.push({
+        name: "Appointments",
+        rows: [
+          ["How to read this sheet"],
+          [cf ? "Appointment records listed" : "Appointment records listed (AI-booked)", aiBooked.length],
+          [cf ? `${cf.bookedLabel} on the report card (${cf.windowLabel})` : "Headline on the report card (AI-booked)", apptHeadline],
+          ...(aiAssisted > 0 ? [["Appointment records listed (AI-assisted CRM, secondary)", aiAssisted]] : []),
+          /* Both sides count APPOINTMENT RECORDS for this agent, so they should read the same. The old
+             note here said the card counted LEADS and this sheet counted records — true until the card
+             was switched to records, after which it explained a difference that no longer had that
+             cause and hid one that did. */
+          ...(cf
+            ? [["These agree", `${cf.bookedLabel} is the number of records in this list: what the ${cf.source} page counts, over its window.`]]
+            : aiBooked.length === apptHeadline
+            ? [["These agree", "Both count AI-booked appointment records for this agent over the same period."]]
+            : [["Why they differ", "The card is read live from the appointments service; this list is built from the reporting aggregate, which the sync rebuilds every so often. A booking made since the last rebuild appears in one before the other. Neither counts an appointment twice."]]),
+          [],
+          ["Customer", "Phone", "Channel", "Vehicle", "When", "Booked at", "Status", "How", "AI-assisted (CRM)", "Service type"],
+          ...apptRows.map((ap) => [
+            ap.customer, ap.phone, ap.channel ?? "", ap.vehicle, ap.when ?? "", ap.bookedAt ?? "", ap.status, ap.how, ap.assisted ? "Yes" : "No", ap.serviceType,
+          ]),
+        ],
+      });
+    }
+
+    if (inbound && r.intentOutcomes?.length) {
+      sheets.push({
+        name: "Conversations & outcomes",
+        rows: [
+          ["What the customer wanted", "Conversations", "Resolved", "Booked", "Transferred", "Callback"],
+          ...r.intentOutcomes.map((row) => [row.label, row.conversations, row.resolved, row.booked, row.transferred, row.callback]),
+        ],
+      });
+    }
+
+    if (a.id === "sales_ib" && r.speedToLead?.medianUnderMin) {
+      const stl = r.speedToLead;
+      sheets.push({
+        name: "Speed to lead",
+        rows: [
+          ["Metric", "Value"],
+          ["Avg first response", stl.avg],
+          ["New CRM leads", stl.crmLeadsNew],
+          ["% contacted within 5 min", `${stl.pctWithin5}%`],
+          ["Touched instantly", stl.instantlyTouched],
+          ["Touched instantly, after-hours", stl.afterHoursInstant],
+          ["Instant-touch appointments", stl.instantAppts],
+          ["Instant-touch → appointment rate", `${stl.instantApptRate}%`],
+          ...(stl.openFunnel
+            ? [
+                [],
+                ["Path", "Leads handled", "Appointments", "Booked rate"],
+                ["Speed-to-lead", stl.openFunnel.stlLeadsHandled, stl.openFunnel.stlAppts, `${stl.openFunnel.stlRate}%`],
+                ["Follow-up", stl.openFunnel.followupLeadsHandled, stl.openFunnel.followupAppts, `${stl.openFunnel.followupRate}%`],
+              ]
+            : []),
+        ],
+      });
+    }
+
+    // One definition per row — a single cell holding the whole paragraph read as an empty sheet in Excel.
+    sheets.push({ name: "Definitions", rows: [["Term", "What it means"], ...CANONICAL_DEFINITION_ROWS] });
+    return sheets;
+  };
+
+  // Action items live in their own domain (dealer_leads.actionItems via /api/action-items), fetched
+  // fresh here rather than lifted into shared state — this is the only sheet that needs a network
+  // round-trip at export time; everything else in buildExportSheets is already-loaded report data.
+  const buildActionItemsSheet = async (): Promise<ExportSheet> => {
+    const service = a.dept === "Service" ? "service" : "sales";
+    const [stats, items] = await Promise.all([
+      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken, spyneEnv }),
+      fetchAllActionItems(teamId, { scope: "open", service, spyneToken }),
+    ]);
+    return {
+      name: "Action items",
+      rows: [
+        ["Created", "Completed", "Open", "Overdue", "Due today"],
+        stats ? [stats.stats.created, stats.stats.completed, stats.stats.open, stats.stats.overdue, stats.stats.dueToday] : ["—", "—", "—", "—", "—"],
+        [],
+        ["Open queue — customer", "What to do", "Priority", "Due", "Completed"],
+        ...items.map((it) => [it.customer ?? "", it.description || it.intent, it.priority, it.dueAt ?? "", it.completed ? "Yes" : "No"]),
+      ],
+    };
+  };
+
+  const handleExport = async (format: "csv" | "xlsx") => {
+    track("report_exported", { tab: "agents", team_id: teamId, format });
+    const filename = `${exportFilenameStem(`${account.name} - ${r.summary.person || a.name}`, periodLabel)}.${format}`;
+    const sheets = buildExportSheets();
+    sheets.push(await buildActionItemsSheet());
+    if (format === "csv") downloadCSV(filename, sheets);
+    else downloadXLSX(filename, sheets);
+  };
+
+  const buildPdfSections = (): PdfSection[] => {
+    const during = scale(Math.max(0, m.calls - m.afterHours));
+    const after = scale(m.afterHours);
+    const sections: PdfSection[] = [
+      {
+        heading: "Performance",
+        blocks: [
+          {
+            kind: "rows",
+            rows: [
+              ...(cf
+                ? [...(cfCalls ? [[cfCalls.label, cfCalls.value]] : []), ...cf.rates.map((x) => [x.label, x.value])]
+                : [
+                    ["Close rate", fmtRate(scale(closeRateParts(a).booked), scale(leadQualified))],
+                    ["Turn rate", fmtRate(scale(leadQualified), scale(leadConnected))],
+                  ]),
+              [inbound ? "Total calls" : "Calls dispatched", `${scale(m.calls)} (${scale(m.talkMinutes)} min talk)`],
+              ["Total SMS", scale(m.smsSent)],
+              ...(scale(m.chats ?? 0) > 0 ? [["Web chats", scale(m.chats ?? 0)]] : []),
+              ["Calls during hours", during],
+              ["Calls after hours", after],
+            ],
+          },
+        ],
+      },
+      {
+        heading: cf ? `${cf.flow} funnel (${cf.windowLabel})` : "Lead-to-appointment funnel",
+        blocks: [{ kind: "rows", columns: ["Stage", funnelCountHeader, "Conversion from prior stage"], rows: funnelStages.map((s, i) => {
+          const prev = i > 0 ? funnelStages[i - 1].value : null;
+          const conv = prev && prev > 0 ? `${Math.round((100 * stepNumerator(s)) / prev)}%` : "—";
+          return [s.label, fmtInt(s.value), conv];
+        }) }, { kind: "rows", title: "Call breakdown", rows: outcomeTiles.map((t) => [t.label, fmtInt(t.value)]) }],
+      },
+      {
+        heading: "Quality",
+        blocks: [{
+          kind: "rows",
+          rows: [
+            [a.quality.primaryLabel, `${a.quality.primary}%`],
+            ["Avg handle time", a.quality.handleTime],
+            ["Opt-outs", scale(m.optOuts)],
+            ...(showTransferQuality && tq ? [[a.quality.fourthLabel, fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)]] : []),
+          ],
+        }],
+      },
+      ...(hideSvcObExtras ? [] : [{
+        heading: "Day-on-day",
+        blocks: [{ kind: "rows" as const, columns: ["Day", "Touched", "Qualified", "Appointments"], rows: r.dayOnDay.map((d) => [d.day, scale(d.touched), scale(d.qualified), scale(d.appts)]) }],
+      }]),
+    ];
+
+    if (inbound && r.intentOutcomes?.length) {
+      sections.push({
+        heading: "What customers wanted",
+        blocks: [{ kind: "rows", columns: ["Topic", "Conversations", "Resolved", "Booked", "Transferred", "Callback"], rows: r.intentOutcomes.map((row) => [row.label, row.conversations, row.resolved, row.booked, row.transferred, row.callback]) }],
+      });
+    }
+
+    if (!hideSvcObExtras && r.leadsBySource?.length) {
+      sections.push({
+        heading: "Leads by source",
+        blocks: [{ kind: "rows", columns: ["Source", "Interacted", "Total leads", "Appts booked"], rows: r.leadsBySource.map((s) => [s.source, scale(s.engaged), scale(s.total), scale(s.appts)]) }],
+      });
+    }
+
+    if (a.id === "sales_ib" && r.speedToLead?.medianUnderMin) {
+      const stl = r.speedToLead;
+      sections.push({
+        heading: "Speed to lead",
+        blocks: [
+          {
+            kind: "rows",
+            rows: [
+              ["Avg first response", stl.avg],
+              ["New CRM leads", stl.crmLeadsNew],
+              ["% contacted within 5 min", `${stl.pctWithin5}%`],
+              ["Touched instantly", stl.instantlyTouched],
+              ["Instant-touch appointments", stl.instantAppts],
+              ["Instant-touch-to-appointment rate", `${stl.instantApptRate}%`],
+            ],
+          },
+          ...(stl.openFunnel
+            ? [{ kind: "rows" as const, title: "By path", columns: ["Path", "Leads handled", "Appointments", "Booked rate"], rows: [
+                ["Speed-to-lead", stl.openFunnel.stlLeadsHandled, stl.openFunnel.stlAppts, `${stl.openFunnel.stlRate}%`],
+                ["Follow-up", stl.openFunnel.followupLeadsHandled, stl.openFunnel.followupAppts, `${stl.openFunnel.followupRate}%`],
+              ] }]
+            : []),
+        ],
+      });
+    }
+
+
+    if (apptRows?.length) {
+      const preview = apptRows.slice(0, 30);
+      sections.push({
+        heading: "Appointments",
+        blocks: [
+          { kind: "rows", columns: ["Customer", "Vehicle", "When", "How booked", "Status"], rows: preview.map((ap) => [ap.customer, ap.vehicle || "—", ap.when ? fmtWhenShort(ap.when, feed?.timezone) : "—", ap.how, ap.status || "—"]) },
+          ...(apptRows.length > preview.length
+            ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${apptRows.length} appointment records — download the CSV or XLSX for the complete list.` }]
+            : []),
+          // Same grain caveat the CSV sheet spells out: this list is per MEETING, the card counts LEADS.
+          ...(apptRows.filter((ap) => !ap.assisted).length !== apptHeadline
+            ? [{ kind: "note" as const, text: `The card shows ${fmtInt(apptHeadline)} because it counts leads with an appointment; this list has one row per appointment record, and one lead can hold more than one.` }]
+            : []),
+        ],
+      });
+    }
+
+    if (r.warmLeads?.length) {
+      const preview = r.warmLeads.slice(0, 20);
+      sections.push({
+        heading: "Hot & warm leads",
+        blocks: [
+          { kind: "rows", columns: ["Customer", "Phone", "Tier", "Interest", "Last activity"], rows: preview.map((w) => [w.customer, w.phone, w.tier, w.interest, w.lastActivity ?? "—"]) },
+          ...(r.warmLeads.length > preview.length
+            ? [{ kind: "note" as const, text: `Showing the ${preview.length} most urgent of ${r.warmLeads.length} warm leads — download the CSV or XLSX for the rest.` }]
+            : []),
+        ],
+      });
+    }
+
+    if (agentHighlights.length > 0 || showMissed) {
+      sections.push({
+        heading: "Highlights & missed opportunities",
+        blocks: [
+          ...(agentHighlights.length ? [{ kind: "rows" as const, title: "Wins — best booked calls", columns: ["Title", "Occurred on"], rows: agentHighlights.slice(0, 15).map((h) => [h.title ?? "", h.occurred_on ?? ""]) }] : []),
+          ...(showMissed ? [{ kind: "rows" as const, title: "Missed — outbound demand that slipped", columns: ["Category", "Channel", "Count"], rows: agentMissed.map((mm) => [MISSED_LABELS[mm.category] ?? mm.category, mm.channel, mm.count]) }] : []),
+        ],
+      });
+    }
+
+    return sections;
+  };
+
+  const buildActionItemsPdfSection = async (): Promise<PdfSection> => {
+    const service = a.dept === "Service" ? "service" : "sales";
+    const [stats, items] = await Promise.all([
+      fetchActionItemStats(teamId, { start: win.start, end: win.end, service, spyneToken, spyneEnv }),
+      fetchAllActionItems(teamId, { scope: "open", service, spyneToken }),
+    ]);
+    const preview = items.slice(0, 30);
+    return {
+      heading: "Action items",
+      blocks: [
+        {
+          kind: "rows",
+          rows: stats
+            ? [["Created", fmtInt(stats.stats.created)], ["Completed", fmtInt(stats.stats.completed)], ["Open now", fmtInt(stats.stats.open)], ["Overdue", fmtInt(stats.stats.overdue)], ["Due today", fmtInt(stats.stats.dueToday)]]
+            : [["Created", "—"], ["Completed", "—"], ["Open now", "—"], ["Overdue", "—"], ["Due today", "—"]],
+        },
+        { kind: "rows", title: "Open queue", columns: ["Customer", "What to do", "Priority", "Due"], rows: preview.map((it) => [it.customer ?? "—", it.description || it.intent, it.priority, it.dueAt ?? "—"]) },
+        ...(items.length > preview.length
+          ? [{ kind: "note" as const, text: `Showing the ${preview.length} most recent of ${items.length} open items — download the CSV or XLSX for the complete list.` }]
+          : []),
+      ],
+    };
+  };
+
+  const handlePrint = async () => {
+    track("report_exported", { tab: "agents", team_id: teamId, format: "print" });
+    const sections = buildPdfSections();
+    sections.push(await buildActionItemsPdfSection());
+    sections.push({ heading: "Definitions", blocks: [{ kind: "note", text: CANONICAL_DEFINITIONS }] });
+    await buildPdfReport(sections, {
+      filename: `${exportFilenameStem(`${account.name} - ${r.summary.person || a.name}`, periodLabel)}.pdf`,
+      title: `${account.name || "Rooftop"} — ${r.summary.person || a.name}`,
+      subtitle: `${r.summary.person || a.name} · ${a.dept} · ${a.dir} · ${periodLabel}${feed?.timezone ? ` · times in ${tzShortLabel(feed.timezone)}` : ""}`,
+    });
+  };
+
+  // RETCONVAI-5066 (coordinator, 28-Sep): Service + the flag on gets a SEPARATE, minimal render — not a
+  // sprinkling of hides through the 1000+ lines below — so this stays provably byte-identical for Sales
+  // and flag-off Service (the huge return below is completely untouched, never re-entered on this path).
+  // Only the three sanctioned twins render; every per-agent/funnel/outcomes/library number this page
+  // otherwise shows has none (see the comment above svcMetrics for the full list) and simply isn't built.
+  if (serviceMetricsOn) {
+    const appt = svcMetrics.appointments;
+    const ai = svcMetrics.actionItems;
+    const upcoming = svcMetrics.namedAppointments ?? [];
+    return (
+      <div className="flex min-h-screen bg-[#fafafa]">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <ReportTopBar
+            title="Agent performance"
+            subtitle="Appointments and action items for this rooftop."
+            active="agents"
+            teamId={teamId}
+            query={navQuery}
+            back={`/reports${navQuery}`}
+            right={hasTeam ? (
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
+                <DateFilter
+                  bucket={bucket}
+                  custom={custom}
+                  onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
+                  onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "agents", range: "custom", team_id: teamId }); }}
+                />
+              </div>
+            ) : undefined}
+          />
+          <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Card title="Appointments" sub="Booked by Spyne, this window">
+                {appt ? (
+                  <div className="flex flex-col gap-1 px-1 py-1">
+                    <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(appt.total)}</p>
+                    <p className="text-[12px] text-[#6b7280]">{appt.inbound != null || appt.outbound != null ? `${fmtInt(appt.inbound ?? 0)} inbound · ${fmtInt(appt.outbound ?? 0)} outbound` : "Booked by Spyne"}</p>
+                  </div>
+                ) : (
+                  <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No appointment data for {periodLabel} yet.</p>
+                )}
+              </Card>
+              {/* openNow only — ov-prod's Overview never renders pastSla (it's shown on ov-prod's separate
+                  Action Items tab, with its own window-vs-live caveat; this route mirrors Overview's
+                  twins only, per the coordinator's own scope for this page). */}
+              <Card title="Action items" sub="Waiting on your team, live count">
+                {ai ? (
+                  <div className="flex flex-col gap-1 px-1 py-1">
+                    <p className="text-[28px] font-extrabold tabular-nums text-[#111]">{fmtInt(ai.openNow)}</p>
+                    <p className="text-[12px] text-[#6b7280]">open now</p>
+                  </div>
+                ) : (
+                  <p className="px-1 py-1 text-[12.5px] text-[#6b7280]">No action-item data for {periodLabel} yet.</p>
+                )}
+              </Card>
+            </div>
+            <div className="flex flex-col gap-3.5">
+              <SectionLabel>Upcoming appointments</SectionLabel>
+              <Card title="" pad={upcoming.length === 0}>
+                {upcoming.length > 0 ? (
+                  <div className="flex flex-col gap-2 px-4 py-3">
+                    {upcoming.map((it, i) => (
+                      <div key={`${it.customer}-${i}`} className="flex items-center justify-between gap-3 border-b border-[#f0f0f0] pb-2 last:border-0 last:pb-0">
+                        <div className="min-w-0">
+                          <span className="font-semibold text-[#111]">{it.customer}</span>
+                          {it.vehicle && <span className="ml-2 text-[11px] text-[#6b7280]">{it.vehicle}</span>}
+                        </div>
+                        <span className="flex-none text-[11px] tabular-nums text-[#6b7280]">{it.when ? fmtWhenShort(it.when, feed?.timezone) : ""}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState icon="📅" title="No upcoming appointments" body="New bookings from Spyne show up here." />
+                )}
+              </Card>
+            </div>
+            {ai && ai.items.length > 0 && (
+              <div className="flex flex-col gap-3.5">
+                <SectionLabel>Waiting on your team</SectionLabel>
+                <Card title="" pad={false}>
+                  <div className="overflow-x-auto px-[15px]">
+                    <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
+                      <thead>
+                        <tr>
+                          <Th>Customer</Th>
+                          <Th>What to do</Th>
+                          <Th>Due</Th>
+                          <Th>Status</Th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ai.items.map((it, i) => (
+                          <tr key={`${it.customer}-${i}`} className="border-t border-[#f0f0f0]">
+                            <Td><span className="font-semibold text-[#111]">{it.customer}</span></Td>
+                            <Td><span className="text-[#374151]">{it.what}</span></Td>
+                            <Td><span className={it.isLate ? "font-semibold text-[#dc2626]" : "text-[#6b7280]"}>{it.due ? fmtWhenShort(it.due, feed?.timezone) : ""}</span></Td>
+                            <Td>{it.isLate ? <span className="font-semibold text-[#dc2626]">Overdue</span> : <span className="font-semibold text-[#2563eb]">Open</span>}</Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              </div>
+            )}
+          </main>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-screen bg-[#fafafa]">
+      <div className="flex min-w-0 flex-1 flex-col">
+
+        <ReportTopBar
+          title="Agent performance"
+          subtitle="ROI, pipeline and quality by agent — Sales & Service, inbound & outbound."
+          active="agents"
+          teamId={teamId}
+          query={navQuery}
+          back={`/reports${navQuery}`}
+          right={
+            hasTeam ? (
+              <div className="no-print flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
+                <DateFilter
+                  bucket={bucket}
+                  custom={custom}
+                  onPreset={(b) => { setPreset(b); track("date_range_changed", { tab: "agents", range: b, team_id: teamId }); }}
+                  onCustom={(r) => { setCustom(r); track("date_range_changed", { tab: "agents", range: "custom", team_id: teamId }); }}
+                />
+                <button
+                  onClick={refresh}
+                  disabled={feed === null}
+                  aria-label="Refresh data"
+                  title="Refresh"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#e5e7eb] bg-white text-[#6b7280] transition-colors hover:bg-[#faf8ff] hover:text-[#813fed] disabled:opacity-50"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={feed === null ? "animate-spin" : ""}>
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                    <path d="M21 3v6h-6" />
+                  </svg>
+                </button>
+                {/* Exports the AGENT report. In library view the reader is looking at something else and
+                    each report carries its own download, so two "Download" buttons would export the wrong
+                    thing half the time. */}
+                {view2 === "agent" && <ExportMenu onPrint={handlePrint} onCSV={() => handleExport("csv")} onXLSX={() => handleExport("xlsx")} />}
+              </div>
+            ) : (
+              <span className="rounded-lg bg-[#f3eaff] px-3 py-1.5 text-[12px] font-semibold text-[#813fed]">{view.liveLabel}</span>
+            )
+          }
+        />
+
+        <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 sm:px-6 lg:px-10 pt-6 pb-36 flex flex-col gap-6">
+          {scenario === "first_time" && <FirstTimeAgents agent={a} />}
+
+          {scenario !== "first_time" && live && !hasTeam && (
+            <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[#e0e0e0] bg-[#fcfcfd] px-6 py-16 text-center">
+              <span className="text-[26px] leading-none">🏢</span>
+              <p className="text-[14px] font-bold text-[#111]">We couldn’t tell which dealership to show</p>
+              <p className="max-w-[460px] text-[12.5px] leading-snug text-[#6b7280]">
+                Open your report from your dashboard so it loads the right dealership. If you reached this page another
+                way, your administrator can point you to the correct link.
+              </p>
+            </div>
+          )}
+
+          {scenario !== "first_time" && live && hasTeam && (feed === null || degraded) && <ReportSkeleton />}
+
+          {/* Denied, not empty. Sits above the coming-soon / no-activity gates because a denial produces the
+              same shape as both (no agents, no everLive) and would otherwise be read as "no data yet". */}
+          {scenario !== "first_time" && live && hasTeam && unauthorized && (
+            <ReportAccessDenied tab="agents" teamId={teamId} name={account.name} status={feed?.authStatus} />
+          )}
+
+          {scenario !== "first_time" && live && hasTeam && comingSoon && <RooftopComingSoon name={account.name} />}
+
+          {/* Live, resolved rooftop whose feed carries no agents/activity for the window — show the empty
+              state, NOT the mock skeleton's switcher pills + fake report (the P1-3 bug). */}
+          {scenario !== "first_time" && live && hasTeam && feed !== null && !degraded && !unauthorized && !comingSoon && feedEmpty && (
+            <NoActivity name={account.name || "this rooftop"} onWiden={() => { setPreset("last30"); track("empty_window_widened", { team_id: teamId, agent: activeId }); }} />
+          )}
+
+          {scenario !== "first_time" && (!live || (hasTeam && feed !== null && !unauthorized && !comingSoon && !feedEmpty)) && (
+          <>
+          {/* Agent report ⇄ report library, at the same URL. */}
+          <div className="no-print flex items-center gap-1 self-start rounded-xl bg-[#f1f2f5] p-1">
+            {([["agent", "Agent report"], ["library", "All reports"]] as const).map(([v, label]) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => { setView2(v); setLibraryReport(null); }}
+                aria-pressed={view2 === v}
+                className={`rounded-lg px-4 py-1.5 text-[12.5px] font-semibold transition-colors ${
+                  view2 === v ? "bg-white text-[#813fed] shadow-sm" : "text-[#6b7280] hover:text-[#374151]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {view2 === "library" ? (
+            <ReportLibraryPanel navQuery={navQuery} initialReportId={libraryReport} onOpenAgent={(id: string) => { setActiveId(id); setView2("agent"); userPickedRef.current = true; }} />
+          ) : (
+          <>
+          {/* Agent switcher — equal pills filling the row, the selected one driving the report below.
+              Column count follows the number of agents rather than a fixed four: with the other
+              department's upsell pills removed there are two, and a hard-coded four left half the row
+              empty. */}
+          <div
+            // Mobile QA 29-Sep: the inline column count applied at every width, so 3+ agents
+            // squeezed side by side on a phone. One column on phone, the count from sm up.
+            className={`grid grid-cols-1 gap-2.5 sm:grid-cols-2 ${visibleAgents.length > 2 ? "sm:[grid-template-columns:repeat(var(--agent-cols),minmax(0,1fr))]" : ""}`}
+            style={visibleAgents.length > 2 ? ({ "--agent-cols": visibleAgents.length } as React.CSSProperties) : undefined}
+          >
+            {visibleAgents.map((ag) => {
+              const selected = ag.id === activeId;
+              // The same stage the selected agent's funnel opens with — see the comment on the count below.
+              const chipFunnel = cardFunnelFor(ag.id);
+              const chipStage = chipFunnel
+                ? chipFunnel.chip
+                : leadEntryStage(ag.dir, ag.leadFunnel, ag.report.leadsAttempted);
+              return (
+                <button
+                  key={ag.id}
+                  onClick={() => { userPickedRef.current = true; setActiveId(ag.id); track("agent_switched", { team_id: teamId, agent: ag.id }); }}
+                  className={`flex items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-all ${
+                    selected
+                      ? "border-[#813fed] bg-[#faf8ff] shadow-[0_0_0_3px_rgba(129,63,237,0.12)]"
+                      : "border-[#e5e7eb] bg-white hover:border-[#c4b5fd] hover:bg-[#faf8ff]"
+                  }`}
+                >
+                  <span className={`flex h-9 w-9 flex-none items-center justify-center rounded-lg text-[18px] leading-none ${selected ? "bg-white shadow-sm" : "bg-[#f6f1ff]"}`}>
+                    {ag.icon}
+                  </span>
+                  <span className="flex flex-col">
+                    <span className={`text-[13px] font-bold leading-tight ${selected ? "text-[#111]" : "text-[#374151]"}`}>{ag.name}</span>
+                    <span className="mt-0.5 text-[11px] leading-none text-[#6b7280]">
+                      {/* MUST MATCH THE FUNNEL THIS CHIP SELECTS. It used to hardcode `leadsAttempted`
+                          ("leads attempted") for both directions, while the funnel head below uses
+                          leadEntryStage — which is `contacted` for Inbound but `dialed` for Outbound.
+                          So the two agreed on inbound and contradicted each other on outbound: 823 on
+                          the chip over a funnel starting at 622, because 201 of those leads were only
+                          ever texted, never dialed. Both numbers were right; showing them under the same
+                          word was not. Reading the stage here keeps the chip and the funnel the same
+                          number AND the same noun. */}
+                      <b className="tabular-nums text-[#111]">{view.agentLive ? fmtInt(chipStage.value * factor) : "—"}</b> {chipStage.label.toLowerCase()}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {scenario === "onboarding" && <OnboardingAgents agent={a} view={view} />}
+
+          {live && agentEmpty && (
+            <NoActivity name={a.name} onWiden={() => { setPreset("last30"); track("empty_window_widened", { team_id: teamId, agent: a.id }); }} />
+          )}
+
+          {live && !agentEmpty && (
+          <>
+          {scenario === "recently_live" && (
+            <CalibratingBanner
+              title={`${r.summary.person} has been live ${view.daysLive} days — these are early numbers.`}
+              body="Coverage and speed are real from day one; booking rates and trends keep firming up as volume grows."
+            />
+          )}
+
+          <div className="flex items-center justify-between gap-3">
+            <SectionLabel hint={periodLabel}>Performance</SectionLabel>
+            {hasTeam && (
+              <span className="no-print flex-none text-[11px] text-[#9ca3af]" title={feed?.timezone ? `Report days & times use this rooftop's timezone (${feed.timezone})` : undefined}>
+                {feed?.timezone ? `Times in ${tzShortLabel(feed.timezone)}` : ""}
+                {feed?.timezone && (feed === null || feed?.fetchedAt) ? " · " : ""}
+                {feed === null
+                  ? "Syncing…"
+                  /* The AGGREGATE's own age, not this page's. fetchedAt is always "just now" and said so
+                     over data the ETL had not rebuilt for hours — see syncedAt in liveData. */
+                  : feed?.syncedAt
+                    ? `Synced ${relTime(Date.parse(feed.syncedAt), now)}`
+                    : feed?.fetchedAt ? `Synced ${relTime(feed.fetchedAt, now)}` : ""}
+              </span>
+            )}
+          </div>
+
+          {/* Performance — outcome funnel (primary) → activity (secondary) → call breakdown (tertiary) */}
+          <div className="overflow-hidden rounded-2xl border border-[#e5e7eb] bg-white shadow-sm">
+            {/* header — agent identity (persona · name · health · period) + booking rate */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#f0f0f0] bg-gradient-to-r from-[#faf8ff] to-white px-6 py-4">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-white text-[17px] leading-none shadow-sm">{a.icon}</span>
+                <div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <p className="text-[14px] font-bold leading-tight text-[#111]">{r.summary.person}</p>
+                    <span className="text-[12px] font-medium text-[#9ca3af]">{a.name}</span>
+                  </div>
+                  <p className="mt-0.5 text-[11px] leading-tight text-[#9ca3af]">{cf ? `${cf.flow} · ${cf.windowLabel}` : `Lead → appointment funnel · ${periodLabel}`}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2.5 rounded-xl bg-white px-4 py-2 shadow-sm ring-1 ring-[#ece6fb]">
+                <div className="text-right leading-tight">
+                  {/* canonical wording: appts ÷ qualified is the "Close rate" (was "Booking rate").
+                      Fraction (never a rounded "0%") when the numerator is real but rounds to zero. */}
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-[#9ca3af]">Close rate</p>
+                </div>
+                <p className="text-[32px] font-extrabold tabular-nums leading-none text-[#813fed]">{headerCloseRate}</p>
+              </div>
+            </div>
+
+            {/* primary: the lead → qualified → appointment funnel */}
+            <div className="px-6 py-6">
+              <PerfFunnel
+                stages={funnelStages}
+                appointmentsDrill={live && apptHeadline > 0 ? openApptDrill : undefined}
+              />
+              {cf && <p className="mt-4 text-[11px] leading-snug text-[#9ca3af]">{cf.caption}</p>}
+            </div>
+
+            {/* secondary: activity — key volume + rates. Outbound adds a Warm leads total (rooftop-wide). */}
+            <div className={`grid grid-cols-2 divide-x divide-y divide-[#f3f4f6] border-t border-[#f0f0f0] bg-[#fcfcfd] sm:grid-cols-4 sm:divide-y-0 ${(cfRates ? 2 + cfRates.length : 4) + (scale(m.chats ?? 0) > 0 ? 1 : 0) >= 6 ? "lg:grid-cols-6" : (cfRates ? 2 + cfRates.length : 4) + (scale(m.chats ?? 0) > 0 ? 1 : 0) === 5 ? "lg:grid-cols-5" : ""}`}>
+              {cfCalls
+                ? <ActivityStat label={cfCalls.label} value={fmtInt(cfCalls.value)} hint={cfCalls.hint} />
+                : <ActivityStat label={inbound ? "Total calls" : "Calls dispatched"} value={fmtInt(scale(m.calls))} hint={`${fmtInt(scale(m.talkMinutes))} mins talk`} />}
+              <ActivityStat label="Total SMS" value={fmtInt(scale(m.smsSent))} />
+              {/* web chat — the third channel; shown only on rooftops that actually run it (migration 0021) */}
+              {scale(m.chats ?? 0) > 0 ? <ActivityStat label="Web chats" value={fmtInt(scale(m.chats ?? 0))} hint="sessions" /> : null}
+              {cfRates ? cfRates.map((x) => <ActivityStat key={x.label} label={x.label} value={x.value} hint={x.hint} accent={x.accent} />) : (<>
+              <ActivityStat label="Turn rate" value={fmtRate(scale(leadQualified), scale(leadConnected))} hint={svcWanted ? "wanted service ÷ conversations" : "qualified ÷ conversations"} accent="#813fed" />
+              {/* BOTH directions show close rate. Outbound used to show "Warm leads" here, summed from
+                  the campaigns table — a different lead universe with its own vocabulary. Warm leads ARE
+                  qualified leads (Ishan, 2026-09-29), so the one number worth this slot is the same one
+                  inbound shows.
+                  The hints stay direction-agnostic but follow the service overlay: on a service agent
+                  reporting wantedService, the qualified stage IS "wanted service", so the denominator is
+                  named that way instead (RETCONVAI-5066). */}
+              <ActivityStat label="Close rate" value={fmtRate(scale(closeRateParts(a).booked), scale(leadQualified))} hint={svcWanted ? "AI-booked ÷ wanted service" : "AI-booked ÷ qualified"} accent="#059669" />
+              </>)}
+            </div>
+
+            {/* tertiary: call breakdown — coverage split + outcome tiles, only what live volume gives us */}
+            <div className="border-t border-[#f0f0f0] px-6 py-5">
+              <p className="mb-4 text-[11px] font-bold uppercase tracking-wider text-[#6b7280]">Call breakdown</p>
+
+              {/* coverage: during vs after hours as a share bar */}
+              {(() => {
+                const during = scale(Math.max(0, m.calls - m.afterHours));
+                const after = scale(m.afterHours);
+                const tot = during + after;
+                const dPct = tot ? Math.round((during / tot) * 100) : 0;
+                return (
+                  <div className="mb-5">
+                    <div className="flex h-2 overflow-hidden rounded-full bg-[#f0f0f0]" role="img" aria-label={`${during} calls during hours, ${after} after hours`}>
+                      <div style={{ width: `${dPct}%`, background: "#813fed" }} />
+                      <div style={{ width: `${100 - dPct}%`, background: "#d8ccf7" }} />
+                    </div>
+                    <div className="mt-2.5 flex flex-wrap gap-x-6 gap-y-1 text-[11.5px] text-[#6b7280]">
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: "#813fed" }} /><b className="tabular-nums text-[#111]">{fmtInt(during)}</b> during hours</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: "#d8ccf7" }} /><b className="tabular-nums text-[#111]">{fmtInt(after)}</b> after hours</span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* outcomes — Conversations/Qualified are UNIQUE LEADS (same basis as the funnel above), so
+                  each label reads one consistent number across the page. Transferred/Callbacks are an
+                  inbound concept — outbound agents don't show them; failed transfers stay SEPARATE. */}
+              <div className={`grid grid-cols-2 gap-2.5 sm:grid-cols-3 ${inbound ? "lg:grid-cols-5" : "lg:grid-cols-2"}`}>
+                {outcomeTiles.map((b) => (
+                  <div key={b.label} className="rounded-xl border border-[#f0f0f0] bg-[#fafafa] px-3.5 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 flex-none rounded-full" style={{ background: b.accent }} />
+                      <span className="text-[23px] font-extrabold tabular-nums leading-none text-[#111]">{fmtInt(b.value)}</span>
+                    </div>
+                    <span className="mt-1.5 block text-[11px] leading-tight text-[#6b7280]">{b.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Day-on-day sits with the other trends for a SALES agent (see the Trends block lower down) —
+              on Service it stays here, where it has always been. */}
+          {/* Not on Service outbound with the Campaigns funnel: its Touched/Qualified days come from the
+              aggregate's definitions and would not add up to the funnel above. */}
+          {!isSales && !hideSvcObExtras && (
+            <Card title="Day-on-day" sub="Touched → Qualified → Appointments, per day">
+              <DayTrend points={r.dayOnDay} />
+            </Card>
+          )}
+
+          {/* ── conversations & outcomes ──
+              SUPERSEDED by the eval-pipeline flow below, which answers the same question ("what did the
+              customer want, and how was it handled") with the intent → outcome drill-down instead of a
+              flat table. Kept as the FALLBACK for a rooftop the scorer hasn't reached yet, or an outage —
+              those rooftops would otherwise lose the section entirely. */}
+          {inbound && !cf && (r.intentOutcomes?.length ?? 0) > 0 && !hasOutcomes && (
+            <>
+              {/* The CONVERSATION total ties to the funnel; the outcome columns cover tagged intents only,
+                  which the table now states under itself. The old hint claimed the whole block tied. */}
+              <SectionLabel hint="call conversations · conversation total ties to the funnel">Conversations &amp; outcomes</SectionLabel>
+              <Card
+                title="What customers wanted & how it was handled"
+                sub="Per intent, across real conversations (distinct leads who engaged — lower than total calls, which counts every dial): resolved by the agent, and the hand-offs"
+              >
+                <IntentOutcomeTable rows={r.intentOutcomes!} totalConversations={leadConnected} />
+              </Card>
+            </>
+          )}
+
+          {/* ── THE CONVERSATION STORY (sales agents only — Service is untouched) ──
+              The spine of the rebuilt sales page, in the order a dealer reads it:
+                1. what came out of the conversations   (headline numbers)
+                2. what each customer wanted, and what happened   (the flow)
+                3. where appointments are won and lost   (the leak funnel)
+                4. what happened when they asked for a person   (hand-offs)
+                5. how interested those customers were
+              Tool plumbing, the missed-better-outcome count and the AI/system evidence badges are
+              deliberately absent — this page is read by the dealer. */}
+          {isSales && hasOutcomes && outcomes && (
+            <>
+              <SectionLabel hint={periodLabel}>What came out of the conversations</SectionLabel>
+              {/* Same appointment count as the funnel card above and the drill below it. */}
+              <OutcomeKpis o={outcomes} appointments={scale(m.appointments)} transfers={r.callFlow ? scale(r.callFlow.transferred) : null} />
+              <CallFlowCard
+                o={outcomes}
+                calls={m.calls}
+                title={`What your ${inbound ? "callers" : "customers"} wanted`}
+                sub={`Every conversation ${r.summary.person || a.name} had, and what came of it · click a row to drill in`}
+                appointments={scale(m.appointments)}
+                /* Segments open the calls behind them. Same store-local window the rest of the page is
+                   showing, and the same department the URL scoped it to. */
+                drill={{ teamId, serviceType: agentSvc, ...meetingWindow, spyneToken, spyneEnv }}
+              />
+              {/* Dropped in the NEW variant (2026-09-24), kept in OLD so that arm matches production. */}
+              {variant === "old" && <AppointmentLeakCard o={outcomes} appointments={scale(m.appointments)} />}
+              <HandoffsCard o={outcomes} />
+              <ConversationQualityCard o={outcomes} calls={m.calls} />
+            </>
+          )}
+
+          <SectionLabel>{inbound ? "Inbound operations" : "Outbound campaigns"}</SectionLabel>
+
+          {/* ── Leads by source (inbound + outbound) + speed-to-lead (SALES inbound only) ── */}
+          {/* Not on Service outbound with the Campaigns funnel: its totals come from a different lead
+              universe and would contradict the funnel above. */}
+          {r.leadsBySource && !hideSvcObExtras && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+              <div className={a.id === "sales_ib" ? "lg:col-span-2" : "lg:col-span-3"}>
+                {/* Was a flat source/interacted/total/booked table with no stage split and no way to open
+                    a number. Now the same view the report library shows, scoped to THIS agent's
+                    direction so an "Inbound operations" card cannot carry outbound leads. */}
+                <LeadsByTypeCard
+                  teamId={teamId}
+                  dept={agentSvc === "service" ? "service" : "sales"}
+                  direction={inbound ? "inbound" : "outbound"}
+                  window={custom ? { start: custom.start, end: addDay(custom.end) } : { bucket }}
+                  periodLabel={periodLabel}
+                  spyneToken={spyneToken}
+                />
+              </div>
+              {a.id === "sales_ib" && (
+                <Card title="Speed to lead" sub="How fast new CRM leads get a first touch">
+                  {r.speedToLead && r.speedToLead.medianUnderMin ? (
+                    <div className="flex flex-col gap-4">
+                      <div>
+                        <p className="text-[30px] font-extrabold tabular-nums text-[#813fed] leading-none">{r.speedToLead.avg}</p>
+                        <p className="text-[11.5px] text-[#6b7280] mt-1">{r.speedToLead.pctWithin5}% of new leads contacted within 5 min</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <SummaryStat label="Leads touched instantly" value={fmtInt(scale(r.speedToLead.instantlyTouched))} accent="#10b981" />
+                        <SummaryStat label="After-hours touched instantly" value={fmtInt(scale(r.speedToLead.afterHoursInstant))} />
+                        {/* A SUBSET, so it must not borrow the page's appointment label. This counts
+                            bookings that came from a lead touched within five minutes; the page-wide
+                            appointment figure is the booking-record count on the card above. Labelled
+                            identically it read "APPOINTMENTS BOOKED 15" under one reading 49. */}
+                        <SummaryStat label="Booked from an instant touch" value={fmtInt(scale(r.speedToLead.instantAppts))} accent="#813fed" />
+                        <SummaryStat label="Instant → appointment" value={`${r.speedToLead.instantApptRate}%`} />
+                      </div>
+                      <StlOpenFunnel data={r.speedToLead.openFunnel} />
+                    </div>
+                  ) : (
+                    <StlUpsell accountName={account.name} teamId={teamId} stl={r.speedToLead} />
+                  )}
+                </Card>
+              )}
+            </div>
+          )}
+
+          {/* ── Appointments (ONE card: total booked + what's upcoming) — shown ABOVE action items ── */}
+          {/* On a Service card, Booked here is the source page's Booked and the drill its rows, over that
+              page's window; the AI-assisted add-on is the aggregate's and is left off beside it. */}
+          <Card title="Appointments" sub={cf ? `${cf.windowLabel} · total booked and what's upcoming` : `${periodLabel} · total booked and what's upcoming`} pad={false}>
+            <div className="flex flex-wrap items-end gap-x-10 gap-y-3 border-b border-[#f0f0f0] px-6 py-5">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">{cf ? `Total ${cf.bookedLabel.toLowerCase()}` : "Total AI-booked"}</p>
+                {live && apptHeadline > 0 ? (
+                  <button onClick={openApptDrill} className="group/appt mt-1 block text-left" title="See the appointments behind this number">
+                    <span className="text-[34px] font-extrabold tabular-nums leading-none text-[#10b981] underline decoration-dotted decoration-[#10b981]/40 underline-offset-4 group-hover/appt:decoration-[#10b981]">{fmtInt(apptHeadline)}</span>
+                    <span className="ml-2 align-middle text-[11px] font-semibold text-[#10b981]">view leads ↗</span>
+                  </button>
+                ) : (
+                  <p className="mt-1 text-[34px] font-extrabold tabular-nums leading-none text-[#10b981]">{fmtInt(apptHeadline)}</p>
+                )}
+              </div>
+              {!cf && scale(m.appointmentsAssisted ?? 0) > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">AI-assisted (CRM)</p>
+                  <p className="mt-1 text-[25px] font-bold tabular-nums leading-none text-[#9ca3af]">+{fmtInt(scale(m.appointmentsAssisted ?? 0))}</p>
+                </div>
+              )}
+            </div>
+            <p className="px-6 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Upcoming</p>
+            <UpcomingAppointments teamId={teamId} enterpriseId={enterpriseId} spyneToken={spyneToken} spyneEnv={spyneEnv} service={a.dept === "Service" ? "service" : "sales"} />
+          </Card>
+
+          {/* ── Action items — BELOW appointments ── */}
+          <Card title="Action items" sub="Open follow-up tasks the AI logged — work these next" pad={false}>
+            <AgentActionItems
+              teamId={teamId}
+              service={a.dept === "Service" ? "service" : "sales"}
+              spyneToken={spyneToken}
+              start={win.start}
+              end={win.end}
+              onViewAll={() => goCrossPage("actions", { enterpriseId, teamId, serviceType: a.dept === "Service" ? "service" : "sales" }, `/reports/action-items${navQuery}`)}
+            />
+          </Card>
+
+          {/* "Active campaigns" and "Outbound outcomes" REMOVED (Ishan, 2026-09-28) — see the note
+              on the export sections above. Both came from campaignLeadMappings, whose booked count
+              read 77 against a calendar holding 9, so they contradicted every other number here. */}
+
+          {/* ── Hot & warm leads for THIS agent (named appointments are consolidated into the single
+                 "Appointments" card above — total + upcoming, one card, not two) ── */}
+          {(r.warmLeads?.length ?? 0) > 0 && (
+            <Card title="Hot & warm leads — work these now" sub="Buying intent on record, no appointment yet">
+              <WarmLeadChips items={r.warmLeads!} teamId={teamId} maxHot={10} maxWarm={8} />
+            </Card>
+          )}
+
+          {/* multi-day reply effectiveness */}
+          {r.multiDayReply.length > 0 && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              <Card title="Multi-day reply effectiveness" sub="When replies land, relative to the first touch">
+                <TrendBars values={r.multiDayReply.map((d) => d.pct)} labels={r.multiDayReply.map((d) => d.day)} height={96} />
+                <p className="mt-3 text-[11px] text-[#6b7280]">
+                  {r.multiDayReply[0].pct}% of replies arrive the same day — the rest justify the multi-day cadence.
+                </p>
+              </Card>
+            </div>
+          )}
+
+          <SectionLabel>{isSales ? "Trends" : "Quality & trend"}</SectionLabel>
+
+          {/* Service keeps its quality card verbatim. On a SALES agent the same ground is covered better
+              by the conversation panels above (connect rate lives in hand-offs, interest in the quality
+              card), so this drops out rather than repeating half of it in different words. */}
+          {!isSales && (
+            <Card title="Conversation quality" sub="From live calls — the metrics we can measure today">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <QCell label={a.quality.primaryLabel} value={`${a.quality.primary}%`} />
+                <QCell label="Avg handle time" value={a.quality.handleTime} />
+                <QCell label="Opt-outs" value={fmtInt(scale(m.optOuts))} />
+                {showTransferQuality && tq && (
+                  <QCell
+                    label={a.quality.fourthLabel}
+                    value={fmtRate(tq.transfers_ok, tq.transfers_ok + tq.transfers_failed)}
+                    status={tq.success_rate! >= 0.8 ? "green" : tq.success_rate! >= 0.6 ? "amber" : "red"}
+                  />
+                )}
+              </div>
+            </Card>
+          )}
+
+          {/* Sales: day-on-day joins the other two trends here, so every "over time" view is together. */}
+          {isSales && (
+            <Card title="Day by day" sub="Customers reached → buying intent → appointments">
+              <DayTrend points={r.dayOnDay} />
+            </Card>
+          )}
+
+          {/* hourly + 7-day trend */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <Card title="Time-of-day distribution" sub="When the activity happens (business hours)">
+              <TrendBars values={a.hourly} labels={HOUR_LABELS} height={88} />
+            </Card>
+            <Card title="7-day trend" sub={a.headlineLabel}>
+              <TrendBars values={a.trend7} labels={["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]} highlightLast height={88} />
+            </Card>
+          </div>
+
+          {/* highlights & missed — rooftop-level, from ClickHouse via /api/reports/metrics; renders
+              only when the snapshot has rows (no placeholder). */}
+          {(agentHighlights.length > 0 || showMissed) && (
+          <Card title="Highlights & missed opportunities" sub="Standout moments worth a closer look" pad={false}>
+              <div className={showMissed ? "grid grid-cols-1 sm:grid-cols-2" : "grid grid-cols-1"}>
+                <div className={`px-6 py-5 ${showMissed ? "sm:border-r sm:border-[#f0f0f0]" : ""}`}>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#059669]">Wins · best booked {inbound ? "inbound" : "outbound"} calls</p>
+                  {agentHighlights.length ? (
+                    <ul className="mt-3 space-y-2.5">
+                      {agentHighlights.slice(0, 5).map((h, i) => (
+                        <li key={i} className="flex items-start justify-between gap-3 text-[12.5px] leading-snug">
+                          <span className="text-[#374151]">{h.title || "—"}</span>
+                          <span className="shrink-0 tabular-nums text-[11px] text-[#9ca3af]">{h.occurred_on ?? ""}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-3 text-[12px] text-[#9ca3af]">No standout booked calls in this window.</p>
+                  )}
+                </div>
+                {showMissed && (
+                  <div className="px-6 py-5">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#b45309]">Missed · outbound demand that slipped</p>
+                    <ul className="mt-3 space-y-2.5">
+                      {agentMissed.map((mm, i) => (
+                        <li key={i} className="flex items-center justify-between text-[12.5px]">
+                          <span className="text-[#374151]">
+                            {MISSED_LABELS[mm.category] ?? mm.category} <span className="text-[#9ca3af]">· {mm.channel}</span>
+                          </span>
+                          <b className="tabular-nums text-[#111]">{fmtInt(mm.count)}</b>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+          </Card>
+          )}
+
+          {/* Sales only: the rest of the library, one click away, scoped to this agent. */}
+          {/* Both departments: a service manager wants the rest of the library as much as sales does. */}
+          <MoreReports agentId={a.id} onOpenLibrary={(reportId?: string) => { setLibraryReport(reportId ?? null); setView2("library"); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+
+          </>
+          )}
+          </>
+          )}
+          </>
+          )}
+        </main>
+      </div>
+      {/* A Service card on its source page's numbers lists its Booked rows by status (Scheduled, Completed,
+          No-show, Cancelled). Every other drill-down is the original modal, unchanged. */}
+      {apptModal && apptModalItems && ((apptModal.agentType === "service_ob" && svcObFunnel) || (apptModal.agentType === "service_ib" && svcIbNumbers)) ? (
+        <AppointmentsByStatusModal
+          open
+          onClose={() => setApptModal(null)}
+          title={apptModal.title}
+          sub={apptModal.sub}
+          items={apptModalItems}
+        />
+      ) : (
+        <MeetingsModal
+          open={apptModal !== null}
+          onClose={() => setApptModal(null)}
+          title={apptModal?.title ?? "Appointments"}
+          sub={apptModal?.sub}
+          fetchOpts={{ teamId, enterpriseId, service: apptModal?.service ?? "both", agentType: apptModal?.agentType, scope: "window", ...meetingWindow, spyneToken, spyneEnv }}
+          items={apptModalItems}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Performance helpers ── */
+/* Lead → qualified → appointment funnel: narrowing proportional bars with the step-to-step conversion
+ * rate, so the drop-off reads at a glance. */
+type FunnelStage = { label: string; value: number; convFrom?: number };
+/* The numerator of the step conversion into a stage. `convFrom` lets a stage convert on a different
+ * count than the one it shows: the appointments stage shows bookings but converts on booked customers,
+ * which is the close rate (closeRateParts). Absent → the stage's own value, as before. */
+const stepNumerator = (s: FunnelStage) => s.convFrom ?? s.value;
+function PerfFunnel({ stages, appointmentsDrill }: { stages: FunnelStage[]; appointmentsDrill?: () => void }) {
+  const max = Math.max(1, stages[0]?.value ?? 1);
+  return (
+    <div className="flex flex-col gap-2.5">
+      {stages.map((s, i) => {
+        const pct = Math.max(2, (s.value / max) * 100);
+        const prev = i > 0 ? stages[i - 1].value : null;
+        const conv = prev && prev > 0 ? Math.round((stepNumerator(s) / prev) * 100) : null;
+        const isLast = i === stages.length - 1;
+        // The appointments stage (last) drills into the leads behind the number.
+        const drillable = isLast && !!appointmentsDrill;
+        return (
+          <div key={s.label} className="flex items-center gap-3 sm:gap-4">
+            {/* number + label */}
+            <div className="w-[120px] flex-none sm:w-[150px]">
+              {drillable ? (
+                <button onClick={appointmentsDrill} className="group/appt block text-left" title="See the appointments behind this number">
+                  <p className="text-[27px] font-extrabold tabular-nums leading-none text-[#10b981] underline decoration-dotted decoration-[#10b981]/40 underline-offset-4 group-hover/appt:decoration-[#10b981] sm:text-[30px]">
+                    {fmtInt(s.value)}
+                  </p>
+                  <p className="mt-1 text-[11px] font-semibold leading-tight text-[#10b981]">{s.label} · view leads ↗</p>
+                </button>
+              ) : (
+                <>
+                  <p className={`text-[27px] font-extrabold tabular-nums leading-none sm:text-[30px] ${isLast ? "text-[#10b981]" : "text-[#111]"}`}>
+                    {fmtInt(s.value)}
+                  </p>
+                  <p className="mt-1 text-[11px] leading-tight text-[#6b7280]">{s.label}</p>
+                </>
+              )}
+            </div>
+            {/* step conversion (from the stage above) */}
+            <div className="w-[40px] flex-none text-right sm:w-[46px]">
+              {conv !== null && (
+                <span className="rounded-full bg-[#f3eaff] px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-[#813fed]" title="conversion from the previous step">
+                  {conv}%
+                </span>
+              )}
+            </div>
+            {/* proportional bar */}
+            <div className="flex flex-1 items-center">
+              <div
+                className="h-8 rounded-lg transition-all"
+                style={{
+                  width: `${pct}%`,
+                  minWidth: 10,
+                  background: isLast ? "linear-gradient(90deg,#10b981,#059669)" : "linear-gradient(90deg,#813fed,#6366f1)",
+                  opacity: 1 - i * 0.06,
+                }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ActivityStat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: string }) {
+  return (
+    <div className="px-6 py-5">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">{label}</p>
+      <p className="mt-1.5 text-[27px] font-extrabold tabular-nums leading-none" style={{ color: accent ?? "#111" }}>{value}</p>
+      {hint && <p className="mt-1.5 text-[10.5px] text-[#6b7280]">{hint}</p>}
+    </div>
+  );
+}
+
+/* ── live-data toolbar helpers ── */
+function relTime(then: number, now: number): string {
+  const s = Math.max(0, Math.round((now - then) / 1000));
+  if (s < 45) return "just now";
+  const mins = Math.round(s / 60);
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.round(mins / 60)}h ago`;
+}
+
+/* ── shimmer skeleton while a rooftop/window loads ── */
+function ReportSkeleton() {
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => <div key={i} className="h-24 animate-pulse rounded-2xl bg-[#eef0f3]" />)}
+      </div>
+      <div className="h-[120px] animate-pulse rounded-2xl bg-[#eef0f3]" />
+      <div className="h-[272px] animate-pulse rounded-2xl bg-[#eef0f3]" />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="h-[220px] animate-pulse rounded-2xl bg-[#eef0f3]" />
+        <div className="h-[220px] animate-pulse rounded-2xl bg-[#eef0f3]" />
+      </div>
+    </div>
+  );
+}
+
+/* ── empty state: rooftop has data, but none in the selected window ── */
+function NoActivity({ name, onWiden }: { name: string; onWiden: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[#e0e0e0] bg-[#fcfcfd] px-6 py-16 text-center">
+      <span className="text-[26px] leading-none">📭</span>
+      <p className="text-[14px] font-bold text-[#111]">No activity for {name} in this window</p>
+      <p className="max-w-[420px] text-[12.5px] leading-snug text-[#6b7280]">There were no calls in the selected date range. Try a wider window.</p>
+      <button onClick={onWiden} className="mt-2 rounded-lg border border-[#e5e7eb] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#813fed] hover:bg-[#faf8ff]">
+        View last 30 days
+      </button>
+    </div>
+  );
+}
+
+/* ── Rooftop selected, but Metabase has no data flowing for it yet ── */
+function RooftopComingSoon({ name }: { name: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 rounded-3xl border border-[#ece6fb] bg-gradient-to-br from-[#f6f1ff] to-white px-6 py-20 text-center shadow-sm">
+      <span className="text-[34px] leading-none">🛠️</span>
+      <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-[#813fed]">Coming soon</p>
+      <p className="text-[20px] font-extrabold tracking-[-0.02em] text-[#111]">{name}&apos;s report is on its way</p>
+      <p className="max-w-[480px] text-[13px] leading-snug text-[#6b7280]">
+        As soon as your agents start handling calls and messages, your full report fills in here automatically —
+        usually within a day of going live. There&apos;s nothing for you to set up.
+      </p>
+    </div>
+  );
+}
+
+/* ── First-time experience — nothing set up yet ── */
+function FirstTimeAgents({ agent }: { agent: AgentData }) {
+  const person = agent.report.summary.person;
+  return (
+    <>
+      <section className="rounded-3xl border border-[#ece6fb] bg-gradient-to-br from-[#f6f1ff] to-white px-8 py-9 shadow-sm">
+        <p className="text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#813fed]">Welcome</p>
+        <h2 className="mt-1.5 text-[26px] font-extrabold tracking-[-0.02em] text-[#111]">Let’s get your first AI agent live</h2>
+        <p className="mt-2 max-w-[580px] text-[13.5px] leading-snug text-[#6b7280]">
+          Connect your CRM and capture your baseline — then {person} starts touching every lead instantly, around the
+          clock. Your report fills in from the first call.
+        </p>
+        <div className="mt-7 grid gap-8 md:grid-cols-2">
+          <StepList
+            steps={[
+              { label: "Connect your CRM", active: true },
+              { label: "Capture your 90-day baseline" },
+              { label: `Configure ${person}` },
+              { label: "Go live" },
+            ]}
+          />
+          <div className="flex items-end">
+            <button className="rounded-xl bg-[#813fed] px-5 py-2.5 text-[13px] font-bold text-white transition-colors hover:bg-[#6d28d9]">
+              Start setup →
+            </button>
+          </div>
+        </div>
+      </section>
+      <SectionLabel>What your report will look like</SectionLabel>
+      <GhostPreview
+        title="Your report appears here once an agent is live"
+        body="Three pitches vs industry, the dollars created, your before/after, and the full call-and-intent flow — all live."
+      />
+    </>
+  );
+}
+
+/* ── Onboarding — importing history, agent not yet live ── */
+function OnboardingAgents({ agent, view }: { agent: AgentData; view: ScenarioView }) {
+  const r = agent.report;
+  const person = r.summary.person;
+  return (
+    <>
+      <Card title={`Setting up ${person}`} sub="We’re importing your CRM history and configuring the agent.">
+        <div className="flex flex-col gap-5">
+          <div>
+            <div className="mb-1.5 flex items-center justify-between text-[12px]">
+              <span className="text-[#6b7280]">Importing your last 90 days from the CRM</span>
+              <b className="tabular-nums text-[#111]">{view.importProgress}%</b>
+            </div>
+            <ProgressBar pct={view.importProgress} />
+          </div>
+          <StepList
+            steps={[
+              { label: "Connect your CRM", done: true },
+              { label: "Import 90-day history", active: true },
+              { label: `Configure ${person}`, done: true },
+              { label: "Go live" },
+            ]}
+          />
+          <div className="rounded-xl bg-[#f0fdf6] px-4 py-3 text-[12px] text-[#065f46]">
+            <b>{view.liveLabel}.</b> Your live numbers start filling in the moment {person} works its first lead.
+          </div>
+        </div>
+      </Card>
+
+      <SectionLabel hint="captured from your CRM at onboarding">Your starting point — today, without {person}</SectionLabel>
+      <ComingSoon title="Your 90-day baseline" note={`Your pre-${person} numbers populate here as soon as the CRM import finishes.`} />
+
+      <SectionLabel>Your live report (preview)</SectionLabel>
+      <GhostPreview
+        title={`${person}’s report unlocks at go-live`}
+        body="Calls, appointments, the call-and-intent flow and your before/after all populate here once the agent starts working leads."
+      />
+    </>
+  );
+}
+
+function SummaryStat({ label, value, accent }: { label: string; value: string; accent?: string }) {
+  return (
+    <div className="rounded-xl border border-[#f0f0f0] px-3 py-2.5">
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-[#9ca3af]">{label}</p>
+      <p className="mt-0.5 text-[18px] font-bold tabular-nums" style={{ color: accent ?? "#111" }}>{value}</p>
+    </div>
+  );
+}
+
+/* Open-funnel split for Sales Inbound: appointments booked / leads handled, per acquisition path.
+ * Renders nothing when the data isn't populated — no placeholder. */
+function StlOpenFunnel({ data }: { data?: { stlLeadsHandled: number; stlAppts: number; stlRate: number; followupLeadsHandled: number; followupAppts: number; followupRate: number } }) {
+  if (!data) return null;
+  return (
+    <div className="border-t border-[#f0f0f3] pt-4">
+      <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">Leads handled → appointments booked <span className="font-semibold normal-case text-[#c4c4cc]">· all-time</span></p>
+      <div className="grid grid-cols-2 gap-3">
+        <SummaryStat label="Via speed-to-lead" value={`${fmtInt(data.stlAppts)} / ${fmtInt(data.stlLeadsHandled)}`} accent="#813fed" />
+        <SummaryStat label="Via follow-ups" value={`${fmtInt(data.followupAppts)} / ${fmtInt(data.followupLeadsHandled)}`} accent="#10b981" />
+        <SummaryStat label="STL booked rate" value={`${data.stlRate}%`} />
+        <SummaryStat label="Follow-up booked rate" value={`${data.followupRate}%`} />
+      </div>
+    </div>
+  );
+}
+
+function QCell({ label, value, status }: { label: string; value: string; status?: "green" | "amber" | "red" }) {
+  return (
+    <div className="rounded-xl border border-[#f0f0f0] px-4 py-3">
+      <div className="flex items-center gap-1.5">
+        {status && <span className="h-2 w-2 rounded-full" style={{ background: RAG_STYLE[status].dot }} />}
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-[#9ca3af]">{label}</p>
+      </div>
+      <p className="mt-1 text-[21px] font-bold tabular-nums text-[#111]">{value}</p>
+    </div>
+  );
+}
+
+/* ── Upcoming appointments (live ← Spyne leads/dealer/v3/meetings) ──
+ * Scoped to the agent's DEPARTMENT (sales meetings on Sales agents, service on Service) so a service
+ * rooftop's bookings don't leak onto the Sales cards. From now forward. Self-fetches so the card stays
+ * live regardless of the Q12227 aggregate; degrades to the empty state on no-data / error. */
+function UpcomingAppointments({ teamId, enterpriseId, spyneToken, spyneEnv, service }: { teamId: string; enterpriseId: string; spyneToken: string; spyneEnv: string; service: "sales" | "service" }) {
+  const [state, setState] = useState<{ loading: boolean; meetings: Meeting[] }>({ loading: true, meetings: [] });
+  useEffect(() => {
+    let on = true;
+    // reset to the loading state whenever the rooftop/token changes, then refetch (stale-while-revalidate
+    // isn't worth it here — upcoming bookings are small and change rarely)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!teamId) { setState({ loading: false, meetings: [] }); return; }
+    setState({ loading: true, meetings: [] });
+    fetchMeetings({ teamId, enterpriseId, service, scope: "upcoming", spyneToken, spyneEnv })
+      .then((r) => { if (on) setState({ loading: false, meetings: r.meetings }); })
+      .catch(() => { if (on) setState({ loading: false, meetings: [] }); });
+    return () => { on = false; };
+  }, [teamId, enterpriseId, spyneToken, spyneEnv, service]);
+
+  if (state.loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#e5e7eb] border-t-[#813fed]" role="status" aria-label="Loading" />
+      </div>
+    );
+  }
+  if (!state.meetings.length) {
+    return <div className="p-6"><EmptyState icon="📅" title="No upcoming appointments" body="No booked appointments for this rooftop yet — they'll appear here as the agent books them." /></div>;
+  }
+  return <div className="max-h-[360px] overflow-y-auto"><MeetingsList meetings={state.meetings} /></div>;
+}
+
+/* ── Action items (live ← /api/action-items) — open follow-up tasks the AI logged, scoped to the agent's
+ * department. Replaces the old "priority follow-ups / callbacks" card. Shows live open/overdue/due-today
+ * counts for the window plus the open queue; degrades to an empty state on no-data / error. */
+function AgentActionItems({
+  teamId, service, spyneToken, start, end, onViewAll,
+}: {
+  teamId: string; service: "sales" | "service"; spyneToken: string; start: string; end: string; onViewAll: () => void;
+}) {
+  const [stats, setStats] = useState<ActionItemStats | null>(null);
+  const [items, setItems] = useState<ActionItem[] | null>(null);
+  const [now] = useState(() => Date.now());
+
+  useEffect(() => {
+    let on = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!teamId) { setStats(null); return; }
+    fetchActionItemStats(teamId, { start, end, service, spyneToken }).then((r) => { if (on) setStats(r?.stats ?? null); });
+    return () => { on = false; };
+  }, [teamId, service, spyneToken, start, end]);
+
+  useEffect(() => {
+    let on = true;
+    // reset to the loading state on a rooftop/dept change, then refetch the open queue
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!teamId) { setItems([]); return; }
+    setItems(null);
+    fetchActionItems(teamId, { scope: "open", service, limit: 100, spyneToken }).then((r) => { if (on) setItems(r); });
+    return () => { on = false; };
+  }, [teamId, service, spyneToken]);
+
+  const isOverdue = (a: ActionItem) => !a.completed && !!a.dueAt && new Date(a.dueAt).getTime() < now;
+  const counts: { label: string; value?: number; accent: string }[] = [
+    { label: "Open", value: stats?.open, accent: "#2563eb" },
+    { label: "Overdue", value: stats?.overdue, accent: "#dc2626" },
+    { label: "Due today", value: stats?.dueToday, accent: "#ea760c" },
+  ];
+
+  return (
+    <div className="flex flex-col">
+      {/* live counts for the selected window */}
+      <div className="flex flex-wrap gap-2 border-b border-[#f0f0f0] px-6 py-3.5">
+        {counts.map((c) => (
+          <span key={c.label} className="inline-flex items-baseline gap-1.5 rounded-lg border border-[#f0f0f0] bg-[#fafafa] px-2.5 py-1">
+            <b className="text-[17px] font-extrabold tabular-nums leading-none" style={{ color: c.accent }}>{stats ? fmtInt(c.value ?? 0) : "—"}</b>
+            <span className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9ca3af]">{c.label}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* open queue */}
+      {items === null ? (
+        <div className="flex items-center justify-center py-12">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#e5e7eb] border-t-[#813fed]" role="status" aria-label="Loading" />
+        </div>
+      ) : items.length === 0 ? (
+        <div className="p-6"><EmptyState icon="✅" title="No open action items" body="No follow-up tasks open for this rooftop right now — they'll appear here as the AI logs them." /></div>
+      ) : (
+        <div className="max-h-[320px] divide-y divide-[#f3f4f6] overflow-y-auto">
+          {items.map((a) => {
+            const overdue = isOverdue(a);
+            return (
+              <div key={a.id} className="flex items-center justify-between gap-3 px-6 py-3">
+                <div className="min-w-0">
+                  <p className="truncate text-[13px] font-semibold text-[#111]">{a.customer || "—"}</p>
+                  <p className="truncate text-[11px] text-[#6b7280]">{a.description || prettyIntent(a.intent)}</p>
+                </div>
+                <div className="flex-none text-right">
+                  <PriorityPill priority={a.priority} />
+                  <p className={`mt-0.5 text-[10.5px] tabular-nums ${overdue ? "font-semibold text-[#dc2626]" : "text-[#9ca3af]"}`}>
+                    {a.dueAt ? fmtWhenShort(a.dueAt) : "—"}
+                  </p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* jump to the full action-items tab */}
+      <div className="border-t border-[#f0f0f0] px-6 py-3">
+        <button onClick={onViewAll} className="text-[11.5px] font-semibold text-[#813fed] hover:underline">View all action items →</button>
+      </div>
+    </div>
+  );
+}
+
+// Sentence-case an intent code for the "what to do" line when there's no free-text description.
+function prettyIntent(raw: string): string {
+  if (!raw) return "Follow up";
+  const s = raw.replace(/_/g, " ").trim().toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function PriorityPill({ priority }: { priority: string }) {
+  const v = (priority || "").toUpperCase();
+  const c = v.startsWith("H") ? { bg: "#fee2e2", fg: "#991b1b" } : v.startsWith("M") ? { bg: "#fef3c7", fg: "#92400e" } : { bg: "#f3f4f6", fg: "#6b7280" };
+  return <span className="rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide" style={{ background: c.bg, color: c.fg }}>{priority || "—"}</span>;
+}
