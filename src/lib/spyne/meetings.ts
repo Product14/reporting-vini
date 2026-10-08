@@ -79,30 +79,70 @@ const AI_SOURCE = "spyne";
  * rooftop's returns no row, so the lookup can't leak or act on another dealer's records. */
 const PULLED_IN_META_SOURCES = new Set(["warm_transfer", "callback"]);
 
-async function dropPulledInHistoryMeetings(teamId: string, meetings: Meeting[]): Promise<Meeting[]> {
-  const ids = [...new Set(meetings.map((m) => m.id).filter(Boolean))];
-  if (!ids.length || !hasClickhouseCreds()) return meetings;
-  const inList = `(${ids.map((i) => `'${chEsc(i)}'`).join(",")})`;
-  const rows = await runClickhouse<{ meetingId?: string; rowId?: string; metaSource?: string }>(
+/* PURE. Sort a meeting's two possible ids by SHAPE: meetings.meeting_id is "meeting_<hex>", the Mongo
+ * _id is 24 hex. The live feed's `id` is one or the other per row (see Meeting.meetingId), and an
+ * explicit `meetingId` field, when the API sends one, is the meeting_id. Unknown shapes stay unknown. */
+const MEETING_ID_RE = /^meeting_[A-Za-z0-9]+$/;
+const MONGO_ID_RE = /^[a-f0-9]{24}$/i;
+export function classifyMeetingIds(id?: string | null, meetingId?: string | null): { meetingId: string | null; mongoId: string | null } {
+  const cands = [meetingId, id].map((x) => (x ?? "").trim()).filter(Boolean);
+  return {
+    meetingId: cands.find((x) => MEETING_ID_RE.test(x)) ?? null,
+    mongoId: cands.find((x) => MONGO_ID_RE.test(x)) ?? null,
+  };
+}
+
+/** What ClickHouse knows about one meeting, reachable under EITHER of its ids. */
+export interface MeetingRowInfo { meetingId: string | null; mongoId: string | null; metaSource: string; source: string }
+
+/* One team-scoped ClickHouse read keyed on both id spaces: each meeting's meeting_id, Mongo _id,
+ * meta.source and source. Returns a map keyed by BOTH ids. Best-effort: no creds / an error / a miss
+ * yields an empty map, and every caller treats a miss as "unknown", never as "drop". TEAM-SCOPED, so an
+ * id belonging to another rooftop resolves to nothing. */
+export async function lookupMeetingRows(teamId: string, ids: string[]): Promise<Map<string, MeetingRowInfo>> {
+  const out = new Map<string, MeetingRowInfo>();
+  const uniq = [...new Set(ids.filter(Boolean))];
+  if (!uniq.length || !teamId || !hasClickhouseCreds()) return out;
+  const inList = `(${uniq.map((i) => `'${chEsc(i)}'`).join(",")})`;
+  const rows = await runClickhouse<{ meetingId?: string; rowId?: string; metaSource?: string; source?: string }>(
     // The feed's `id` is meeting_id for some rows and _id for others, so key on both. SharedReplacing-
     // MergeTree keeps duplicate physical rows and an early version can carry an empty meta — prefer a
     // populated value across them rather than reading whichever row comes back first.
     `SELECT toString(m.meeting_id) AS meetingId, toString(m._id) AS rowId,
             anyIf(JSONExtractString(ifNull(m.meta,''),'source'),
-                  notEmpty(JSONExtractString(ifNull(m.meta,''),'source'))) AS metaSource
+                  notEmpty(JSONExtractString(ifNull(m.meta,''),'source'))) AS metaSource,
+            anyIf(lower(ifNull(m.source,'')), notEmpty(ifNull(m.source,''))) AS source
      FROM dealer_leads.meetings AS m
      WHERE m.team_id = '${chEsc(teamId)}'
        AND (m.meeting_id IN ${inList} OR m._id IN ${inList})
      GROUP BY meetingId, rowId`,
   );
-  const pulledIn = new Set<string>();
   for (const r of rows) {
-    if (!PULLED_IN_META_SOURCES.has((r.metaSource || "").trim().toLowerCase())) continue;
-    if (r.meetingId) pulledIn.add(r.meetingId);
-    if (r.rowId) pulledIn.add(r.rowId);
+    const info: MeetingRowInfo = {
+      meetingId: (r.meetingId || "").trim() || null,
+      mongoId: (r.rowId || "").trim() || null,
+      metaSource: (r.metaSource || "").trim().toLowerCase(),
+      source: (r.source || "").trim().toLowerCase(),
+    };
+    if (info.meetingId) out.set(info.meetingId, info);
+    if (info.mongoId) out.set(info.mongoId, info);
   }
-  if (!pulledIn.size) return meetings;
-  return meetings.filter((m) => !pulledIn.has(m.id));
+  return out;
+}
+
+/* Drops the pulled-in history rows (above) and, from the same read, fills in whichever of the two ids
+ * the feed did not hand back — so every row leaves here with meetingId AND mongoId when ClickHouse has
+ * the meeting (audit A3-01: one booking keyed two ways reached dealers as two appointment emails). */
+async function dropPulledInHistoryMeetings(teamId: string, meetings: Meeting[]): Promise<Meeting[]> {
+  const rows = await lookupMeetingRows(teamId, meetings.map((m) => m.id));
+  if (!rows.size) return meetings;
+  const kept: Meeting[] = [];
+  for (const m of meetings) {
+    const info = rows.get(m.id);
+    if (info && PULLED_IN_META_SOURCES.has(info.metaSource)) continue;
+    kept.push(info ? { ...m, meetingId: m.meetingId ?? info.meetingId, mongoId: m.mongoId ?? info.mongoId } : m);
+  }
+  return kept;
 }
 // The endpoint returns the meetings array directly under `data` (NOT data.meetings), with pagination alongside.
 interface MeetingsResp { data?: RawMeeting[]; pagination?: { hasNextPage?: boolean; total?: number } }
@@ -120,8 +160,14 @@ function vehicleLabel(vins?: RawVin[]): string {
 
 function normalize(m: RawMeeting): Meeting {
   const c = m.customerData || {};
+  const ids = classifyMeetingIds(m.id, m.meetingId);
   return {
     id: m.id || m.meetingId || "",
+    meetingId: ids.meetingId,
+    mongoId: ids.mongoId,
+    // Who booked it. fetchOne keeps only source=spyne rows, so this reads "spyne" on every row it
+    // returns — carried explicitly so a consumer can require it rather than assume it (audit A3-14).
+    source: (m.source || "").trim().toLowerCase() || null,
     leadId: m.leadId || null,
     customer: (c.name || c.extractedName || "").trim() || "—",
     phone: c.mobileNumber || null,

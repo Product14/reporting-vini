@@ -1,7 +1,8 @@
-import { fetchMeetings, type ServiceType } from "@/lib/spyne/meetings";
+import { fetchMeetings, lookupMeetingRows, type ServiceType } from "@/lib/spyne/meetings";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
 
-import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom, isServiceRequest } from "@/lib/reports/auth";
+import { resolveRequestEnterprise } from "@/lib/reports/enterprise";
 import { getSupabase, AGENT_LEAD_DAYS, REPORT_APPOINTMENTS } from "@/lib/reports/supabase";
 import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
 import { rangeFor } from "@/components/reports/liveData";
@@ -39,6 +40,13 @@ interface ApptRow {
 function toMeeting(r: ApptRow): Meeting {
   return {
     id: r.meeting_id || "", leadId: r.lead_id || null,
+    /* The snapshot stores meeting_id only; mongoId and the real `source` are filled from ClickHouse in
+     * sbAppointments. Until then an AI-booked row (assisted=false — the snapshot's AI-booked half is
+     * meetings.source='spyne' by construction, detailQueries appointmentsSql) reads "spyne", and an
+     * assisted (CRM) row reads null: it is NOT an AI booking, and its staff source is unknown here. */
+    meetingId: r.meeting_id || null, mongoId: null,
+    source: r.assisted ? null : "spyne",
+    assisted: !!r.assisted,
     customer: (r.customer_name || "").trim() || "—", phone: r.phone || null,
     vehicle: (r.vehicle || "").trim(), when: r.meeting_start || "", tz: null,
     /* ★ THE ROW'S OWN STATUS (fixed 2026-09-09). This was hard-coded to "scheduled" while the report card
@@ -70,7 +78,16 @@ async function sbAppointments(
      * assisted row is now one the meetings table itself flags ai_assisted=1, and booked_at above is the
      * whole window test. Re-applying the retired rule here would make this list SHORTER than the card
      * it is the detail for — the same mismatch, pointing the other way. */
-    return rows.map(toMeeting);
+    const meetings = rows.map(toMeeting);
+    // Both ids + the booking's real source from ClickHouse, one team-scoped read. Best-effort: a miss
+    // leaves the row exactly as toMeeting built it.
+    const info = await lookupMeetingRows(teamId, meetings.map((m) => m.id));
+    return info.size
+      ? meetings.map((m) => {
+          const r = info.get(m.id);
+          return r ? { ...m, meetingId: r.meetingId ?? m.meetingId, mongoId: r.mongoId, source: r.source || m.source } : m;
+        })
+      : meetings;
   } catch {
     return null;
   }
@@ -133,6 +150,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UPCOMING_HORIZON_DAYS = 60; // how far forward "upcoming" looks
+/* PRIVATE on every response (audit A3-20). These bodies carry customer names, phone numbers and
+ * vehicles, and `s-maxage` targets SHARED caches — a CDN keys on the URL alone and would serve a
+ * credentialed read to the next caller of the same URL with no credential at all. Same rule as
+ * /api/action-items and /api/reports. */
+const PRIVATE_SHORT = { "Cache-Control": "private, max-age=60, stale-while-revalidate=120" };
 const BOOKED_LOOKAHEAD_DAYS = 365; // meeting-time ceiling when listing booked-in-period appointments
 
 // Treat a store-local calendar date as a UTC-midnight instant. Same simplification /api/reports uses
@@ -165,8 +187,9 @@ export async function GET(request: Request): Promise<Response> {
   const service: ServiceType | "both" = svcParam === "sales" || svcParam === "service" ? svcParam : "both";
   const scope = (searchParams.get("scope") || "window").toLowerCase();
   const pollMinutes = Math.max(1, Math.min(1440, Number(searchParams.get("minutes")) || 25)); // 1–1440 min, default 25
-  // The host scopes the iframe with ?enterprise_id=&team_id=. Honor it; else the lib decodes it from the token.
-  const enterpriseId = searchParams.get("enterprise_id") || undefined;
+  // The host scopes the iframe with ?enterprise_id=&team_id=. Resolved lazily (resolveRequestEnterprise)
+  // right before a live call: a dealer's explicit param still wins over its token; a CRON_SECRET caller's
+  // param is checked against the team's own enterprise and the env token is never used for it.
   // Drill-down agent (report slot id). Maps to the agent_type whose booked leads we list, so an inbound
   // agent's modal shows only inbound appointments. Omitted on the rooftop-wide (Overview) drill.
   const agentType = SLOT_TO_AGENT_TYPE[searchParams.get("agent_type") || ""];
@@ -186,12 +209,16 @@ export async function GET(request: Request): Promise<Response> {
     if (sbVeh && sbVeh.length) {
       return Response.json(
         { vehicles: sbVeh, total: sbVeh.length, window: { days: windowDays } },
-        { headers: { "Cache-Control": "s-maxage=300, stale-while-revalidate=600" } },
+        { headers: PRIVATE_SHORT },
       );
     }
     // Wide meeting-time window so a meeting booked in-period but scheduled outside it still counts;
     // bookedStart/End then keep only the ones BOOKED in the trailing window (createdAt). Mirrors the
     // booked-in-period drill-down logic above.
+    const ent = await resolveRequestEnterprise(request, teamId, spyneToken, { preferParam: true });
+    if (!ent.enterpriseId && isServiceRequest(request)) {
+      return Response.json({ vehicles: [], total: 0, window: { days: windowDays }, meetingsFeedDegraded: true, meetingsFeedError: `no trustworthy enterprise for team: ${ent.reason ?? "unknown"}` }, { headers: PRIVATE_SHORT });
+    }
     const result = await fetchMeetings({
       teamId,
       service,
@@ -199,7 +226,7 @@ export async function GET(request: Request): Promise<Response> {
       endISO: new Date(now + BOOKED_LOOKAHEAD_DAYS * 86_400_000).toISOString(),
       bookedStartISO: new Date(now - windowDays * 86_400_000).toISOString(),
       bookedEndISO: new Date(now + 86_400_000).toISOString(), // through end of today
-      enterpriseId,
+      enterpriseId: ent.enterpriseId,
       token: spyneToken,
       env: spyneEnv,
     });
@@ -214,7 +241,7 @@ export async function GET(request: Request): Promise<Response> {
       .slice(0, limit);
     return Response.json(
       { vehicles, total: vehicles.length, window: { days: windowDays } },
-      { headers: { "Cache-Control": "s-maxage=300, stale-while-revalidate=600" } },
+      { headers: PRIVATE_SHORT },
     );
   }
 
@@ -279,19 +306,35 @@ export async function GET(request: Request): Promise<Response> {
   // Snapshot-first for the rooftop-wide / serviceType reads (the digest): serve from report_appointments,
   // which has no live-API dependency. The console's inbound/outbound drill-down (agentType set) keeps the
   // live lead-scoped path — the snapshot carries no call-direction split. Falls back to live when empty.
-  if (!agentType) {
+  /* ★ NEVER FOR scope=recent (fixed 2026-10-09, audit A3-01). That scope is the appointment-EVENT poller
+   * (vini-daily-calls, every 25 min), and the snapshot is the wrong source for it on three counts: it is
+   * 1.4-5.5h stale, so a booking made after the last sync was never seen once the snapshot had ANY row in
+   * the window; it carries the AI-assisted CRM bookings, which were announced as "New appointment"; and it
+   * keys rows by meeting_id while the live feed keys some by the Mongo _id, so one booking was emailed
+   * twice. The live feed is the event source of record. */
+  if (!agentType && scope !== "recent") {
     const rows = scope === "upcoming"
       ? await sbAppointments(teamId, service, "upcoming", startISO, endISO)
       : await sbAppointments(teamId, service, "window", bookedStartISO as string, bookedEndISO as string);
     /* Cancelled bookings are not listed (appointmentStatus.ts). The snapshot SQL already drops them; this
      * covers rows synced before that change. scope=recent is the event poller's read and keeps its rows. */
-    const listed = rows && scope !== "recent" ? rows.filter((m) => !isCancelledMeeting(m.status)) : rows;
+    const listed = rows ? rows.filter((m) => !isCancelledMeeting(m.status)) : rows;
     if (listed && listed.length) {
-      return Response.json({ meetings: listed, total: listed.length }, { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } });
+      return Response.json({ meetings: listed, total: listed.length }, { headers: PRIVATE_SHORT });
     }
   }
 
-  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId, token: spyneToken, env: spyneEnv, includeCancelled: scope === "recent" });
+  const ent = await resolveRequestEnterprise(request, teamId, spyneToken, { preferParam: true });
+  if (!ent.enterpriseId && isServiceRequest(request)) {
+    /* A service caller with no trustworthy enterprise must not read the live feed under some other
+       enterprise (the env token's) — that is how a cron read can come back as another rooftop's book or
+       as a confident empty list. Flagged with the poller's own degraded field so it alerts. */
+    return Response.json(
+      { meetings: [], total: 0, meetingsFeedDegraded: true, meetingsFeedError: `no trustworthy enterprise for team: ${ent.reason ?? "unknown"}` },
+      { headers: PRIVATE_SHORT },
+    );
+  }
+  const result = await fetchMeetings({ teamId, service, startISO, endISO, sortOrder, bookedStartISO, bookedEndISO, leadIds, enterpriseId: ent.enterpriseId, token: spyneToken, env: spyneEnv, includeCancelled: scope === "recent" });
   /* `result.error` means the live Spyne call itself failed (bad/expired token, Spyne outage, …) — NOT
    * that the rooftop genuinely has zero appointments. Both used to render identically as `{meetings:
    * [], total: 0}`, which is exactly what let a dead token look like "no bookings anywhere" fleet-wide
@@ -301,7 +344,5 @@ export async function GET(request: Request): Promise<Response> {
    * this flag is named distinctly (`meetingsFeedDegraded`, not the existing `degraded`) to get its own
    * accurately-worded alert rather than being folded into the ClickHouse-specific one. */
   const body = result.error ? { ...result, meetingsFeedDegraded: true, meetingsFeedError: result.error } : result;
-  return Response.json(body, {
-    headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" },
-  });
+  return Response.json(body, { headers: PRIVATE_SHORT });
 }

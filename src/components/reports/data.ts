@@ -241,6 +241,18 @@ export interface Meeting {
    * "inbound"/"outbound" = the report's agent_type. null when the API omitted it. */
   agentType?: string | null;
   direction?: string | null;
+  /* Who booked it — meetings.source: "spyne" = the AI agent, anything else (e.g. "bdc") = the dealer's
+   * own staff. null when the path serving the row cannot say (a snapshot row ClickHouse could not
+   * resolve). A consumer announcing AI bookings must require "spyne", never treat null as AI. */
+  source?: string | null;
+  /* BOTH ids of the same meeting. `id` above is whichever one the serving path had — the live feed hands
+   * back meetings.meeting_id ("meeting_<hex>") on some rows and the Mongo _id (24-hex) on others, and the
+   * snapshot stores only meeting_id — so a consumer de-duplicating on `id` sees one booking twice.
+   * meetingId is the canonical dedupe key; mongoId is carried for lookups. Either is null when unknown. */
+  meetingId?: string | null;
+  mongoId?: string | null;
+  /** AI-assisted (CRM) row from the snapshot — a dealer-staff booking on an AI-worked lead. */
+  assisted?: boolean;
 }
 export interface MeetingsResult {
   meetings: Meeting[];

@@ -26,8 +26,9 @@
  * source=spyne like any other — the same exclusion the spine and the snapshot apply (appointmentStatus.ts).
  * Without it the tile kept a cancelled booking that its own drill-down listed in red. */
 import { spyneGet } from "@/lib/spyne/client";
-import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
+import { enterpriseIdFromToken, classifyMeetingIds } from "@/lib/spyne/meetings";
 import { isCancelledMeeting } from "@/lib/reports/appointmentStatus";
+import { storeLocalDay } from "@/lib/reports/tzMap";
 import type { Meeting } from "@/components/reports/data";
 
 /** agent_type label the report uses, e.g. "Service Outbound". Null when the API omitted agentData. */
@@ -44,16 +45,28 @@ export interface LiveAppointments {
   meetings: Meeting[];
 }
 
+/* ★ THE STORE'S DAY, NOT THE UTC DAY (fixed 2026-10-09, audit A2 F2). `bookedAt` is a UTC instant and
+ * [start, end) are store-local calendar days. These used to compare the instant's UTC date prefix, so a
+ * Pacific booking made after 5pm local (after 7pm Central) landed on the NEXT day: Honda of Downtown Los
+ * Angeles, Service, 2026-10-07 — four bookings at 17:33-18:40 PT counted 1 on the Overview against 4 in
+ * the digest and the appointments console. The snapshot path (route.ts) and the ETL already bucket with
+ * storeLocalDay; this puts the live path in the same day space. tz null/invalid → the raw UTC prefix,
+ * storeLocalDay's own contract and exactly the previous behaviour. */
+export function bookedInStoreWindow(bookedAt: string | null | undefined, tz: string | null | undefined, start: string, end: string): boolean {
+  const raw = (bookedAt ?? "").slice(0, 10);
+  if (!raw) return false;
+  const day = storeLocalDay(bookedAt as string, tz ?? undefined, raw);
+  return day >= start && day < end;
+}
+
 /* Count per agent_type over one sub-window. One fetch covers the report window AND the prior one, so a
- * period delta compares two live numbers rather than a live one against a stale one. `bookedAt` is UTC
- * and the window is a store-local day string; comparing the date prefix keeps this identical to how the
- * named-appointment list is windowed elsewhere in the route. */
-export function countByAgent(meetings: Meeting[], start: string, end: string): { byAgent: Record<string, number>; unattributed: number } {
+ * period delta compares two live numbers rather than a live one against a stale one. Windowed by the
+ * store-local booking day (bookedInStoreWindow), identical to the named-appointment list in the route. */
+export function countByAgent(meetings: Meeting[], start: string, end: string, tz?: string | null): { byAgent: Record<string, number>; unattributed: number } {
   const byAgent: Record<string, number> = {};
   let unattributed = 0;
   for (const m of meetings) {
-    const day = (m.bookedAt ?? "").slice(0, 10);
-    if (!day || day < start || day >= end) continue;
+    if (!bookedInStoreWindow(m.bookedAt, tz, start, end)) continue;
     const at = agentTypeOf(m);
     if (at) byAgent[at] = (byAgent[at] ?? 0) + 1;
     else unattributed++;
@@ -64,12 +77,11 @@ export function countByAgent(meetings: Meeting[], start: string, end: string): {
 /* Distinct booked customers per agent_type over one sub-window, by the same day test and agent rule as
  * countByAgent. A meeting with no lead id cannot be matched to another, so it is tallied separately as
  * one customer each. Used for the Reports close-rate basis (route.ts applyCustomerBasis). */
-export function bookedLeadsByAgent(meetings: Meeting[], start: string, end: string): { leads: Record<string, Set<string>>; noLead: Record<string, number> } {
+export function bookedLeadsByAgent(meetings: Meeting[], start: string, end: string, tz?: string | null): { leads: Record<string, Set<string>>; noLead: Record<string, number> } {
   const leads: Record<string, Set<string>> = {};
   const noLead: Record<string, number> = {};
   for (const m of meetings) {
-    const day = (m.bookedAt ?? "").slice(0, 10);
-    if (!day || day < start || day >= end) continue;
+    if (!bookedInStoreWindow(m.bookedAt, tz, start, end)) continue;
     const at = agentTypeOf(m);
     if (!at) continue;
     if (m.leadId) (leads[at] ??= new Set()).add(m.leadId);
@@ -107,8 +119,12 @@ interface LiveResp { data?: RawLiveMeeting[]; pagination?: { hasNextPage?: boole
 function toMeeting(m: RawLiveMeeting): Meeting {
   const c = m.customerData || {};
   const v = (m.proposedVinsData || [])[0];
+  const ids = classifyMeetingIds(m.id, m.meetingId);
   return {
     id: m.id || m.meetingId || "",
+    meetingId: ids.meetingId,
+    mongoId: ids.mongoId,
+    source: (m.source || "").trim().toLowerCase() || null,
     leadId: m.leadId || null,
     customer: (c.name || c.extractedName || "").trim() || "—",
     phone: c.mobileNumber || null,
@@ -134,8 +150,10 @@ export async function fetchLiveAppointments(opts: {
   end: string;
   token?: string | null;
   env?: string | null;
+  /** The rooftop's IANA timezone — the window is a STORE-LOCAL day range (bookedInStoreWindow). */
+  timezone?: string | null;
 }): Promise<LiveAppointments | null> {
-  const { teamId, enterpriseId, start, end, token, env } = opts;
+  const { teamId, enterpriseId, start, end, token, env, timezone } = opts;
   const ent = (enterpriseId && enterpriseId.trim()) || enterpriseIdFromToken(token);
   if (!teamId || !token || !ent) return null;
   try {
@@ -158,11 +176,12 @@ export async function fetchLiveAppointments(opts: {
       ok = true;
       const batch = Array.isArray(res.data) ? res.data : [];
       for (const r of batch) {
-        const day = (r.createdAt ?? "").slice(0, 10);
-        if (day && day >= start && day < end && !isCancelledMeeting(r.status)) out.push(toMeeting(r));
+        if (bookedInStoreWindow(r.createdAt, timezone, start, end) && !isCancelledMeeting(r.status)) out.push(toMeeting(r));
       }
-      // Sorted newest-booking-first, so once a page ends before the window we have everything.
-      const oldest = batch.length ? (batch[batch.length - 1].createdAt ?? "").slice(0, 10) : "";
+      // Sorted newest-booking-first, so once a page ends before the window we have everything. The
+      // store-local day is monotonic in the UTC instant, so the same edge test holds in store days.
+      const last = batch.length ? batch[batch.length - 1].createdAt ?? "" : "";
+      const oldest = last ? storeLocalDay(last, timezone ?? undefined, last.slice(0, 10)) : "";
       if (!batch.length || !res.pagination?.hasNextPage || (oldest && oldest < start)) break;
     }
     return { meetings: out };
