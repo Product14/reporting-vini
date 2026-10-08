@@ -248,6 +248,13 @@ export interface SmsMessage {
   authorUserId?: string | null; // present only on human-authored turns
   authorName?: string | null;
   human_assistant_id?: string | null; // marks the backend-injected role:"system" claim/hand-back notices
+  // Outbound MMS media (UAT): conversations/v2 returns the attachment as PLAIN sibling fields — never inside
+  // `content`, and never JSON to parse. Absent on a plain SMS. `contentType` ("video/mp4", "image/jpeg", …)
+  // is what picks <video> vs <img>; mp4 walkthroughs are the common case, so never assume image.
+  // `mmsTemplateId` is traceability only (which template produced it) — don't fetch the template to render.
+  mediaUrl?: string | null;
+  contentType?: string | null;
+  mmsTemplateId?: string | null;
 }
 export interface CallData {
   callDuration?: string; // seconds, as a string ("81.206")
