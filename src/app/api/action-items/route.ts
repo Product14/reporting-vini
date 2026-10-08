@@ -14,7 +14,15 @@
  * freeform 'custom' catch-all (uncategorized, no dealer-actionable meaning — RETCONVAI QA).
  * Degrades to an empty list — never 502s the pipeline.
  *
- *   /api/action-items?team_id=&serviceType=sales|service|both&scope=recent|open|overdue|created[&minutes=15][&start=&end=][&limit=50][&offset=0]
+ *   /api/action-items?team_id=&serviceType=sales|service|both&scope=recent|open|overdue|created[&minutes=15][&start=&end=][&limit=50][&offset=0][&excludeIntents=a,b][&enterprise_id=]
+ *
+ * INTENT FILTER BEFORE THE PER-LEAD COLLAPSE (2026-10-09, audit A3-07/A3-09). Blank, 'custom' and any
+ * `excludeIntents` the caller passes are dropped at the ITEM level, before rows collapse to one per lead.
+ * Filtering after the collapse (as the email poller had to) let a lead's newest, non-actionable item
+ * (a voicemail note) hide its older actionable one, and made every count a count of the wrong rows.
+ *
+ * UNCAPPED `total` for scope=open|overdue: the number of LEADS matching, from one COUNT, not the length
+ * of the page. `returned` is the page length. (Other scopes keep `total` = page length, as before.)
  *
  * PAGINATION: `limit` is hard-capped at 200 server-side regardless of what's requested, so a caller
  * that assumes "one fetch gets everything" silently truncates any rooftop with a bigger backlog than
@@ -23,10 +31,10 @@
  * page through the full result set instead of guessing a big-enough single limit.
  */
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
-import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom, isServiceRequest } from "@/lib/reports/auth";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
 import { fetchCanonicalActionItemStats } from "@/lib/spyne/consoleReports";
-import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
+import { resolveRequestEnterprise } from "@/lib/reports/enterprise";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
 
@@ -41,6 +49,14 @@ const SERVICE = new Set(["sales", "service", "both"]);
 const SCOPE = new Set(["recent", "open", "overdue", "stats", "created"]);
 const idOk = (s: string) => /^[A-Za-z0-9_-]{1,64}$/.test(s);
 const dateOk = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+// An IANA zone name ("America/Los_Angeles", "Etc/GMT+5") — validated before it is inlined into SQL.
+const tzOk = (s: string) => /^[A-Za-z]+(?:[/_+-][A-Za-z0-9]+)*$/.test(s) && s.length <= 64;
+// One caller-supplied intent to exclude ("sales_left_voicemail"). Lower-cased, validated, inlined quoted.
+const intentOk = (s: string) => /^[a-z0-9_ .:-]{1,64}$/.test(s);
+/* PRIVATE on every response: list scopes carry names and phone numbers, and even the stats scoreboard is
+ * a credential-gated read that a shared cache (which keys on the URL alone) would replay to anyone. */
+const PRIVATE_LONG = { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" };
+const PRIVATE_SHORT = { "Cache-Control": "private, max-age=60, stale-while-revalidate=120" };
 
 // Explicit dept label from the service-type string. Prefix-based and exhaustive: only a value that
 // actually starts with "service"/"sales" maps to that dept — blank/receptionist/sms → "other" (the old
@@ -82,6 +98,11 @@ export async function GET(request: Request): Promise<Response> {
   // the windowed scopes (never for recent/open/overdue).
   /* Also returns the resolved calendar dates + timezone, not just the ClickHouse expressions, so the
      dealer-leads API below can be asked for the IDENTICAL window rather than re-deriving it. */
+  /* ★ EXPLICIT start/end ARE STORE-LOCAL DATES TOO (fixed 2026-10-09, audit A2 F22). The timezone used to
+     be resolved only for a `bucket`, so an explicit window — every digest call and every Overview custom
+     range — reached dealer-leads with timezone=null and was compared in ClickHouse as UTC midnights. The
+     zone is now resolved whenever there is a window, and the ClickHouse bounds are the store's midnights.
+     Unknown zone → the previous UTC behaviour. */
   async function windowExprs(): Promise<{
     startExpr: string;
     endExpr: string;
@@ -92,15 +113,20 @@ export async function GET(request: Request): Promise<Response> {
     let s = dateOk(searchParams.get("start") || "") ? (searchParams.get("start") as string) : "";
     let e = dateOk(searchParams.get("end") || "") ? (searchParams.get("end") as string) : "";
     let tz: string | null = null;
-    if ((!s || !e) && BUCKETS.has(bucketRaw)) {
-      tz = await getStoreTimeZone(teamId, spyneToken, spyneEnv);
+    const wantsBucket = (!s || !e) && BUCKETS.has(bucketRaw);
+    if (s || e || wantsBucket) {
+      const resolved = await getStoreTimeZone(teamId, spyneToken, spyneEnv);
+      tz = resolved && tzOk(resolved) ? resolved : null;
+    }
+    if (wantsBucket) {
       const w = rangeFor(bucketRaw as Bucket, tz ?? undefined);
       if (!s) s = w.start;
       if (!e) e = w.end;
     }
+    const tzArg = tz ? `,'${tz}'` : "";
     return {
-      startExpr: s ? `toDateTime64('${s} 00:00:00',3)` : "now() - INTERVAL 30 DAY",
-      endExpr: e ? `toDateTime64('${e} 00:00:00',3)` : "now()",
+      startExpr: s ? `toDateTime64('${s} 00:00:00',3${tzArg})` : "now() - INTERVAL 30 DAY",
+      endExpr: e ? `toDateTime64('${e} 00:00:00',3${tzArg})` : "now()",
       start: s,
       end: e,
       tz,
@@ -115,7 +141,7 @@ export async function GET(request: Request): Promise<Response> {
    * env otherwise returns an empty 200 that is indistinguishable from "no action items", silently
    * disabling the transactional cron. */
   const noCh = () =>
-    Response.json({ actionItems: [], total: 0, degraded: true, note: "clickhouse not configured" });
+    Response.json({ actionItems: [], total: 0, degraded: true, note: "clickhouse not configured" }, { headers: PRIVATE_SHORT });
 
   // ── scope=stats: rooftop action-item scoreboard (created/closed in-window + open/overdue/due-today
   //    now + a who-closed-most leaderboard). All from dealer_leads.actionItems, de-duped to the latest
@@ -135,20 +161,35 @@ export async function GET(request: Request): Promise<Response> {
      * The ClickHouse path stays underneath, unchanged, as the fallback. The row-level scopes further
      * down are deliberately NOT moved: they also feed the transactional-email pipeline, which depends
      * on their current shape. */
-    if (winStart && winEnd) {
-      const entId = enterpriseIdFromToken(spyneToken);
-      if (entId) {
-        const viaApi = await fetchCanonicalActionItemStats(
-          { enterpriseId: entId, teamId, serviceType: service === "both" ? undefined : service, start: winStart, end: winEnd, timezone: winTz },
-          spyneToken,
-          spyneEnv,
-        );
-        if (viaApi?.stats) {
+    /* ★ THE ROOFTOP'S ENTERPRISE, NOT THE ENV TOKEN'S (fixed 2026-10-09, audit A2 F1). The digest cron
+       sends CRON_SECRET and no dealer token; this used to resolve the enterprise from the env
+       SPYNE_API_TOKEN, and dealer-leads answered that mismatched (enterprise, team) pair with a clean
+       200 of zeros — 0 of 335 digests since 10-01 showed an overdue count. resolveRequestEnterprise
+       never uses the env token for a service caller: it takes ?enterprise_id= checked against the
+       team's own enterprise (or the team's mapped enterprise), and returns null when neither is
+       trustworthy, which sends the request to the ClickHouse roll-up below. */
+    const ent = winStart && winEnd ? await resolveRequestEnterprise(request, teamId, spyneToken) : null;
+    let upstreamZero = false;
+    if (winStart && winEnd && ent?.enterpriseId) {
+      const viaApi = await fetchCanonicalActionItemStats(
+        { enterpriseId: ent.enterpriseId, teamId, serviceType: service === "both" ? undefined : service, start: winStart, end: winEnd, timezone: winTz },
+        spyneToken,
+        spyneEnv,
+      );
+      if (viaApi?.stats) {
+        const st = viaApi.stats;
+        const allZero = !st.created && !st.completed && !st.open && !st.overdue && !st.dueToday;
+        /* A SERVICE caller has no dealer token, so this call ran on the env token for another rooftop's
+           enterprise — exactly the pairing that produced the fake zeros. An all-zero answer on that path
+           is checked against ClickHouse below before it is believed; a dealer's own token is trusted as
+           before, so the Overview is unchanged. */
+        if (!(allZero && isServiceRequest(request) && !spyneToken)) {
           return Response.json(
-            { scope: "stats", stats: viaApi.stats, closers: viaApi.closers ?? [], source: "dealer-leads" },
-            { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } },
+            { scope: "stats", stats: viaApi.stats, closers: viaApi.closers ?? [], source: "dealer-leads", timezone: winTz },
+            { headers: PRIVATE_SHORT },
           );
         }
+        upstreamZero = true;
       }
     }
     // Two-level roll-up. Level 1 (byId): latest CDC row per _id (argMax over _version). Level 2 (perLead):
@@ -204,8 +245,14 @@ export async function GET(request: Request): Promise<Response> {
           dueToday: num(s.dueToday),
         },
         closers: closerRows.map((r) => ({ assignedTo: String(r.assignedTo || ""), closed: num(r.closed) })),
+        source: "clickhouse",
+        timezone: winTz,
+        // The dealer-leads API said all-zero on the service path and ClickHouse was asked instead.
+        ...(upstreamZero ? { upstreamZeroChecked: true } : {}),
+        // Why the dealer-leads path was not used, when it was skipped for want of an enterprise.
+        ...(ent && !ent.enterpriseId ? { enterpriseUnresolved: ent.reason ?? "unknown" } : {}),
       },
-      { headers: { "Cache-Control": "s-maxage=60, stale-while-revalidate=120" } },
+      { headers: PRIVATE_SHORT },
     );
   }
 
@@ -236,6 +283,10 @@ export async function GET(request: Request): Promise<Response> {
   const itemWhere: string[] = ["is_active=1", "__deleted=0", "intent != ''", "lower(intent) != 'custom'"];
   // Prefix match, not exact: 'sales' must also catch 'sales spanish' etc. `service`/`both` validated above.
   if (service !== "both") itemWhere.push(`service_type LIKE '${service}%'`);
+  // Caller-excluded intents (e.g. the email poller's non-actionable voicemail/lost set), item-level and
+  // therefore BEFORE the per-lead collapse below — see the header note.
+  const excluded = [...new Set((searchParams.get("excludeIntents") || "").split(",").map((x) => x.trim().toLowerCase()).filter(intentOk))].slice(0, 50);
+  if (excluded.length) itemWhere.push(`lower(intent) NOT IN (${excluded.map((x) => `'${chEsc(x)}'`).join(",")})`);
   if (scope === "recent") itemWhere.push(`created_ts >= now() - INTERVAL ${minutes} MINUTE`);
   if (scope === "open") itemWhere.push("is_completed=0");
   if (scope === "overdue") itemWhere.push("is_completed=0 AND due_date > toDateTime('1971-01-01') AND due_date < now()");
@@ -278,7 +329,13 @@ export async function GET(request: Request): Promise<Response> {
     ` LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer WHERE team_id='${chEsc(teamId)}' GROUP BY customer_id) c ON l.cid=c.customer_id` +
     ` ORDER BY a.createdAt DESC LIMIT ${limit} OFFSET ${offset}`;
 
-  const rows = await runClickhouse<Record<string, string | number>>(sql);
+  /* The uncapped count for the current-state scopes: LEADS with ≥1 matching item, the same grain and the
+     same predicates as the rows. One COUNT, run beside the page read. */
+  const wantsTotal = scope === "open" || scope === "overdue";
+  const [rows, countRows] = await Promise.all([
+    runClickhouse<Record<string, string | number>>(sql),
+    wantsTotal ? runClickhouse<{ n?: string | number }>(`SELECT count() AS n FROM (${dedupedList})`) : Promise.resolve([] as { n?: string | number }[]),
+  ]);
   const actionItems = rows.map((r) => ({
     id: String(r.id),
     intent: String(r.intent || ""),
@@ -295,10 +352,13 @@ export async function GET(request: Request): Promise<Response> {
   }));
   // hasMore is a cheap "got a full page" heuristic (no extra COUNT query) — a caller paginating with
   // offset should keep going while this is true, and stop as soon as a page comes back short.
-  return Response.json({ actionItems, total: actionItems.length, scope, hasMore: actionItems.length === limit }, {
+  // A failed COUNT (empty result) falls back to the page length rather than reporting 0.
+  const counted = countRows.length ? Number(countRows[0].n) : NaN;
+  const total = wantsTotal && Number.isFinite(counted) ? Math.max(counted, offset + actionItems.length) : actionItems.length;
+  return Response.json({ actionItems, total, returned: actionItems.length, scope, hasMore: actionItems.length === limit }, {
     /* PRIVATE, not s-maxage. This payload carries customer names and phone numbers, and `s-maxage`
          targets SHARED caches — a CDN keys on URL alone and would ignore the bearer token this
          route is gated by. Matches /api/reports, which already says the same thing. */
-      headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" },
+      headers: PRIVATE_LONG,
   });
 }
