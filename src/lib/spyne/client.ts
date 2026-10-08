@@ -50,11 +50,15 @@ export function spyneConfigured(token?: string | null): boolean {
  * return contract for every caller, failures are ALSO reported through this optional callback — pass
  * nothing and behavior is identical to before; a caller that cares can observe the reason without
  * spyneGet throwing. */
+/* `signal` (optional): a caller-owned deadline on top of the 30s per-call one below — the report route
+ * hands the cron path a whole-request budget so a slow upstream degrades that one call instead of
+ * running the function into its 60s kill (see consoleReports.ts gate). */
 export async function spyneGet<T>(
   path: string,
   token?: string | null,
   env?: string | null,
   onError?: (info: { status: number | null; message: string }) => void,
+  signal?: AbortSignal | null,
 ): Promise<T | null> {
   const auth = resolveToken(token);
   if (!auth) {
@@ -73,7 +77,7 @@ export async function spyneGet<T>(
          wedge every canonical report call on that instance until it recycles. 30s is well clear of the
          slowest endpoint measured in prod (outcomes at ~2.0s) and inside the routes' maxDuration of 60.
          The ClickHouse client next door already does this (clickhouse.ts: AbortSignal.timeout(10_000)). */
-      signal: AbortSignal.timeout(30_000),
+      signal: signal ? AbortSignal.any([AbortSignal.timeout(30_000), signal]) : AbortSignal.timeout(30_000),
     });
     if (!r.ok) {
       console.error(`[spyne] GET ${path} → ${r.status}`);

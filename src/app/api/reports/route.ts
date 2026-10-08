@@ -11,8 +11,8 @@ import type { Bucket } from "@/components/reports/data";
 import { getStoreTimeZone, getOnboardedSlots, getOnboardedNames, getOnboardedPhotos } from "@/lib/spyne/teamContext";
 import { fetchCanonicalOverview, fetchCanonicalHotLeads, fetchCanonicalLeadSources } from "@/lib/spyne/consoleReports";
 import { cached as cachedSpyne } from "@/lib/spyne/client";
-import { enterpriseIdFromToken } from "@/lib/spyne/meetings";
-import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
+import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom, isServiceRequest } from "@/lib/reports/auth";
+import { resolveRequestEnterprise, type EnterpriseDecision } from "@/lib/reports/enterprise";
 // Same helper the ETL buckets agent_daily / agent_lead_days with, so the appointment LIST is windowed
 // in the identical day space as the COUNTS shown above it.
 import { storeLocalDay } from "@/lib/reports/tzMap";
@@ -35,6 +35,29 @@ export const dynamic = "force-dynamic";
    in consoleReports.ts) because overlapping them tripped the gateway's timeout; ~14s on the reference
    rooftop, and the 30s budget left no headroom for a cold start on top. */
 export const maxDuration = 60;
+
+/* ── THE CRON PATH'S LATENCY BUDGET (2026-10-09, audit A6 R6) ──
+ * A service caller (CRON_SECRET, no dealer token) is the digest / tracker cron. Measured 2026-10-08:
+ * 39 /api/reports 504s in 3h, every one at :00-:01 past the hour — the cron's burst of ~10 concurrent
+ * rooftops queueing tens of canonical calls behind the 2-slot gate in consoleReports.ts, which is
+ * shared by every invocation on a warm instance. A lone cron-shaped call off-peak took 3.2s. Two
+ * changes, both for that caller only:
+ *   1. Lead-sources (two of the four gated calls) is not fetched: no service caller reads
+ *      `leadsBySource` (vini-daily-calls runner.cjs copies it into a field no template renders), and
+ *      the aggregate's own window-distinct source counts still fill it.
+ *   2. The remaining canonical calls share two deadlines (consoleReports.ts gate): a call still QUEUED
+ *      at 35s never starts, so abandoned work stops holding the two slots every other request waits
+ *      on; one already RUNNING may finish until 50s, then is aborted. If the OVERVIEW (the Sales rungs)
+ *      misses them the body is `degraded: true, degradedReason: "canonical-timeout"` — the digest
+ *      already holds on `degraded` — rather than quietly substituting the aggregate's Sales numbers (a
+ *      different definition since 10-01, so the email would disagree with the Overview). That is the
+ *      outcome the cron got from the 504, delivered sooner and without the dead request holding gate
+ *      slots. `upstream` in the body says what each canonical call did.
+ * Dealer-token requests (the Overview) are untouched by both. `?omit=leadSources,hotLeads` lets any
+ * caller drop sections it does not read. */
+const CRON_QUEUE_BUDGET_MS = 35_000;
+const CRON_HARD_BUDGET_MS = 50_000;
+type UpstreamStatus = "ok" | "failed" | "timeout" | "skipped" | "no-enterprise";
 
 // Equal-length window immediately before [start, end) — basis for period deltas.
 function priorWindow(start: string, end: string): { start: string; end: string } {
@@ -391,6 +414,82 @@ export async function GET(request: Request): Promise<Response> {
   // Every other caller omits it and gets the response unchanged.
   let customerBasis = searchParams.get("close_basis") === "customers";
 
+  /* WHO IS ASKING. A service caller with no dealer token is the cron (see CRON_QUEUE_BUDGET_MS). Its
+     enterprise is NEVER the env token's (lib/reports/enterprise.ts): ?enterprise_id= checked against the
+     team, or the team's mapped enterprise; null → the canonical calls are skipped and the aggregate's
+     numbers stand. A dealer's token keeps supplying its own enterprise, exactly as before. */
+  const t0 = Date.now();
+  const cronCaller = isServiceRequest(request) && !spyneToken;
+  const omit = new Set((searchParams.get("omit") || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean));
+  const skipLeadSources = cronCaller || omit.has("leadsources");
+  const skipHotLeads = omit.has("hotleads");
+  const budget: AbortSignal | null = cronCaller ? AbortSignal.timeout(CRON_HARD_BUDGET_MS) : null;
+  const queueBudget: AbortSignal | null = cronCaller ? AbortSignal.timeout(CRON_QUEUE_BUDGET_MS) : null;
+  const enterpriseP: Promise<EnterpriseDecision> = resolveRequestEnterprise(request, teamId, spyneToken)
+    .catch((): EnterpriseDecision => ({ enterpriseId: null, source: "none", reason: "enterprise lookup failed" }));
+  /* Cache keys carry the ENTERPRISE (so a call made under one enterprise can never answer for another)
+     and the CALLER CLASS (a cron call can be aborted by its deadline, and an in-flight promise is shared
+     by every awaiter of its key — a dealer must never inherit a cron's abort). */
+  const callerKey = cronCaller ? "svc" : "usr";
+  const upstream: Record<"overview" | "hotLeads" | "leadSources", UpstreamStatus> = { overview: "skipped", hotLeads: "skipped", leadSources: "skipped" };
+  const canonCall = <T,>(name: keyof typeof upstream, key: string, load: (enterpriseId: string) => Promise<T | null>): Promise<T | null> =>
+    enterpriseP.then((ent) => {
+      if (!ent.enterpriseId) {
+        upstream[name] = "no-enterprise";
+        return null;
+      }
+      const enterpriseId = ent.enterpriseId;
+      return cachedSpyne(`${key}:${spyneEnv ?? "prod"}:${callerKey}:${enterpriseId}`, () => load(enterpriseId)).then((v) => {
+        upstream[name] = v ? "ok" : budget?.aborted || queueBudget?.aborted ? "timeout" : "failed";
+        return v;
+      });
+    }).catch(() => {
+      upstream[name] = "failed";
+      return null;
+    });
+
+  /* THE CANONICAL RUNGS. Started as soon as the window is known — before the timezone / onboarded-agent
+   * lookups when the window is explicit (every cron call), since they do not depend on them — and not
+   * awaited until buildResult, so they overlap everything else.
+   *
+   * SALES ONLY, deliberately. The canonical definitions were agreed for Sales Inbound/Outbound;
+   * service agents keep the aggregate's own numbers until the same exercise is done for them, and the
+   * overlay in buildResult is keyed by agentType so they are simply not matched.
+   *
+   * Never throws and never rejects the request: `spyneGet` returns null on any failure, the overlay is
+   * skipped, and the report renders from the aggregate exactly as it did before. */
+  const kickoff = (start: string, end: string) => {
+    const canonicalP = canonCall("overview", `canon-overview:${teamId}:${start}:${end}`, (enterpriseId) =>
+      fetchCanonicalOverview({ enterpriseId, teamId, dept: "sales", start, end, signal: budget, queueSignal: queueBudget }, spyneToken, spyneEnv));
+
+    /* Leads by type and source, per DIRECTION — the card is per agent. Two calls, both memoised, both
+       fired now so they overlap the Supabase reads rather than adding to the critical path. */
+    const leadSourcesP = (skipLeadSources
+      ? Promise.resolve([null, null] as const)
+      : Promise.all(
+          (["inbound", "outbound"] as const).map((direction) =>
+            canonCall("leadSources", `canon-src:${teamId}:${direction}:${start}:${end}`, (enterpriseId) =>
+              fetchCanonicalLeadSources({ enterpriseId, teamId, dept: "sales", direction, start, end, signal: budget, queueSignal: queueBudget }, spyneToken, spyneEnv)),
+          ),
+        )
+    ).then(([inbound, outbound]) => ({ inbound, outbound }));
+
+    /* Qualified-minus-booked, for "Hot & warm leads". Same memo treatment and the same never-throws
+       contract: null simply leaves the Supabase snapshot in place.
+       For the CRON it queues only once the overview has settled, so in a burst every request's Sales
+       rungs reach the two gate slots before anyone's hot-leads list — the rungs decide whether a digest
+       can go out, the list is enrichment. A dealer's two calls still start together, as before. */
+    const loadHot = () => canonCall("hotLeads", `canon-hot:${teamId}:${start}:${end}`, (enterpriseId) =>
+      fetchCanonicalHotLeads({ enterpriseId, teamId, dept: "sales", start, end, signal: budget, queueSignal: queueBudget }, spyneToken, spyneEnv));
+    const hotLeadsP = skipHotLeads
+      ? Promise.resolve(null)
+      : cronCaller ? canonicalP.then(loadHot) : loadHot();
+    return { canonicalP, leadSourcesP, hotLeadsP };
+  };
+  const startQ = searchParams.get("start");
+  const endQ = searchParams.get("end");
+  const early = startQ && endQ ? kickoff(startQ, endQ) : null;
+
   // Resolve the rooftop's timezone + onboarded agents from the Spyne API (best-effort; both null when
   // auth is unavailable or the call fails → previous behavior: UTC windows, all agents shown).
   const [timezone, onboardedSlots, onboardedNames, onboardedPhotos] = await Promise.all([
@@ -403,58 +502,26 @@ export async function GET(request: Request): Promise<Response> {
   // Relative buckets resolve to a window in the STORE's timezone (so a Pacific rooftop's "Today" is a
   // Pacific day, not a UTC day). Explicit start/end (the custom date picker) are taken as-is — they're
   // already store-local calendar dates.
-  const startQ = searchParams.get("start");
-  const endQ = searchParams.get("end");
   const { start, end } = startQ && endQ
     ? { start: startQ, end: endQ }
     : rangeFor((searchParams.get("bucket") as Bucket) ?? "last30", timezone ?? undefined);
   const prior = priorWindow(start, end);
   const meta = { start, end, timezone };
-
-  /* THE CANONICAL RUNGS. Started HERE, not awaited until buildResult, so it overlaps the Supabase
-   * reads below and costs no extra wall-clock.
-   *
-   * SALES ONLY, deliberately. The canonical definitions were agreed for Sales Inbound/Outbound;
-   * service agents keep the aggregate's own numbers until the same exercise is done for them, and the
-   * overlay in buildResult is keyed by agentType so they are simply not matched.
-   *
-   * Never throws and never rejects the request: `spyneGet` returns null on any failure, the overlay is
-   * skipped, and the report renders from the aggregate exactly as it did before. */
-  const canonicalP = cachedSpyne(
-    `canon-overview:${spyneEnv ?? "prod"}:${teamId}:${start}:${end}`,
-    async () => {
-      const enterpriseId = enterpriseIdFromToken(spyneToken);
-      if (!enterpriseId) return null;
-      return fetchCanonicalOverview(
-        { enterpriseId, teamId, dept: "sales", start, end },
-        spyneToken,
-        spyneEnv,
-      );
-    },
-  ).catch(() => null);
-
-  /* Leads by type and source, per DIRECTION — the card is per agent. Two calls, both memoised, both
-     fired now so they overlap the Supabase reads rather than adding to the critical path. */
-  const leadSourcesP = Promise.all(
-    (["inbound", "outbound"] as const).map((direction) =>
-      cachedSpyne(`canon-src:${spyneEnv ?? "prod"}:${teamId}:${direction}:${start}:${end}`, async () => {
-        const enterpriseId = enterpriseIdFromToken(spyneToken);
-        if (!enterpriseId) return null;
-        return fetchCanonicalLeadSources({ enterpriseId, teamId, dept: "sales", direction, start, end }, spyneToken, spyneEnv);
-      }).catch(() => null),
-    ),
-  ).then(([inbound, outbound]) => ({ inbound, outbound }));
-
-  /* Qualified-minus-booked, for "Hot & warm leads". Same memo treatment and the same never-throws
-     contract: null simply leaves the Supabase snapshot in place. */
-  const hotLeadsP = cachedSpyne(
-    `canon-hot:${spyneEnv ?? "prod"}:${teamId}:${start}:${end}`,
-    async () => {
-      const enterpriseId = enterpriseIdFromToken(spyneToken);
-      if (!enterpriseId) return null;
-      return fetchCanonicalHotLeads({ enterpriseId, teamId, dept: "sales", start, end }, spyneToken, spyneEnv);
-    },
-  ).catch(() => null);
+  const { canonicalP, leadSourcesP, hotLeadsP } = early ?? kickoff(start, end);
+  /* What the upstream calls did, for the caller to see (additive): which enterprise source was used and
+     whether each canonical section came back, timed out, or was skipped. Read when the body is built. */
+  const upstreamNote = async () => {
+    const ent = await enterpriseP;
+    return { enterprise: ent.source, ...(ent.reason ? { enterpriseReason: ent.reason } : {}), ...upstream };
+  };
+  /* One line per CRON request — the measurement the latency budget above is tuned against. */
+  const logCron = (extra: Record<string, unknown>) => {
+    if (!cronCaller) return;
+    console.log(`[reports] svc ${JSON.stringify({ team: teamId, start, end, ms: Date.now() - t0, ...upstream, ...extra })}`);
+  };
+  /* The cron's own deadline cut the Sales rungs off: hold (degraded), never substitute — see the
+     CRON_QUEUE_BUDGET_MS note. Evaluated after canonicalP has settled. */
+  const cronCanonTimeout = () => (cronCaller && upstream.overview === "timeout" ? { degraded: true, degradedReason: "canonical-timeout" } : {});
 
   const sb = getSupabase();
   if (!sb) {
@@ -463,13 +530,14 @@ export async function GET(request: Request): Promise<Response> {
        real Reached/Engaged/Qualified/Booked with no Supabase at all. */
     const canonNow = await canonicalP;
     const built = buildResult({ canonical: canonNow, canonicalHotLeads: await hotLeadsP, canonicalLeadSources: await leadSourcesP, daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos });
+    logCron({ path: "no-aggregate" });
     /* NO AGGREGATE AND NO CANONICAL ANSWER IS AN OUTAGE, NOT AN EMPTY ROOFTOP. Returning a confident
        200 full of zeros is how a slow upstream ends up telling a dealer they booked nothing. degraded
        keeps the UI in its syncing state and lets the client retry. */
     /* Same window as the full path below, but ONLY when the canonical answer actually arrived. A
        degraded body is the "report is on its way" state — pinning that for 15 minutes would leave a
        dealer on a syncing screen long after the upstream recovered. */
-    return Response.json({ ...built, ...meta, ...(canonNow ? {} : { degraded: true }) },
+    return Response.json({ ...built, ...meta, upstream: await upstreamNote(), ...(canonNow ? {} : { degraded: true }), ...cronCanonTimeout() },
       canonNow ? { headers: { "Cache-Control": "private, max-age=900, stale-while-revalidate=1800" } } : undefined);
   }
 
@@ -503,9 +571,11 @@ export async function GET(request: Request): Promise<Response> {
     // from a genuinely quiet day and SUPPRESS the email instead of sending all-zeros. HTTP stays 200 so
     // existing healthy callers that rely on 200 don't break.
     console.error(`[/api/reports] Supabase read failed for team ${teamId}: ${err.message}`);
+    logCron({ path: "supabase-error" });
     return Response.json({
       ...buildResult({ canonical: await canonicalP, canonicalHotLeads: await hotLeadsP, canonicalLeadSources: await leadSourcesP, daily: [], breakdown: [], priorDaily: [], onboardedSlots, onboardedNames, onboardedPhotos }),
       ...meta,
+      upstream: await upstreamNote(),
       degraded: true,
     }, {
       headers: { "X-Reports-Degraded": "supabase-read-error" },
@@ -821,7 +891,8 @@ export async function GET(request: Request): Promise<Response> {
       liveAppts && flagsPri ? stageGaps(flagsPri, serviceOnly(bookedLeadsByAgent(liveAppts, prior.start, prior.end, timezone)).leads) : null);
   }
 
-  return Response.json({ ...result, ...meta, syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved, ...(!canonicalResolved && !result.hasData ? { degraded: true } : {}) }, {
+  logCron({ path: "aggregate", appointmentsLive });
+  return Response.json({ ...result, ...meta, upstream: await upstreamNote(), syncedAt, appointmentsLive, appointmentsUnattributed, appointmentsUnattributedBy: unattributedBy, appointmentsAssistedBy: assistedBy, everLive: everLiveResolved, ...(!canonicalResolved && !result.hasData ? { degraded: true } : {}), ...cronCanonTimeout() }, {
     /* PRIVATE, not shared: this body carries customer names and phone numbers, so it must never sit in
        a shared CDN cache. `max-age` lets a reload come straight from the browser — the canonical
        endpoints are multi-second warehouse queries and a refresh should not pay for them twice — and

@@ -185,8 +185,45 @@ const MAX_CONCURRENT = 2;
 let active = 0;
 const waiting: (() => void)[] = [];
 
-async function gate<T>(run: () => Promise<T>): Promise<T> {
-  if (active >= MAX_CONCURRENT) await new Promise<void>((resolve) => waiting.push(resolve));
+/* DEADLINE-AWARE (2026-10-09). The gate is module-level, so on a warm Vercel instance it is shared by
+ * EVERY concurrent invocation. At the top of each hour the digest cron fires ~10 rooftops at once, each
+ * asking for up to four gated calls — tens of calls queued behind two slots, and every request still
+ * waiting at 60s was killed (39 /api/reports 504s in 3h on 2026-10-08, all at :00-:01). A caller may now
+ * pass two signals (see Deadline): if either fires while the call is still QUEUED, the call leaves the
+ * queue and never runs, so abandoned work stops holding up everyone behind it; if the hard `signal` fires
+ * while the call is RUNNING, the fetch is aborted (spyneGet) and the slot is released. A call that got its
+ * slot before `queueSignal` fired is allowed to finish — aborting nearly-done work wastes the slot it
+ * already spent. Either way the caller gets null — the same "upstream unavailable" every caller already
+ * handles. No signals → unchanged. */
+export interface Deadline {
+  /** Hard deadline: a queued call leaves the queue, a running call is aborted. */
+  signal?: AbortSignal | null;
+  /** Admission deadline: a call not yet running when this fires never starts. */
+  queueSignal?: AbortSignal | null;
+}
+function admission(d: Deadline): AbortSignal | null {
+  const sigs = [d.signal, d.queueSignal].filter((x): x is AbortSignal => !!x);
+  return sigs.length === 0 ? null : sigs.length === 1 ? sigs[0] : AbortSignal.any(sigs);
+}
+async function gate<T>(run: () => Promise<T | null>, deadline: Deadline = {}): Promise<T | null> {
+  const signal = admission(deadline);
+  if (signal?.aborted) return null;
+  if (active >= MAX_CONCURRENT) {
+    const admitted = await new Promise<boolean>((resolve) => {
+      const wake = () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(true);
+      };
+      const onAbort = () => {
+        const i = waiting.indexOf(wake);
+        if (i >= 0) waiting.splice(i, 1);
+        resolve(false);
+      };
+      waiting.push(wake);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    if (!admitted) return null;
+  }
   active += 1;
   try {
     return await run();
@@ -212,6 +249,9 @@ export async function fetchCanonicalOverview(
     direction?: "inbound" | "outbound";
     start: string;
     end: string;
+    /** Optional deadline — see gate(). */
+    signal?: AbortSignal | null;
+    queueSignal?: AbortSignal | null;
   },
   token?: string | null,
   env?: string | null,
@@ -225,7 +265,7 @@ export async function fetchCanonicalOverview(
     startDate: args.start,
     endDate: args.end,
   });
-  return gate(() => spyneGet<CanonicalOverview>(`${PREFIX}/overview?${query}`, token, env, onError));
+  return gate(() => spyneGet<CanonicalOverview>(`${PREFIX}/overview?${query}`, token, env, onError, args.signal), args);
 }
 
 export async function fetchCanonicalHotLeads(
@@ -236,6 +276,9 @@ export async function fetchCanonicalHotLeads(
     direction?: "inbound" | "outbound";
     start: string;
     end: string;
+    /** Optional deadline — see gate(). */
+    signal?: AbortSignal | null;
+    queueSignal?: AbortSignal | null;
   },
   token?: string | null,
   env?: string | null,
@@ -248,7 +291,7 @@ export async function fetchCanonicalHotLeads(
     startDate: args.start,
     endDate: args.end,
   });
-  return gate(() => spyneGet<CanonicalHotLeads>(`${PREFIX}/hot-leads?${query}`, token, env));
+  return gate(() => spyneGet<CanonicalHotLeads>(`${PREFIX}/hot-leads?${query}`, token, env, undefined, args.signal), args);
 }
 
 /* ── outcomes ─────────────────────────────────────────────────────────────────────────────────── */
@@ -487,6 +530,9 @@ export async function fetchCanonicalLeadSources(
     direction?: "inbound" | "outbound";
     start: string;
     end: string;
+    /** Optional deadline — see gate(). */
+    signal?: AbortSignal | null;
+    queueSignal?: AbortSignal | null;
   },
   token?: string | null,
   env?: string | null,
@@ -499,7 +545,7 @@ export async function fetchCanonicalLeadSources(
     startDate: args.start,
     endDate: args.end,
   });
-  return gate(() => spyneGet<CanonicalLeadSources>(`${PREFIX}/lead-sources?${query}`, token, env));
+  return gate(() => spyneGet<CanonicalLeadSources>(`${PREFIX}/lead-sources?${query}`, token, env, undefined, args.signal), args);
 }
 
 /** Our per-(type, source) rows → the flat by-source list the card draws. Sources repeated across CRM

@@ -35,6 +35,11 @@ export async function fetchTeamTz(teamId: string, token?: string | null, env?: s
     const res = await fetch(`${base}/user-management/v1/team/get-working-days?teamId=${encodeURIComponent(teamId)}`, {
       headers,
       cache: "no-store",
+      /* A deadline, like every other upstream call here (client.ts spyneGet). This lookup is awaited
+         before /api/reports and /api/action-items can window anything, and it had none: a hung
+         connection held the whole request until the function was killed. On timeout the caller falls
+         back to the persisted team_tz (teamContext.getStoreTimeZone). */
+      signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) return null;
     const json = await res.json();
