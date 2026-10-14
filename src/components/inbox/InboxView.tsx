@@ -1362,7 +1362,7 @@ function ListSkeleton() {
  * Thread pane
  * ════════════════════════════════════════════════════════════════════════════ */
 type ThreadNode = (
-  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; human?: boolean; images?: string[]; fb?: { conversationId: string; messageIndex: number } }
+  | { t: number; kind: "msg"; side: "in" | "out"; text: string; sender: string; chat?: boolean; human?: boolean; images?: string[]; videos?: string[]; fb?: { conversationId: string; messageIndex: number } }
   | { t: number; kind: "handover"; claim: boolean } // rep took over / handed back — a state change, not a message
   | { t: number; kind: "email"; side: "in" | "out"; sender: string; subject?: string; text: string; status?: string }
   | { t: number; kind: "toolstep"; label: string; rawName: string; args: { k: string; v: string }[]; result?: string; resultExtra?: string }
@@ -1449,6 +1449,18 @@ function messageImages(m: SmsMessage): string[] {
   }
   for (const mt of c.matchAll(IMG_URL_RE)) out.push(mt[0]);
   return Array.from(new Set(out));
+}
+
+// Outbound MMS VIDEO (UAT). conversations/v2 now returns the attachment as plain `mediaUrl` + `contentType`
+// on the message (never inside `content`). Those are usually video/mp4, which an <img> renders broken, so
+// branch on contentType; if it's missing, fall back to the URL's extension. Returns [] for an image
+// (messageImages already renders those) and for a plain SMS. The caller gates this to UAT.
+const VIDEO_EXT_RE = /\.(?:mp4|m4v|mov|webm|3gp)(?:[?#]|$)/i;
+function messageVideos(m: SmsMessage): string[] {
+  const u = m.mediaUrl;
+  if (typeof u !== "string" || !/^https?:\/\//i.test(u)) return [];
+  const ct = typeof m.contentType === "string" ? m.contentType : "";
+  return /^video\//i.test(ct) || (!/^image\//i.test(ct) && VIDEO_EXT_RE.test(u)) ? [u] : [];
 }
 
 /* Stable key for de-duping chat-service turns across the initial fetch, the SSE replay (which can overlap
@@ -1782,6 +1794,10 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
     else setChatSendState("failed");
   }, [chatDraft, chatHo]);
 
+  // Outbound MMS media (mediaUrl/contentType on conversations/v2) is live on UAT only for now — prod/stag
+  // keep today's behaviour untouched until the backend ships there.
+  const mmsMediaOn = auth.spyneEnv === "uat";
+
   // §13 — one chronological, day-grouped stream: every SMS/chat bubble + call + journey milestone interleaved.
   const nodes = useMemo<ThreadNode[]>(() => {
     if (!conv) return [];
@@ -1849,15 +1865,18 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
             return;
           }
           // A customer (or rep) may attach image(s) (MMS/media) — render them even when there's no text.
-          const imgs = messageImages(m);
-          if (!parsed.text && imgs.length === 0) return;
+          // UAT only: an outbound MMS carries its media as plain mediaUrl/contentType — a video renders as a
+          // <video>, so pull it out of the image list (messageImages also reads mediaUrl, as an image).
+          const vids = mmsMediaOn ? messageVideos(m) : [];
+          const imgs = vids.length ? messageImages(m).filter((u) => !vids.includes(u)) : messageImages(m);
+          if (!parsed.text && imgs.length === 0 && vids.length === 0) return;
           const side = role === "user" ? "in" : "out";
           // Human handover (RETCONVAI-2997): an outbound turn with an authorUserId was sent by a REP, not
           // Vini — label it with the rep's name and mark it human (v2 tags only human turns this way).
           const byHuman = side === "out" && !!m.authorUserId;
           out.push({
             t, kind: "msg", side, text: parsed.text, chat: isChat || undefined, human: byHuman || undefined,
-            images: imgs.length ? imgs : undefined, cid: rec.conversationId,
+            images: imgs.length ? imgs : undefined, videos: vids.length ? vids : undefined, cid: rec.conversationId,
             sender: side === "out" ? (byHuman ? m.authorName || "Team member" : aiAgentName) : custFirst,
             // Feedback attaches to AI messages only (never a rep's own message), keyed by conversation + index (§03).
             fb: side === "out" && !byHuman ? { conversationId: rec.conversationId, messageIndex: i } : undefined,
@@ -1939,7 +1958,7 @@ function ThreadPane({ auth, customer, focusConvId, onHandoverChanged, onBack, on
       }
     }
     return out.sort((a, b) => a.t - b.t);
-  }, [conv, dir, aiAgentName, custFirst, focusedConv, chatSession, chatHo.messages]);
+  }, [conv, dir, aiAgentName, custFirst, focusedConv, chatSession, chatHo.messages, mmsMediaOn]);
 
   // Scroll behaviour: when opened from a None-mode row, JUMP to that conversation (once); otherwise keep
   // the thread pinned to the newest message as it grows. The focus guard stops the 8s poll from re-yanking.
@@ -2514,7 +2533,7 @@ function ThreadNodeView({ node, fb, auth, customerName, customerSeed }: { node: 
       </div>
     );
   }
-  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} human={node.human} images={node.images} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
+  return <MessageBubble side={node.side} sender={node.sender} text={node.text} at={new Date(node.t).toISOString()} chat={node.chat} human={node.human} images={node.images} videos={node.videos} fbNode={node.fb} fb={fb} custName={customerName} custSeed={customerSeed} />;
 }
 
 /* §03 — a tool-use "behind the scenes" step: action + query params + result, expandable. Modeled on
@@ -2613,11 +2632,12 @@ function EmailBubble({ side, sender, subject, text, status, at, custName, custSe
   );
 }
 
-function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb, custName, custSeed }: {
+function MessageBubble({ side, sender, text, at, chat, human, images, videos, fbNode, fb, custName, custSeed }: {
   side: "in" | "out"; sender: string; text: string; at: string;
   chat?: boolean; // website-chat message → "Web chat" tag distinguishes it from a text
   human?: boolean; // outbound turn sent by a REP during a handover (not Vini) → person avatar + "Team" tag
   images?: string[]; // image(s) the customer/rep attached (MMS/media) — rendered inline
+  videos?: string[]; // video(s) on an outbound MMS (UAT) — rendered as an inline <video> player
   fbNode?: { conversationId: string; messageIndex: number }; fb?: FbCtx;
   custName?: string; custSeed?: string; // full customer name + seed → customer avatar matches the header
 }) {
@@ -2634,11 +2654,26 @@ function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb
       ))}
     </div>
   ) : null;
+  // Attached video(s) (outbound MMS walkthroughs). A native player with controls; preload="metadata" so the
+  // thread doesn't pull every mp4 up front. Joins the single-player protocol (CLAUDE.md §7.4): starting one
+  // pauses every other <audio>/<video> and announces on `inbox:media-play` so any WaveSurfer pauses too.
+  const videoBlock = videos && videos.length > 0 ? (
+    <div className={`flex flex-wrap gap-1.5 ${side === "out" ? "justify-end" : "justify-start"}`}>
+      {videos.map((u, k) => (
+        <video key={k} controls playsInline preload="metadata" src={u}
+          className="max-h-[320px] max-w-[260px] rounded-[12px] border bg-black" style={{ borderColor: C.border }}
+          onPlay={(e) => { const el = e.currentTarget; document.querySelectorAll("audio,video").forEach((a) => { if (a !== el) { try { (a as HTMLMediaElement).pause(); } catch { /* noop */ } } }); window.dispatchEvent(new CustomEvent("inbox:media-play", { detail: el })); }}>
+          <a href={u} target="_blank" rel="noreferrer">Open video</a>
+        </video>
+      ))}
+    </div>
+  ) : null;
   if (side === "out") {
     const rating = fbNode && fb ? fb.map[`${fbNode.conversationId}#${fbNode.messageIndex}`] : undefined;
     return (
       <div className="group flex justify-end gap-2">
         <div className="flex max-w-[74%] flex-col items-end gap-1.5 lg:max-w-[70%]">
+          {videoBlock}
           {imgBlock}
           {text && (
             // A rep's manual reply is HIGHLIGHTED — green tint + a left accent stripe — so a human message
@@ -2669,6 +2704,7 @@ function MessageBubble({ side, sender, text, at, chat, human, images, fbNode, fb
     <div className="flex justify-start gap-2">
       <Avatar kind="customer" name={custName || sender} seed={custSeed} />
       <div className="flex max-w-[74%] flex-col items-start gap-1.5 lg:max-w-[70%]">
+        {videoBlock}
         {imgBlock}
         {text && (
           <div className="min-w-0 [overflow-wrap:anywhere] rounded-[15px] rounded-bl-none border px-4 py-3 text-[12px] leading-[18px] lg:px-5 lg:py-3.5" style={{ borderColor: C.border, background: "#fff", color: C.dark }}>
