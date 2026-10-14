@@ -6,11 +6,17 @@
  *
  * Deliberately two things: the funnel and the appointment numbers. Every number comes from
  * useServiceReports → reportsModel.ts (the appointment numbers are the Overview's own), and clicking one
- * opens exactly the appointments it counted (A9). */
+ * opens exactly the appointments it counted (A9).
+ *
+ * Ticket 24973: the old page's Download menu (PDF / CSV / XLSX) is back on the Agent report, built from
+ * this page's own numbers (reportsExport.ts). */
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { DateFilter, ReportTopBar, SectionLabel } from "@/components/reports/kit";
+import { ExportMenu } from "@/components/reports/ExportMenu";
+import { downloadCSV, downloadXLSX, exportFilenameStem } from "@/components/reports/exportReport";
+import { buildPdfReport } from "@/components/reports/printToPdf";
 import { fmtInt, type Meeting } from "@/components/reports/data";
 import { fmtWhenShort } from "@/components/reports/kitV3";
 import { useScenario } from "@/components/reports/scenario";
@@ -20,9 +26,10 @@ import { goCrossPage } from "@/components/reports/parentNav";
 import { OmAppointmentsModal } from "./OmAppointmentsModal";
 import { track } from "@/lib/analytics";
 import type { AppointmentListQuery } from "@/lib/serviceOm/contract";
-import { loadAppointmentList, resolveOmSource, type OmSource } from "@/lib/serviceOm/source";
+import { loadActionItemList, loadAppointmentList, resolveOmSource, type OmSource } from "@/lib/serviceOm/source";
+import { agentLabel, buildExportSheets, buildPdfSections, type ExportInput } from "@/lib/serviceOm/reportsExport";
 import { useServiceReports } from "@/lib/serviceOm/useServiceOverview";
-import { countedTypes } from "@/lib/serviceOm/overviewModel";
+import { countedTypes, overviewActionItems } from "@/lib/serviceOm/overviewModel";
 import { toMeetings, type AgentReport, type ServiceReportsModel } from "@/lib/serviceOm/reportsModel";
 import { Anims } from "../overview/cards";
 import { AgentPicker, AppointmentsCard, FunnelCard, type AppointmentKind } from "./reportCards";
@@ -103,6 +110,49 @@ function ServiceReportsView() {
     openList(`${who(agent)} · ${label}`, `Appointments booked ${w.phrase}`, expected, { basis: "booked", direction: agent.direction, types });
   };
 
+  /* Download: the numbers on screen plus the two complete lists the page opens (the agent's appointments
+     and every open action item), fetched at click time like the old page's action-items sheet. */
+  const [exporting, setExporting] = useState(false);
+  const exportInput = async (): Promise<ExportInput | null> => {
+    if (!agent || !model) return null;
+    const [apptList, aiResp] = await Promise.all([
+      loadAppointmentList(source, ctx, w, { basis: "booked", direction: agent.direction, types: countedTypes(agent.period.work) }).catch(() => null),
+      loadActionItemList(source, ctx, w).catch(() => null),
+    ]);
+    return {
+      accountName: account.name,
+      periodLabel: w.label,
+      tzLabel,
+      agent,
+      model,
+      appointments: apptList ? toMeetings(apptList.items, model.timezone) : null,
+      actionItems: aiResp ? overviewActionItems(aiResp).rows : null,
+    };
+  };
+  const fileStem = () => exportFilenameStem(`${account.name} - ${agent ? agentLabel(agent) : "Service"}`, w.label);
+  const runExport = async (format: "csv" | "xlsx" | "print") => {
+    if (exporting) return;
+    track("report_exported", { tab: "agents", team_id: teamId, format });
+    setExporting(true);
+    try {
+      const input = await exportInput();
+      if (!input) return;
+      if (format === "print") {
+        await buildPdfReport(buildPdfSections(input), {
+          filename: `${fileStem()}.pdf`,
+          title: `${account.name || "Rooftop"} — ${agentLabel(input.agent)}`,
+          subtitle: `${agentLabel(input.agent)} · Service · ${input.agent.direction === "inbound" ? "Inbound" : "Outbound"} · ${w.label}${tzLabel ? ` · times in ${tzLabel}` : ""}`,
+        });
+      } else if (format === "csv") {
+        downloadCSV(`${fileStem()}.csv`, buildExportSheets(input));
+      } else {
+        await downloadXLSX(`${fileStem()}.xlsx`, buildExportSheets(input));
+      }
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const popupSub = popup
     ? popup.items === null
       ? popup.sub
@@ -138,6 +188,12 @@ function ServiceReportsView() {
           <path d="M21 3v6h-6" />
         </svg>
       </button>
+      {/* All reports carries a Download per report, so the menu is the Agent report's only (as on the old page). */}
+      {view === "agent" && agent && model && (
+        <div className={exporting ? "pointer-events-none opacity-60" : undefined} aria-busy={exporting}>
+          <ExportMenu onPrint={() => runExport("print")} onCSV={() => runExport("csv")} onXLSX={() => runExport("xlsx")} />
+        </div>
+      )}
     </div>
   ) : null;
 
