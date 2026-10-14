@@ -142,24 +142,6 @@ async function allRows(page: (cursor?: string) => Promise<{ items: AppointmentRo
   return { items, total: first.total };
 }
 
-/** Every open action item (`due=open`), cursor-paged to the end like the appointment lists, for the export's
- * complete Action items sheet. The metrics come from the first page, so the counts and the rows are one read. */
-export async function apiActionItemList(ctx: ApiCtx, w: WindowParams): Promise<ActionItemResponse | null> {
-  const page = (cursor?: string) => getMetric<ActionItemResponse>(ctx, "action-item", { ...windowQuery(w), due: "open", limit: "50", cursor });
-  const first = await page();
-  if (!first) return null;
-  const items = [...(first.actionItems?.items ?? [])];
-  let cursor = first.actionItems?.nextCursor ?? null;
-  for (let n = 1; cursor && n < MAX_LIST_PAGES; n++) {
-    const next = await page(cursor);
-    if (!next) break;
-    items.push(...(next.actionItems?.items ?? []));
-    if (next.actionItems?.nextCursor && next.actionItems.nextCursor === cursor) break;
-    cursor = next.actionItems?.nextCursor ?? null;
-  }
-  return { ...first, actionItems: { items, total: first.actionItems?.total ?? items.length } };
-}
-
 /** The appointments behind a number: one agent's bookings in the window (listAnchor=created, the same rule as
  * Booked by Spyne), of the types it counted. `direction` filters server-side with the same rule as
  * byDirection (Om's code: a booking by its own call or text, an assisted one by its handoff's channel), so the

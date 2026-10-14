@@ -1,6 +1,6 @@
 import { fetchInboxAgents } from "@/components/inbox/api";
-import type { ActionItemResponse, AgentProfile, AppointmentList, AppointmentListQuery, OverviewResponses, ReportsResponses } from "./contract";
-import { apiActionItemList, apiActionItems, apiAppointmentList, apiAppointments, apiAppointmentTrend, apiCallsReport, apiContact, apiFollowUp, apiUpcoming, type ApiCtx } from "./api";
+import type { AgentProfile, AppointmentList, AppointmentListQuery, OverviewResponses, ReportsResponses } from "./contract";
+import { apiActionItems, apiAppointmentList, apiAppointments, apiAppointmentTrend, apiCallsReport, apiContact, apiFollowUp, apiUpcoming, type ApiCtx } from "./api";
 import { mockActionItems, mockAgents, mockAppointmentList, mockAppointments, mockCallsReport, mockCampaign, mockContact, mockFollowUp } from "./mock";
 import { resolveWindow, type ResolvedWindow } from "./window";
 
@@ -110,15 +110,6 @@ export async function loadReports(source: OmSource, ctx: SourceCtx, w: ResolvedW
     apiAgents(ctx),
   ]);
   return { readAt, appointments, campaign, contactInbound, contactOutbound, upcoming, actionItems, callsReport, followUp, trendInbound, trendOutbound, agents };
-}
-
-/** Every open action item, for the export (the page shows the first 50). */
-export async function loadActionItemList(source: OmSource, ctx: SourceCtx, w: ResolvedWindow): Promise<ActionItemResponse | null> {
-  if (source === "mock") {
-    await wait(MOCK_LATENCY_MS / 2);
-    return mockActionItems(mockCtx(ctx), w, { limit: 1000 });
-  }
-  return apiActionItemList(ctx, w.params);
 }
 
 /** The rows behind a clicked number (A9). */
