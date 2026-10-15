@@ -139,13 +139,16 @@ export interface CanonicalOverview {
   generatedAt: string;
 }
 
-/** Qualified-minus-booked. "Hot" is a label on that set, not a separate rule. */
+/** Leads whose current temperature is hot (same rule as the Conversations tab). */
 export interface CanonicalHotLeads {
   window: CanonicalWindow;
-  qualified: number;
-  booked: number | null;
-  /** The intersection. `qualified - booked` gives the WRONG answer: not every booked lead qualified. */
-  bookedQualified: number | null;
+  /** The rule the backend applied. Optional: the prod backend may not send it yet. */
+  temperature?: "hot";
+  /* The old qualified-minus-booked rule. FD-24439 dropped these from the backend; optional until every
+     environment runs the new rule. Nothing renders them. */
+  qualified?: number;
+  booked?: number | null;
+  bookedQualified?: number | null;
   count: number;
   leads: { leadId: string; customer: string; phone: string; type: string; source: string }[];
   degraded: string[];
@@ -650,6 +653,9 @@ export interface CanonicalLeadConversation {
 
 export interface CanonicalLeadConversations {
   conversations: CanonicalLeadConversation[];
+  /** The lead's name and phone, once per lead (FD-24439). OPTIONAL: an older backend does not send it,
+   *  and `main` ships to prod immediately. */
+  customer?: { name: string; phone: string } | null;
   degraded: boolean;
 }
 
