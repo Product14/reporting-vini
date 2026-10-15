@@ -25,7 +25,7 @@
 import { runClickhouse, chEsc, hasClickhouseCreds } from "@/lib/spyne/clickhouse";
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { fetchCanonicalLeadConversations } from "@/lib/spyne/consoleReports";
-import type { Conversation } from "@/components/reports/liveData";
+import { leadConversationsToRows } from "@/lib/reports/leadConversations";
 import { getStoreTimeZone } from "@/lib/spyne/teamContext";
 import { rangeFor } from "@/components/reports/liveData";
 import type { Bucket } from "@/components/reports/data";
@@ -115,39 +115,7 @@ export async function GET(request: Request): Promise<Response> {
       spyneEnvFrom(request),
     );
     if (viaApi && Array.isArray(viaApi.conversations)) {
-      const conversations: Conversation[] = viaApi.conversations.map((c) => ({
-        id: c.id,
-        leadId: c.leadId,
-        callId: c.callId,
-        /* Not served per-conversation: the caller already knows the lead it asked about. Null rather
-           than a fabricated name. */
-        phone: null,
-        customer: null,
-        channel: c.channel,
-        dept: "sales",
-        direction: c.direction === "inbound" ? "inbound" : "outbound",
-        title: c.outcome || "",
-        summary: c.summary,
-        durationSec: c.durationSec,
-        recordingUrl: c.recordingUrl,
-        outcome: c.outcome,
-        /* No canonical flags for these; false is the honest default and the drawer hides them. */
-        appointmentScheduled: false,
-        queryResolved: false,
-        hasActionItem: false,
-        msgs: c.messages.length,
-        /* Bubbles, oldest→newest, already ordered by the API. */
-        sms: c.channel === "sms"
-          ? c.messages.map((m) => ({
-              authorType: m.role === "customer" ? "human" : "ai",
-              body: m.text,
-              status: "",
-              at: m.at ?? "",
-              direction: m.role === "customer" ? "in" : "out",
-            }))
-          : undefined,
-        at: c.at,
-      }));
+      const conversations = leadConversationsToRows(viaApi);
       return Response.json(
         { conversations, total: conversations.length, hasMore: false, nextOffset: null, degraded: false, source: "console-api" },
         { headers: PRIVATE_NO_STORE },
