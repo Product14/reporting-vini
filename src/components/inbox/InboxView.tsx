@@ -16,6 +16,7 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useScenario } from "@/components/reports/scenario";
 import { handoverEnabled } from "@/lib/inbox/handover";
+import { fetchOmBookingMap, inboxOmOn, omBookingLine, type OmBookingMap } from "@/lib/inbox/omBookingTag";
 import {
   fetchInboxCustomers,
   fetchInboxTeamConversations,
@@ -3365,6 +3366,20 @@ function PersonaSections({ persona, conv, scope = "all" }: { persona?: Persona |
   );
 }
 
+// Om's appointment tags for this rooftop, Service only and only when the rooftop is switched on
+// (src/lib/inbox/omBookingTag.ts). Null while off, loading, or on any failure: callers keep the old line.
+function useOmBookingMap(auth: InboxAuth): OmBookingMap | null {
+  const on = inboxOmOn(auth.teamId, auth.serviceType);
+  const [map, setMap] = useState<OmBookingMap | null>(null);
+  useEffect(() => {
+    if (!on) return;
+    let live = true;
+    fetchOmBookingMap(auth, ACTIVE_TZ).then((m) => { if (live) setMap(m); });
+    return () => { live = false; };
+  }, [on, auth]);
+  return on ? map : null;
+}
+
 function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: InboxCustomer; onExpand: () => void }) {
   const [conv, setConv] = useState<ConversationsV2 | null>(null);
   const [persona, setPersona] = useState<Persona | null>(null);
@@ -3373,6 +3388,7 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
   const [stopErr, setStopErr] = useState(false);
   const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const omMap = useOmBookingMap(auth);
   useEffect(() => {
     let on = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset on customer change
@@ -3473,12 +3489,15 @@ function RightPanel({ auth, customer, onExpand }: { auth: InboxAuth; customer: I
             <RightSection title="Next appointments">
               {appts.map((a, i) => {
                 const b = bookingInfo(a, conv?.conversations ?? []);
+                const om = omBookingLine(a, omMap);
                 return (
                   <div key={i} className="rounded-xl border p-3" style={{ borderColor: C.border }}>
                     <p className="text-[12px] font-semibold" style={{ color: C.dark }}>{apptLabel(a)}</p>
                     {a.status && <p className="mt-0.5 text-[11px] capitalize" style={{ color: C.sub }}>{prettify(a.status)}</p>}
                     {Array.isArray(a.tags) && a.tags.length > 0 && <p className="mt-0.5 text-[11px]" style={{ color: C.sub }}>{a.tags.join(" · ")}</p>}
-                    {b && (b.agent || b.dir !== "unknown") && (
+                    {om !== undefined ? (
+                      om && <p className="mt-1 text-[11px]" style={{ color: C.primary }}>{om}</p>
+                    ) : b && (b.agent || b.dir !== "unknown") && (
                       <p className="mt-1 text-[11px]" style={{ color: C.primary }}>
                         Booked by {b.agent || "Vini"}{b.dir !== "unknown" ? ` · ${dirLabel(b.dir)}` : ""}
                       </p>
@@ -3543,6 +3562,7 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
   const [stopErr, setStopErr] = useState(false);
   const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const omMap = useOmBookingMap(auth);
   useEffect(() => {
     let on = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset on customer change
@@ -3625,6 +3645,8 @@ function DetailsDrawer({ auth, customer, onClose }: { auth: InboxAuth; customer:
                     </div>
                     {Array.isArray(appt.tags) && appt.tags.length > 0 && <p className="mt-2 text-[12px]" style={{ color: C.sub }}>{appt.tags.join(", ")}</p>}
                     {(() => {
+                      const om = omBookingLine(appt, omMap);
+                      if (om !== undefined) return om ? <p className="mt-1 text-[12px]" style={{ color: C.primary }}>{om}</p> : null;
                       const b = bookingInfo(appt, conv?.conversations ?? []);
                       return b && (b.agent || b.dir !== "unknown") ? (
                         <p className="mt-1 text-[12px]" style={{ color: C.primary }}>Booked by {b.agent || "Vini"}{b.dir !== "unknown" ? ` · ${dirLabel(b.dir)}` : ""}</p>
