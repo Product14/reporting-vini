@@ -17,6 +17,18 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } fr
 import { useScenario } from "@/components/reports/scenario";
 import { handoverEnabled } from "@/lib/inbox/handover";
 import {
+  ManagerView,
+  UnansweredControls,
+  UnansweredDetail,
+  UnansweredList,
+  UnansweredBar,
+  useUnanswered,
+  readLanding,
+  writeLanding,
+  type LandingView,
+  type UnansweredScope,
+} from "./unanswered/Unanswered";
+import {
   fetchInboxCustomers,
   fetchInboxTeamConversations,
   type TeamConversation,
@@ -838,6 +850,43 @@ function Inbox() {
   // disagree — the old split conditions could hide the list AND the thread at once (blank screen) when a
   // filter emptied the list while a customer was still selected.
   const threadOnly = !!selected && !listEmpty;
+  // ── Unanswered queue (PRD FD-24641): a third tab next to All / Unread, per department, behind the
+  // per-rooftop view flag. All / Unread / Needs Attention behave exactly as before (PRD R8).
+  const [unansweredMode, setUnansweredMode] = useState(false);
+  const [uaScope, setUaScope] = useState<UnansweredScope>("team");
+  const [uaSelectedId, setUaSelectedId] = useState<string | null>(null);
+  const ua = useUnanswered(auth, serviceType);
+  // The view flag is server-side (R8): an off, rolled-back or never-read flag means no view and no badge (A14).
+  const unansweredOn = ua.page?.enabled === true;
+  const uaActive = unansweredOn && unansweredMode;
+  const uaEpisode = ua.page?.episodes?.find((e) => e.episodeId === uaSelectedId) ?? null;
+  // Mobile single pane, Unanswered flavour: the right pane is "open" once an episode or the manager view is.
+  const uaPaneOpen = uaActive && (uaScope === "manager" || !!uaEpisode);
+  const singlePane = uaActive ? uaPaneOpen : threadOnly;
+  // Landing view per member (R11): applied once per load, after the flag is known.
+  const memberKey = userEmail || userName || "";
+  const [landing, setLanding] = useState<LandingView>("all");
+  const landingApplied = useRef(false);
+  useEffect(() => {
+    if (landingApplied.current || !teamId || !ua.page) return;
+    landingApplied.current = true;
+    const v = readLanding(teamId, memberKey);
+    /* eslint-disable react-hooks/set-state-in-effect -- apply the stored landing view once on load */
+    setLanding(v);
+    if (v === "unanswered" && ua.page.enabled) setUnansweredMode(true);
+    else if (v === "needs_attention" && handoverOn) setNeedsAttention(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [teamId, memberKey, ua.page, handoverOn]);
+  const pickLanding = (v: LandingView) => {
+    setLanding(v);
+    writeLanding(teamId, memberKey, v);
+  };
+  const landingOptions: LandingView[] = ["all", "unanswered", ...(handoverOn ? (["needs_attention"] as LandingView[]) : [])];
+  const pickUaScope = (s: UnansweredScope) => {
+    setUaScope(s);
+    setUaSelectedId(null);
+    if (s !== "manager") ua.setQuery({ scope: s });
+  };
   // Channel-/dept-aware empty text so a blank Calls/Chat/Email tab explains WHY (e.g. this space has none
   // of that channel) rather than a bare "not found". Only meaningful in None mode with a channel picked.
   const channelWord = channel === "call" ? "call" : channel === "sms" ? "SMS" : channel === "email" ? "email" : channel === "chat" ? "chat" : "";
@@ -953,7 +1002,7 @@ function Inbox() {
       <div className="flex min-h-0 flex-1">
         {/* LEFT — list. Mobile is single-pane: full-width, and it yields to the thread only when there IS a
             thread to show (threadOnly) — an emptied list stays visible instead of leaving a blank screen. */}
-        <aside className={`${threadOnly ? "hidden lg:flex" : "flex"} w-full shrink-0 flex-col border-r bg-white lg:w-[360px]`} style={{ borderColor: C.border }}>
+        <aside className={`${singlePane ? "hidden lg:flex" : "flex"} w-full shrink-0 flex-col border-r bg-white lg:w-[360px]`} style={{ borderColor: C.border }}>
           <div className="relative flex h-[68px] shrink-0 items-center px-4">
             <div className="flex flex-1 items-center gap-2.5 rounded-[5px] border px-4 py-2.5"
               style={{ borderColor: showSuggest ? C.primary : C.border }}>
@@ -998,18 +1047,26 @@ function Inbox() {
               </div>
             )}
           </div>
+          {/* Unanswered — customers waiting on a person (PRD FD-24641). Badge = open episodes. */}
+          {unansweredOn && (
+            <UnansweredBar
+              active={uaActive}
+              count={ua.page ? ua.page.openCount : null}
+              onClick={() => { setNeedsAttention(false); setPinnedRows([]); setUnansweredMode(true); }}
+            />
+          )}
           {/* Tab strip scrolls horizontally on very narrow phones instead of spilling out of the pane. */}
           <div className="flex shrink-0 overflow-x-auto" style={{ borderColor: C.border }}>
             {/* In None mode the flat endpoint returns a total but no unread count, so Unread shows no number. */}
-            <TabBtn active={tab === "all" && !needsAttention} onClick={() => { setNeedsAttention(false); setPinnedRows([]); setTab("all"); }} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
-            <TabBtn active={tab === "unread" && !needsAttention} onClick={() => { setNeedsAttention(false); setPinnedRows([]); setTab("unread"); }} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
+            <TabBtn active={tab === "all" && !needsAttention && !uaActive} onClick={() => { setUnansweredMode(false); setNeedsAttention(false); setPinnedRows([]); setTab("all"); }} label={`All(${groupBy === "none" ? (teamPage?.total ?? teamConvs.length) : totalAll})`} />
+            <TabBtn active={tab === "unread" && !needsAttention && !uaActive} onClick={() => { setUnansweredMode(false); setNeedsAttention(false); setPinnedRows([]); setTab("unread"); }} label={groupBy === "none" ? "Unread" : `Unread(${totalUnread})`} />
             {/* Needs Attention — UAT-only quick filter for PENDING handovers, with a live count badge. Only
                 in Customer mode (leads/v2 backs the filter; the None/team endpoint has no phase filter). */}
             {handoverOn && groupBy === "customer" && (
               <button
                 // Leaving the filter drops the pins — they only exist to hold a claimed row in place
                 // while the rep is working in it.
-                onClick={() => setNeedsAttention((v) => { if (v) setPinnedRows([]); return !v; })}
+                onClick={() => { setUnansweredMode(false); setNeedsAttention((v) => { if (v) setPinnedRows([]); return !v; }); }}
                 title="Conversations Vini flagged for a rep"
                 className="flex shrink-0 items-center gap-1.5 border-b px-2.5 py-2.5 text-[12px] transition-colors"
                 style={{
@@ -1033,8 +1090,25 @@ function Inbox() {
             )}
             <div className="flex-1 border-b" style={{ borderColor: C.border }} />
           </div>
+          {uaActive && (
+            <UnansweredControls
+              state={ua}
+              scope={uaScope}
+              onScope={pickUaScope}
+              config={ua.page?.config ?? null}
+              landing={landing}
+              onLanding={pickLanding}
+              landingOptions={landingOptions}
+            />
+          )}
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {groupBy === "none" ? (
+            {uaActive ? (
+              uaScope === "manager" ? (
+                <div className="px-5 py-10 text-center text-[12px]" style={{ color: C.sub }}>Manager view is open on the right.</div>
+              ) : (
+                <UnansweredList state={ua} selectedId={uaSelectedId} onSelect={(e) => setUaSelectedId(e.episodeId)} />
+              )
+            ) : groupBy === "none" ? (
               /* ── FLAT list — one row per conversation (team-conversations endpoint) ── */
               teamLoadingList ? (
                 <ListSkeleton />
@@ -1092,8 +1166,51 @@ function Inbox() {
         </aside>
 
         {/* MIDDLE — chat. Mobile single-pane: shown only once a customer is opened. */}
-        <section className={`${threadOnly ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`} style={{ background: C.bg }}>
-          {threadOnly && selected ? (
+        <section className={`${singlePane ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`} style={{ background: C.bg }}>
+          {uaActive ? (
+            <>
+              {uaPaneOpen && (
+                <button
+                  type="button"
+                  onClick={() => (uaScope === "manager" ? pickUaScope("team") : setUaSelectedId(null))}
+                  className="flex items-center gap-1 border-b bg-white px-4 py-2 text-left text-[12.5px] font-semibold lg:hidden"
+                  style={{ borderColor: C.border, color: C.primary }}
+                >
+                  ← Back to Unanswered
+                </button>
+              )}
+              {uaScope === "manager" ? (
+                <ManagerView auth={auth} department={serviceType} />
+              ) : uaEpisode && ua.page ? (
+                <UnansweredDetail
+                  key={uaEpisode.episodeId}
+                  episode={uaEpisode}
+                  config={ua.page.config}
+                  onClear={async (kind) => {
+                    if (await ua.clear(uaEpisode.episodeId, kind)) setUaSelectedId(null);
+                  }}
+                  renderThread={
+                    ua.page.source === "live"
+                      ? (cust) => (
+                          <ThreadPane
+                            key={cust.customer_id}
+                            auth={auth}
+                            customer={cust}
+                            onHandoverChanged={() => ua.refresh()}
+                            onBack={() => setUaSelectedId(null)}
+                            onDetails={() => setDetailsOpen(true)}
+                          />
+                        )
+                      : undefined
+                  }
+                />
+              ) : (
+                <div className="flex flex-1 items-center justify-center px-6 text-center text-[13px]" style={{ color: C.sub }}>
+                  {ua.page && ua.page.episodes.length === 0 ? "Nobody is waiting on a person right now." : "Pick a customer to see why they're waiting."}
+                </div>
+              )}
+            </>
+          ) : threadOnly && selected ? (
             <ThreadPane
               key={selected.customer_id}
               auth={auth}
@@ -1125,7 +1242,7 @@ function Inbox() {
         </section>
 
         {/* RIGHT — lead details. Hidden < lg (mobile opens it via the header ⓘ → DetailsDrawer). */}
-        {threadOnly && selected && (
+        {!uaActive && threadOnly && selected && (
           <RightPanel key={`rp-${selected.customer_id}`} auth={auth} customer={selected} onExpand={() => setDetailsOpen(true)} />
         )}
 
