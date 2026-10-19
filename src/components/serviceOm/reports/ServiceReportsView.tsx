@@ -27,6 +27,7 @@ import { OmAppointmentsModal } from "./OmAppointmentsModal";
 import { track } from "@/lib/analytics";
 import type { AppointmentListQuery } from "@/lib/serviceOm/contract";
 import { loadActionItemList, loadAppointmentList, resolveOmSource, type OmSource } from "@/lib/serviceOm/source";
+import { statusNowOn } from "@/lib/serviceOm/statusNowSwitch";
 import { agentLabel, buildExportSheets, buildPdfSections, type ExportInput } from "@/lib/serviceOm/reportsExport";
 import { useServiceReports } from "@/lib/serviceOm/useServiceOverview";
 import { countedTypes, overviewActionItems } from "@/lib/serviceOm/overviewModel";
@@ -60,7 +61,9 @@ function ServiceReportsView() {
   const source: OmSource = resolveOmSource(search.get("om_source"));
   // `?om_assisted=off` (sample data, local dev only): answer the way UAT does today, Spyne-assisted not available.
   const mockAssistedOff = source === "mock" && process.env.NODE_ENV !== "production" && search.get("om_assisted") === "off";
-  const ctx = { teamId, enterpriseId, spyneToken, spyneEnv, nameHint: account.name, agents: account.agents, mockAssistedOff };
+  // Rollback switch: read Om's statusNow, or drop it and use the scheduler's raw status as before (statusNowSwitch.ts).
+  const statusNow = statusNowOn(teamId, search.get("status_now"));
+  const ctx = { teamId, enterpriseId, spyneToken, spyneEnv, nameHint: account.name, agents: account.agents, mockAssistedOff, statusNow };
   const { model, loading, window: w, refresh } = useServiceReports({ source, bucket, custom, ...ctx });
   const navQuery = reportNavQuery(teamId, bucket, custom, "service", true, "new");
   const hasTeam = teamId !== "";
@@ -279,7 +282,7 @@ function ServiceReportsView() {
       {popup && popup.items === null && (
         <div className="fixed bottom-6 left-1/2 z-[80] -translate-x-1/2 rounded-full bg-[#15161d] px-4 py-2 text-[12px] font-medium text-white shadow-lg">Loading appointments…</div>
       )}
-      <OmAppointmentsModal open={popup !== null && popup.items !== null} onClose={() => setPopup(null)} title={popup?.title ?? ""} sub={popupSub} items={popup?.items ?? []} />
+      <OmAppointmentsModal open={popup !== null && popup.items !== null} onClose={() => setPopup(null)} title={popup?.title ?? ""} sub={popupSub} items={popup?.items ?? []} statusNow={statusNow} />
     </div>
   );
 }

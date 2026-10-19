@@ -497,6 +497,8 @@ function visitsOf(r: MockRooftop, xs: MockAppt[], w: ResolvedWindow, now: number
 /** The scheduler's own status words, as Om's API passes them through. A past appointment the store never
  * updated still reads "scheduled". */
 const RAW_STATUS: Record<SimStatus, string> = { upcoming: "scheduled", showed: "completed", no_show: "no_show", cancelled: "cancelled", not_available: "scheduled" };
+/** Om's own statusNow beside it (RETCONVAI-5282 S1–S5). */
+const STATUS_NOW = { upcoming: "upcoming", showed: "showed", no_show: "no_show", cancelled: "cancelled", not_available: "status_not_available" } as const satisfies Record<SimStatus, AppointmentRow["statusNow"]>;
 /** Rows as Om's list sends them: the booking agent and direction on our own bookings only (an assisted row's
  * direction is null; the list's `direction` filter still places it by its handoff). */
 function toRow(r: MockRooftop, a: MockAppt, now: number): AppointmentRow {
@@ -514,6 +516,7 @@ function toRow(r: MockRooftop, a: MockAppt, now: number): AppointmentRow {
     channel: ours ? a.channel : null,
     direction: ours ? a.direction : null,
     status: RAW_STATUS[statusOf(a, now)],
+    statusNow: STATUS_NOW[statusOf(a, now)],
     bookedByAgent: agent ? { teamAgentMappingId: `${r.teamId}-${agent.direction}`, agentName: agent.name } : null,
     campaignId: a.campaignId ?? null,
   };
