@@ -53,23 +53,38 @@ export function AgentPicker({ agents, selected, onPick, loading }: { agents: Age
 /* ══════════ funnel ══════════ */
 const STAGE_COLORS = ["#6d3df0", "#7c55f3", "#8f6ff5", "#a48af7"];
 const BOOKED_COLOR = "linear-gradient(90deg, #1f9d62, #23ab70)";
+const ASSISTED_COLOR = "repeating-linear-gradient(135deg, #8fd9b4 0 5px, #c9eedb 5px 10px)";
+const BOOKED_INK = "#0f7a4c";
 
-function FunnelBars({ stages, loading, booked }: { stages: FunnelStage[]; loading: boolean; booked?: React.ReactNode }) {
+/* The Booked row's two parts, straight from the agent's own appointment numbers (reportsModel.ts adds them up
+ * to the stage's number): Booked by Spyne is the solid part of the bar, Spyne-assisted the hatched part. */
+interface BookedSplit { bySpyne: number; assisted: number }
+
+function FunnelBars({ stages, loading, booked, split }: { stages: FunnelStage[]; loading: boolean; booked?: React.ReactNode; split?: BookedSplit }) {
   const top = stages[0]?.customers ?? 0;
   return (
     <div className="flex flex-col gap-3">
       {stages.map((s, i) => {
         const isBooked = s.key === "booked";
         const width = s.customers !== null && top > 0 ? Math.min(100, Math.max(1.5, (s.customers / top) * 100)) : s.customers ? 100 : 0;
+        // Only the Booked row is split, and only once loaded; every other row reads as before.
+        const parts = isBooked && !loading ? split : undefined;
         return (
           <div key={s.key} className="grid grid-cols-[112px_1fr] items-center gap-4 sm:grid-cols-[150px_1fr]">
             <div className="flex flex-col">
-              {loading ? <Shimmer w={56} h={26} /> : (
-                <p className="text-[26px] font-extrabold leading-none tracking-[-0.03em] tabular-nums" style={{ color: isBooked ? "#0f7a4c" : INK }}>
+              {loading ? <Shimmer w={56} h={26} /> : parts ? (
+                <div className="flex flex-wrap items-baseline gap-x-1.5">
+                  <p className="text-[26px] font-extrabold leading-none tracking-[-0.03em] tabular-nums" style={{ color: BOOKED_INK }}>
+                    <CountUp value={parts.bySpyne} />
+                  </p>
+                  <p className="text-[12.5px] font-semibold" style={{ color: BOOKED_INK }}>Booked by Spyne</p>
+                </div>
+              ) : (
+                <p className="text-[26px] font-extrabold leading-none tracking-[-0.03em] tabular-nums" style={{ color: isBooked ? BOOKED_INK : INK }}>
                   {s.customers === null ? "—" : <CountUp value={s.customers} />}
                 </p>
               )}
-              <p className="mt-1 text-[12.5px] font-medium" style={{ color: isBooked ? "#0f7a4c" : SUB }}>{s.label}</p>
+              {!parts && <p className="mt-1 text-[12.5px] font-medium" style={{ color: isBooked ? BOOKED_INK : SUB }}>{s.label}</p>}
               {s.assisted || s.topUp ? (
                 <p className="text-[10.5px]" style={{ color: SUB }} title="Added so every booking below sits inside this stage: Spyne-assisted customers, and bookings from contacts outside this period.">
                   {[s.assisted ? `incl. ${fmtInt(s.assisted)} Spyne-assisted` : "", s.topUp ? `+${fmtInt(s.topUp)} to cover all bookings` : ""].filter(Boolean).join(" · ")}
@@ -79,9 +94,14 @@ function FunnelBars({ stages, loading, booked }: { stages: FunnelStage[]; loadin
             </div>
             <div className="flex items-center gap-2.5">
               <div className="h-[30px] flex-1 overflow-hidden rounded-[8px] bg-[#f5f4fa]">
-                {!loading && s.customers !== null && (
+                {!loading && s.customers !== null && (parts && parts.assisted > 0 ? (
+                  <div className="flex h-full overflow-hidden rounded-[8px] transition-[width] duration-700" style={{ width: `${width}%` }}>
+                    <div className="h-full" style={{ flex: `${parts.bySpyne} 1 0`, background: BOOKED_COLOR }} />
+                    <div className="h-full" style={{ flex: `${parts.assisted} 1 0`, background: ASSISTED_COLOR }} />
+                  </div>
+                ) : (
                   <div className="h-full rounded-[8px] transition-[width] duration-700" style={{ width: `${width}%`, background: isBooked ? BOOKED_COLOR : STAGE_COLORS[Math.min(i, STAGE_COLORS.length - 1)] }} />
-                )}
+                ))}
               </div>
               <span className="w-[52px] flex-none text-right text-[11.5px] font-semibold" style={{ color: i === 0 ? "transparent" : "#6d4ad0" }} title={s.fromPrev ? `${nOfD(s.fromPrev)} from the stage before (R2)` : undefined}>
                 {i === 0 ? "·" : pct(s.fromPrev)}
@@ -110,6 +130,10 @@ export function FunnelCard({ agent, windowPhrase, tzLabel, loading, onViewBooked
     ? `Callers to your line ${windowPhrase}${tzLabel ? ` (${tzLabel})` : ""}`
     : `Conversations reached by call or text ${windowPhrase}${tzLabel ? ` (${tzLabel})` : ""} · Booked = bookings made ${windowPhrase}`;
   const bookedAppts = inbound ? (agent as InboundReport).bookedAppointments : o.bookedAppointments;
+  const work = agent.period.work;
+  const assisted = work.assistedCounted ? work.spyneAssisted ?? 0 : 0;
+  // No Booked by Spyne number, no split: the row falls back to the single Booked bar.
+  const split = work.bookedBySpyne !== null ? { bySpyne: work.bookedBySpyne, assisted } : undefined;
   return (
     <section className="w-full rounded-[16px] border bg-white shadow-[0_1px_3px_-1px_rgba(21,22,29,0.07)]" style={{ borderColor: BORDER }}>
       <div className="flex flex-wrap items-center gap-3 border-b border-[#f1f2f5] px-5 py-4 sm:px-6">
@@ -128,10 +152,13 @@ export function FunnelCard({ agent, windowPhrase, tzLabel, loading, onViewBooked
         <FunnelBars
           stages={agent.funnel}
           loading={loading}
+          split={split}
           booked={
             !loading && bookedAppts !== null ? (
               <div className="mt-0.5 flex flex-col items-start text-[11px]" style={{ color: SUB }}>
-                <span title={agent.period.work.assistedCounted ? undefined : agent.period.work.assistedReason}>{agent.period.work.assistedCounted ? "by Spyne + assisted" : "by Spyne · assisted not available"}</span>
+                {work.assistedCounted
+                  ? assisted > 0 && <p className="text-[12.5px] font-medium" style={{ color: INK }}><span className="font-bold tabular-nums" style={{ color: BOOKED_INK }}>+{fmtInt(assisted)}</span> assisted by Spyne</p>
+                  : <span title={work.assistedReason}>assisted not available</span>}
                 <button onClick={onViewBooked} className="font-semibold text-[#5b21e6] hover:underline">{fmtInt(bookedAppts)} appointments · view →</button>
               </div>
             ) : null
