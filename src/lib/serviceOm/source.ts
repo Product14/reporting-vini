@@ -1,7 +1,8 @@
 import { fetchInboxAgents } from "@/components/inbox/api";
-import type { ActionItemResponse, AgentProfile, AppointmentList, AppointmentListQuery, OverviewResponses, ReportsResponses } from "./contract";
+import type { ActionItemResponse, AgentProfile, AppointmentList, AppointmentListQuery, AppointmentResponse, OverviewResponses, ReportsResponses } from "./contract";
 import { apiActionItemList, apiActionItems, apiAppointmentList, apiAppointments, apiAppointmentTrend, apiCallsReport, apiContact, apiFollowUp, apiUpcoming, type ApiCtx } from "./api";
 import { mockActionItems, mockAgents, mockAppointmentList, mockAppointments, mockCallsReport, mockCampaign, mockContact, mockFollowUp } from "./mock";
+import { withoutStatusNow } from "./statusNowSwitch";
 import { resolveWindow, type ResolvedWindow } from "./window";
 
 /* Where the Service OM pages get their numbers: Om's API ("api") or the sample data ("mock").
@@ -25,7 +26,13 @@ export interface SourceCtx extends ApiCtx {
   agents?: string[];
   /** Sample data only: answer the way UAT does today, Spyne-assisted not available (`?om_assisted=off`). */
   mockAssistedOff?: boolean;
+  /** Read Om's statusNow (the rollback switch, statusNowSwitch.ts); false drops it from the rows. Unset = read. */
+  statusNow?: boolean;
 }
+
+/** The switch off: the rows of an /appointment response without statusNow. */
+const dropStatusNow = (r: AppointmentResponse | null): AppointmentResponse | null =>
+  r?.appointments ? { ...r, appointments: { ...r.appointments, items: withoutStatusNow(r.appointments.items) } } : r;
 
 const mockCtx = (ctx: SourceCtx) => ({ teamId: ctx.teamId, nameHint: ctx.nameHint, agents: ctx.agents, assistedOff: ctx.mockAssistedOff });
 
@@ -75,6 +82,11 @@ export async function loadOverview(source: OmSource, ctx: SourceCtx, w: Resolved
  * all on the page's window and timezone (rule 2). The 7-day trend card is the one fixed window: the last 7
  * days with grain=day, one call per agent (doc 1.7), in the same timezone. */
 export async function loadReports(source: OmSource, ctx: SourceCtx, w: ResolvedWindow): Promise<ReportsResponses> {
+  const r = await reportsResponses(source, ctx, w);
+  return ctx.statusNow === false ? { ...r, appointments: dropStatusNow(r.appointments), upcoming: dropStatusNow(r.upcoming) } : r;
+}
+
+async function reportsResponses(source: OmSource, ctx: SourceCtx, w: ResolvedWindow): Promise<ReportsResponses> {
   const w7 = resolveWindow("last7", null, w.params.timezone ?? null);
   if (source === "mock") {
     await wait(MOCK_LATENCY_MS);
@@ -123,9 +135,10 @@ export async function loadActionItemList(source: OmSource, ctx: SourceCtx, w: Re
 
 /** The rows behind a clicked number (A9). */
 export async function loadAppointmentList(source: OmSource, ctx: SourceCtx, w: ResolvedWindow, q: AppointmentListQuery): Promise<AppointmentList | null> {
+  let list: AppointmentList | null;
   if (source === "mock") {
     await wait(MOCK_LATENCY_MS / 2);
-    return mockAppointmentList(mockCtx(ctx), w, q);
-  }
-  return apiAppointmentList(ctx, w.params, q);
+    list = mockAppointmentList(mockCtx(ctx), w, q);
+  } else list = await apiAppointmentList(ctx, w.params, q);
+  return list && ctx.statusNow === false ? { ...list, items: withoutStatusNow(list.items) } : list;
 }

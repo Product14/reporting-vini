@@ -24,18 +24,18 @@ function useOmPage<R, M extends { timezone: string | null }>(
   build: (r: R) => M,
   empty: R,
 ): { model: M | null; loading: boolean; window: ResolvedWindow; refresh: () => void } {
-  const { source, bucket, custom, teamId, enterpriseId, spyneToken, spyneEnv, nameHint, agents, mockAssistedOff } = p;
+  const { source, bucket, custom, teamId, enterpriseId, spyneToken, spyneEnv, nameHint, agents, mockAssistedOff, statusNow } = p;
   const [tz, setTz] = useState<string | null>(source === "mock" ? MOCK_TZ : null);
   const [nonce, setNonce] = useState(0);
   const w = useMemo(() => resolveWindow(bucket, custom, tz), [bucket, custom, tz]);
   // The timezone is left out of the key: learning it must not refetch a preset window the API already
   // cut in rooftop time (G8).
-  const key = JSON.stringify([source, teamId, enterpriseId, spyneEnv, spyneToken ? 1 : 0, mockAssistedOff ? 1 : 0, w.params.window, w.params.startDate, w.params.endDate, w.startKey, w.endKey, nonce]);
+  const key = JSON.stringify([source, teamId, enterpriseId, spyneEnv, spyneToken ? 1 : 0, mockAssistedOff ? 1 : 0, statusNow === false ? 0 : 1, w.params.window, w.params.startDate, w.params.endDate, w.startKey, w.endKey, nonce]);
   const [state, setState] = useState<{ key: string; model: M | null }>({ key: "", model: null });
 
   useEffect(() => {
     let on = true;
-    load(source, { teamId, enterpriseId, spyneToken, spyneEnv, nameHint, agents, mockAssistedOff }, w)
+    load(source, { teamId, enterpriseId, spyneToken, spyneEnv, nameHint, agents, mockAssistedOff, statusNow }, w)
       .then((r) => {
         if (!on) return;
         const model = build(r);

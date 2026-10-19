@@ -6,7 +6,8 @@
  *     (the store booked it after Vini handed the customer over), from the API row's `tag`;
  *   - the footer adds that split;
  *   - "Other status" reads "Status not available": past appointments the store never updated (Om's S1 term),
- *     which is what fills that group on live rooftops.
+ *     which is what fills that group on live rooftops;
+ *   - "Completed" reads "Showed": rows follow Om's statusNow, where a matching repair order is a visit.
  * The rows themselves are the ones the clicked number counted (rule 8). */
 
 import React, { useEffect } from "react";
@@ -19,7 +20,7 @@ type SectionKey = ReturnType<typeof statusSection>;
 
 const SECTIONS: { key: SectionKey; label: string; dot: string }[] = [
   { key: "scheduled", label: "Scheduled", dot: "#6366f1" },
-  { key: "completed", label: "Completed", dot: "#10b981" },
+  { key: "completed", label: "Showed", dot: "#10b981" },
   { key: "noshow", label: "No-show", dot: "#f59e0b" },
   { key: "cancelled", label: "Cancelled", dot: "#dc2626" },
   { key: "other", label: "Status not available", dot: "#9ca3af" },
@@ -94,6 +95,7 @@ export function OmAppointmentsModal({
   title,
   sub,
   items,
+  statusNow = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -101,6 +103,8 @@ export function OmAppointmentsModal({
   sub?: string;
   /** The rows behind the clicked number; their count is that number. */
   items: Meeting[];
+  /** The rollback switch (statusNowSwitch.ts): off, the group reads "Completed" again, as before. */
+  statusNow?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -112,7 +116,7 @@ export function OmAppointmentsModal({
   if (!open) return null;
 
   const groups = SECTIONS
-    .map((sec) => ({ ...sec, rows: items.filter((m) => statusSection(m.status) === sec.key) }))
+    .map((sec) => ({ ...sec, label: sec.key === "completed" && !statusNow ? "Completed" : sec.label, rows: items.filter((m) => statusSection(m.status) === sec.key) }))
     .filter((g) => g.rows.length > 0);
   const bySpyne = items.filter((m) => bookedBy(m) === "spyne").length;
   const assisted = items.filter((m) => bookedBy(m) === "assisted").length;

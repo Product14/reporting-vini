@@ -419,7 +419,18 @@ const POPUP_STATUS: Record<string, string> = {
   tentative: "tentative",
   not_available: "status not available",
 };
-function popupStatus(raw: string | null | undefined, scheduledStart: string | null, now: number): string {
+/* Om's statusNow onto the same words. Om already counts a matching repair order as a visit, so a past
+ * appointment the scheduler never updated reads "showed" once its RO is in. Preferred whenever it is sent. */
+const STATUS_NOW: Record<string, string> = {
+  upcoming: "scheduled",
+  showed: "showed",
+  no_show: "no_show",
+  cancelled: "cancelled",
+  status_not_available: "status not available",
+};
+function popupStatus(raw: string | null | undefined, statusNow: string | null | undefined, scheduledStart: string | null, now: number): string {
+  const fromOm = STATUS_NOW[(statusNow ?? "").toLowerCase()];
+  if (fromOm) return fromOm;
   const s = POPUP_STATUS[(raw ?? "").toLowerCase()] ?? (raw ? raw.toLowerCase() : "scheduled");
   const past = scheduledStart !== null && Date.parse(scheduledStart) < now;
   return s === "scheduled" && past ? "status not available" : s;
@@ -435,7 +446,7 @@ export function toMeetings(rows: AppointmentRow[], tz: string | null, now: numbe
     vehicle: it.vehicle ? [it.vehicle.year, it.vehicle.make, it.vehicle.model].filter(Boolean).join(" ") : "",
     when: it.scheduledStart ?? "",
     tz,
-    status: popupStatus(it.status, it.scheduledStart, now),
+    status: popupStatus(it.status, it.statusNow, it.scheduledStart, now),
     serviceType: "service",
     assignedTo: it.bookedByAgent?.agentName ?? it.agent ?? null,
     intent: it.services ?? null,

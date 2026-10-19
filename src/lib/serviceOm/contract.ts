@@ -119,6 +119,9 @@ export interface AppointmentRow {
   /** The scheduler's own status, as stored: scheduled, completed, cancelled, cancellation_requested, noshow,
    * no_show, tentative, or null (Om's code). Not normalised by the API. */
   status?: string | null;
+  /** Where it stands now, Om's own S1–S5 status (RETCONVAI-5282): a matching repair order makes it "showed"
+   * even when the scheduler still says scheduled. Absent on API builds from before 13-Oct-2026. */
+  statusNow?: "upcoming" | "showed" | "no_show" | "cancelled" | "status_not_available" | null;
   /** The Vini agent that booked it (Booked by Spyne rows only). */
   bookedByAgent?: { teamAgentMappingId: string; agentName: string | null } | null;
   advisor?: string | null;
