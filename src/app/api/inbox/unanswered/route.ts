@@ -2,8 +2,9 @@
  *
  *   /api/inbox/unanswered?team_id=&enterprise_id=&department=sales|service&bucket=open|aged&sort=oldest|newest&scope=team|mine
  *
- * Source: UNANSWERED_SOURCE=live → the episode team-list query (backend not shipped yet); otherwise the
- * built-in FICTIONAL sample rooftop, labelled source:"sample". PII once live — auth like every inbox route.
+ * Source: UNANSWERED_SOURCE=live → conversational-ai-backend GET /conversation/unanswered/episodes, whose
+ * per-rooftop settings decide `enabled` (R8); otherwise the built-in FICTIONAL sample rooftop, labelled
+ * source:"sample". PII when live — auth like every inbox route.
  */
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { spyneServiceGet, svcIdOk } from "@/lib/spyne/conversationApi";
@@ -30,40 +31,35 @@ export async function GET(request: Request): Promise<Response> {
     scope: searchParams.get("scope") === "mine" ? "mine" : "team",
   };
 
-  // View flag (R8, A14): read per request, so an off or rolled-back flag hides the view on the next poll.
-  if (!unansweredEnabledFor(teamId, q.department)) {
-    const off: UnansweredPage = {
-      enabled: false,
-      source: unansweredSourceIsLive() ? "live" : "sample",
-      department: q.department,
-      openCount: 0,
-      agedCount: 0,
-      episodes: [],
-      config: { mineAvailable: false, escalationConfigured: false, textsAllowed: false, agedLabel: "", viewerIsManager: false, viewerConsoleUserId: null },
-      generated_at: new Date().toISOString(),
-    };
-    return Response.json(off, { headers: { "Cache-Control": "no-store" } });
-  }
-
-  if (!unansweredSourceIsLive()) {
-    return Response.json(sampleUnansweredPage(q), { headers: { "Cache-Control": "no-store" } });
-  }
-
-  if (!svcIdOk(enterpriseId)) return Response.json({ error: "valid enterprise_id is required" }, { status: 400 });
-  const up = new URLSearchParams({
-    enterpriseId,
-    teamId,
-    unansweredOnly: "true",
+  const off = (source: "live" | "sample"): UnansweredPage => ({
+    enabled: false,
+    source,
     department: q.department,
-    bucket: q.bucket,
-    sort: q.sort,
-    scope: q.scope,
+    openCount: 0,
+    agedCount: 0,
+    episodes: [],
+    config: { mineAvailable: false, escalationConfigured: false, textsAllowed: false, agedLabel: "", viewerIsManager: false, viewerConsoleUserId: null },
+    generated_at: new Date().toISOString(),
   });
-  const res = await spyneServiceGet<Omit<UnansweredPage, "source" | "enabled">>(
-    `${UNANSWERED_UPSTREAM.list}?${up.toString()}`,
-    spyneTokenFrom(request),
-    spyneEnvFrom(request),
-  );
-  if (!res.ok) return Response.json({ error: res.error, degraded: true }, { status: res.status });
-  return Response.json({ ...(res.data as Omit<UnansweredPage, "source" | "enabled">), enabled: true, source: "live" }, { headers: { "Cache-Control": "no-store" } });
+
+  if (unansweredSourceIsLive()) {
+    if (!svcIdOk(enterpriseId)) return Response.json({ error: "valid enterprise_id is required" }, { status: 400 });
+    const up = new URLSearchParams({ enterpriseId, teamId, department: q.department, bucket: q.bucket, sort: q.sort, scope: q.scope });
+    const res = await spyneServiceGet<Omit<UnansweredPage, "source">>(
+      `${UNANSWERED_UPSTREAM.list}?${up.toString()}`,
+      spyneTokenFrom(request),
+      spyneEnvFrom(request),
+    );
+    // Unreadable flag → no view and no badge (A14), never an error banner on the Conversations screen.
+    if (!res.ok) return Response.json({ ...off("live"), degraded: true }, { headers: { "Cache-Control": "no-store" } });
+    const page = res.data as Omit<UnansweredPage, "source">;
+    return Response.json(page.enabled ? { ...page, source: "live" } : off("live"), { headers: { "Cache-Control": "no-store" } });
+  }
+
+  // Sample mode: the env team list stands in for the backend view flag.
+  if (!unansweredEnabledFor(teamId, q.department)) {
+    return Response.json(off("sample"), { headers: { "Cache-Control": "no-store" } });
+  }
+
+  return Response.json(sampleUnansweredPage(q), { headers: { "Cache-Control": "no-store" } });
 }

@@ -23,8 +23,8 @@ import {
   UnansweredList,
   UnansweredBar,
   useUnanswered,
-  readLanding,
-  writeLanding,
+  loadLanding,
+  saveLanding,
   type LandingView,
   type UnansweredScope,
 } from "./unanswered/Unanswered";
@@ -870,16 +870,17 @@ function Inbox() {
   useEffect(() => {
     if (landingApplied.current || !teamId || !ua.page) return;
     landingApplied.current = true;
-    const v = readLanding(teamId, memberKey);
-    /* eslint-disable react-hooks/set-state-in-effect -- apply the stored landing view once on load */
-    setLanding(v);
-    if (v === "unanswered" && ua.page.enabled) setUnansweredMode(true);
-    else if (v === "needs_attention" && handoverOn) setNeedsAttention(true);
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, [teamId, memberKey, ua.page, handoverOn]);
+    const enabled = ua.page.enabled;
+    // Applied once per load (the ref), so a poll landing mid-request must not cancel it.
+    void loadLanding(auth, memberKey).then((v) => {
+      setLanding(v);
+      if (v === "unanswered" && enabled) setUnansweredMode(true);
+      else if (v === "needs_attention" && handoverOn) setNeedsAttention(true);
+    });
+  }, [teamId, memberKey, ua.page, handoverOn, auth]);
   const pickLanding = (v: LandingView) => {
     setLanding(v);
-    writeLanding(teamId, memberKey, v);
+    void saveLanding(auth, memberKey, v);
   };
   const landingOptions: LandingView[] = ["all", "unanswered", ...(handoverOn ? (["needs_attention"] as LandingView[]) : [])];
   const pickUaScope = (s: UnansweredScope) => {

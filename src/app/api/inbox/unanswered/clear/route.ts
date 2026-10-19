@@ -30,11 +30,10 @@ export async function POST(request: Request): Promise<Response> {
   if (!svcIdOk(episodeId)) return Response.json({ error: "valid episodeId is required" }, { status: 400 });
   if (!KINDS.includes(kind)) return Response.json({ error: "kind must be handled_elsewhere or no_reply_needed" }, { status: 400 });
 
-  if (!unansweredEnabledFor(teamId, "sales") && !unansweredEnabledFor(teamId, "service")) {
-    return Response.json({ error: "unanswered view is off for this rooftop" }, { status: 404 });
-  }
-
   if (!unansweredSourceIsLive()) {
+    if (!unansweredEnabledFor(teamId, "sales") && !unansweredEnabledFor(teamId, "service")) {
+      return Response.json({ error: "unanswered view is off for this rooftop" }, { status: 404 });
+    }
     return sampleClear(episodeId, kind)
       ? Response.json({ ok: true })
       : Response.json({ error: "episode not found or already cleared" }, { status: 404 });

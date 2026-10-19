@@ -4,8 +4,8 @@
  *
  *   /api/inbox/unanswered/manager?team_id=&enterprise_id=&department=sales|service
  *
- * Access is the manager list only; the backend enforces it (there is no role guard in conv-ai yet, so
- * the live route must not be enabled before that list exists).
+ * Access is the manager list only (settings.managerUserIds, else console admins); the backend enforces it
+ * and answers 403 for anyone else, 404 when the view is off.
  */
 import { requireTeamAuth, spyneTokenFrom, spyneEnvFrom } from "@/lib/reports/auth";
 import { spyneServiceGet, svcIdOk } from "@/lib/spyne/conversationApi";
@@ -26,8 +26,8 @@ export async function GET(request: Request): Promise<Response> {
   if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
 
   const department = searchParams.get("department") === "service" ? "service" : "sales";
-  if (!unansweredEnabledFor(teamId, department)) return Response.json({ error: "unanswered view is off for this rooftop" }, { status: 404 });
   if (!unansweredSourceIsLive()) {
+    if (!unansweredEnabledFor(teamId, department)) return Response.json({ error: "unanswered view is off for this rooftop" }, { status: 404 });
     return Response.json(sampleManagerPage(department), { headers: { "Cache-Control": "no-store" } });
   }
 

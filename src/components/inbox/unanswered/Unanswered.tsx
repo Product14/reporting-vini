@@ -665,3 +665,28 @@ export function writeLanding(teamId: string, member: string, v: LandingView): vo
     /* storage blocked: the choice lasts for this visit only */
   }
 }
+
+/** Live: the member's stored landing view (R11, follows them across browsers). Sample or unreachable: this browser's. */
+export async function loadLanding(auth: InboxAuth, member: string): Promise<LandingView> {
+  try {
+    const r = await fetch(`/api/inbox/unanswered/preferences?${scopeParams(auth)}`, { cache: "no-store", headers: authHeaders(auth) });
+    const j = (await r.json()) as { landingView?: string | null };
+    if (r.ok && (j.landingView === "all" || j.landingView === "unanswered" || j.landingView === "needs_attention")) return j.landingView;
+  } catch {
+    /* fall back to this browser */
+  }
+  return readLanding(auth.teamId, member);
+}
+
+export async function saveLanding(auth: InboxAuth, member: string, v: LandingView): Promise<void> {
+  writeLanding(auth.teamId, member, v);
+  try {
+    await fetch(`/api/inbox/unanswered/preferences?${scopeParams(auth)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", ...(authHeaders(auth) as Record<string, string> | undefined) },
+      body: JSON.stringify({ landingView: v }),
+    });
+  } catch {
+    /* kept in this browser; the server copy catches up on the next pick */
+  }
+}

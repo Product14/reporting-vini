@@ -1,13 +1,13 @@
 /* Unanswered queue switches (PRD R8: view flag per rooftop per department; A14: off, unreadable or rolled
  * back → no view and no badge within a minute).
  *
- *   UNANSWERED_SALES_TEAM_IDS    comma list of team ids, or "*"   (unset = no rooftop). Default per PRD: on at day one.
- *   UNANSWERED_SERVICE_TEAM_IDS  same, for Service — off until the rooftop is confirmed to run Vini Service
- *   UNANSWERED_SOURCE            "live" = the episode team-list API; anything else = sample
+ *   UNANSWERED_SOURCE            "live" = conversational-ai-backend's episode API; anything else = sample
+ *   UNANSWERED_SALES_TEAM_IDS    SAMPLE MODE ONLY: comma list of team ids, or "*", that see the sample
+ *   UNANSWERED_SERVICE_TEAM_IDS  same, for Service
  *
- * SERVER-SIDE ONLY, read on every request: the API answers { enabled: false } for an off rooftop and the
- * screen re-asks every 30 s, so turning a flag off hides the view and badge within a minute without a
- * redeploy (a NEXT_PUBLIC_ build-time flag could not do that).
+ * Live: the per-rooftop, per-department view flag is the backend's `unanswered_settings.viewEnabled` (R8),
+ * read on every request; the API answers { enabled: false } for an off or unreadable rooftop and the screen
+ * re-asks every 30 s, so turning it off hides the view and badge within a minute with no redeploy (A14).
  */
 import type { Department } from "./types";
 
@@ -28,9 +28,10 @@ export function unansweredSourceIsLive(env: Record<string, string | undefined> =
   return (env.UNANSWERED_SOURCE ?? "").trim().toLowerCase() === "live";
 }
 
-/** Upstream paths the backend will serve (PRD R13 team list with unansweredOnly; R7 manager view; R2 clears). */
+/** conversational-ai-backend's Unanswered routes (src/unanswered/unanswered.controller.ts). */
 export const UNANSWERED_UPSTREAM = {
-  list: "/conversation/customers/conversations/team",
+  list: "/conversation/unanswered/episodes",
   clear: "/conversation/unanswered/episodes/clear",
   manager: "/conversation/unanswered/manager",
+  preferences: "/conversation/unanswered/preferences",
 } as const;
