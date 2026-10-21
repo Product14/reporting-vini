@@ -6,7 +6,8 @@
  *     (the store booked it after Vini handed the customer over), from the API row's `tag`;
  *   - the footer adds that split;
  *   - "Other status" reads "Status not available": past appointments the store never updated (Om's S1 term),
- *     which is what fills that group on live rooftops;
+ *     which is what fills that group on live rooftops. With `notUpdated` (schedulerLabelSwitch.ts on) the
+ *     group and its rows read that instead, "Status not updated in Xtime";
  *   - "Completed" reads "Showed": rows follow Om's statusNow, where a matching repair order is a visit.
  * The rows themselves are the ones the clicked number counted (rule 8). */
 
@@ -57,8 +58,9 @@ function meetingStatusColor(s: string): string {
   return "#6366f1"; // scheduled / default
 }
 
-/** kit.tsx's MeetingsList, plus the Booked by / Assisted by pill beside the customer. */
-function OmMeetingsList({ meetings }: { meetings: Meeting[] }) {
+/** kit.tsx's MeetingsList, plus the Booked by / Assisted by pill beside the customer. With `notUpdated`, a row
+ * whose status is "status not available" (toMeetings' word) shows that instead. */
+function OmMeetingsList({ meetings, notUpdated }: { meetings: Meeting[]; notUpdated: string | null }) {
   return (
     <div className="divide-y divide-[#f3f4f6]">
       {meetings.map((m, i) => {
@@ -75,11 +77,13 @@ function OmMeetingsList({ meetings }: { meetings: Meeting[] }) {
                 {m.phone && <span className="text-[#9ca3af]"> · {m.phone}</span>}
               </p>
             </div>
-            <div className="flex-none text-right">
+            {/* Capped with the scheduler label on, so a long one ("…in UpdatePromise") wraps instead of squeezing out
+                the customer's name on a phone. Off, the row is exactly as before. */}
+            <div className={notUpdated ? "max-w-[55%] flex-none text-right" : "flex-none text-right"}>
               <p className="text-[12px] font-medium text-[#111]">{formatMeetingWhen(m.when, m.tz)}</p>
               <span className="inline-flex items-center gap-1.5">
                 {m.serviceType && <span className="text-[9px] font-semibold uppercase tracking-wide text-[#9ca3af]">{m.serviceType}</span>}
-                <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: meetingStatusColor(m.status) }}>{m.status || "—"}</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: meetingStatusColor(m.status) }}>{notUpdated && m.status === "status not available" ? notUpdated : m.status || "—"}</span>
               </span>
             </div>
           </div>
@@ -96,6 +100,7 @@ export function OmAppointmentsModal({
   sub,
   items,
   statusNow = true,
+  notUpdated = null,
 }: {
   open: boolean;
   onClose: () => void;
@@ -105,6 +110,9 @@ export function OmAppointmentsModal({
   items: Meeting[];
   /** The rollback switch (statusNowSwitch.ts): off, the group reads "Completed" again, as before. */
   statusNow?: boolean;
+  /** The other group's label with the scheduler switch on ("Status not updated in Xtime", notUpdatedLabel());
+   * null keeps "Status not available", as before. */
+  notUpdated?: string | null;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -115,8 +123,10 @@ export function OmAppointmentsModal({
 
   if (!open) return null;
 
+  const labelFor = (sec: (typeof SECTIONS)[number]) =>
+    sec.key === "completed" && !statusNow ? "Completed" : sec.key === "other" ? notUpdated ?? sec.label : sec.label;
   const groups = SECTIONS
-    .map((sec) => ({ ...sec, label: sec.key === "completed" && !statusNow ? "Completed" : sec.label, rows: items.filter((m) => statusSection(m.status) === sec.key) }))
+    .map((sec) => ({ ...sec, label: labelFor(sec), rows: items.filter((m) => statusSection(m.status) === sec.key) }))
     .filter((g) => g.rows.length > 0);
   const bySpyne = items.filter((m) => bookedBy(m) === "spyne").length;
   const assisted = items.filter((m) => bookedBy(m) === "assisted").length;
@@ -164,7 +174,7 @@ export function OmAppointmentsModal({
                     <p className="text-[11px] font-bold uppercase tracking-wider text-[#374151]">{g.label}</p>
                     <p className="text-[11px] font-semibold tabular-nums text-[#9ca3af]">{g.rows.length}</p>
                   </div>
-                  <OmMeetingsList meetings={g.rows} />
+                  <OmMeetingsList meetings={g.rows} notUpdated={notUpdated} />
                 </section>
               ))
             ) : (
@@ -177,7 +187,7 @@ export function OmAppointmentsModal({
             <div className="border-t border-[#f0f0f0] px-6 py-2.5 text-[11px] text-[#9ca3af]">
               {`${items.length} appointment${items.length === 1 ? "" : "s"}`}
               {bySpyne > 0 && assisted > 0 && ` · ${bySpyne} booked by Spyne · ${assisted} Spyne-assisted`}
-              {groups.length > 1 && ` · ${groups.map((g) => `${g.rows.length} ${g.label.toLowerCase()}`).join(" · ")}`}
+              {groups.length > 1 && ` · ${groups.map((g) => `${g.rows.length} ${g.label[0].toLowerCase()}${g.label.slice(1)}`).join(" · ")}`}
             </div>
           )}
         </div>

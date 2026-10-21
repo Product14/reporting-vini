@@ -312,6 +312,13 @@ export interface AgentProfile {
   imageUrl: string | null;
 }
 
+/* ── /service-metrics/appointment/show-rate (read for the scheduler's name only) ─────────────────── */
+/** The one field the pages read: lower(providerName) of the rooftop's service-scheduler integration, null
+ * when it has none. The show / no-show blocks it also carries aren't used. */
+export interface ShowRateResponse {
+  provider: string | null;
+}
+
 /* ── what each page asks for ────────────────────────────────────────────────────────────────────── */
 /** The window vocabulary the API takes. Custom endDate is INCLUSIVE. */
 export interface WindowParams {

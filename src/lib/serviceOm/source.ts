@@ -1,7 +1,7 @@
 import { fetchInboxAgents } from "@/components/inbox/api";
 import type { ActionItemResponse, AgentProfile, AppointmentList, AppointmentListQuery, AppointmentResponse, OverviewResponses, ReportsResponses } from "./contract";
-import { apiActionItemList, apiActionItems, apiAppointmentList, apiAppointments, apiAppointmentTrend, apiCallsReport, apiContact, apiFollowUp, apiUpcoming, type ApiCtx } from "./api";
-import { mockActionItems, mockAgents, mockAppointmentList, mockAppointments, mockCallsReport, mockCampaign, mockContact, mockFollowUp } from "./mock";
+import { apiActionItemList, apiActionItems, apiAppointmentList, apiAppointments, apiAppointmentTrend, apiCallsReport, apiContact, apiFollowUp, apiSchedulerProvider, apiUpcoming, type ApiCtx } from "./api";
+import { mockActionItems, mockAgents, mockAppointmentList, mockAppointments, mockCallsReport, mockCampaign, mockContact, mockFollowUp, mockScheduler } from "./mock";
 import { withoutStatusNow } from "./statusNowSwitch";
 import { resolveWindow, type ResolvedWindow } from "./window";
 
@@ -131,6 +131,16 @@ export async function loadActionItemList(source: OmSource, ctx: SourceCtx, w: Re
     return mockActionItems(mockCtx(ctx), w, { limit: 1000 });
   }
   return apiActionItemList(ctx, w.params);
+}
+
+/** The rooftop's service scheduler (lowercase provider name), for the popup's "Status not updated in …"
+ * label. Doesn't depend on the window, so the page reads it once per rooftop. Null when unknown. */
+export async function loadScheduler(source: OmSource, ctx: SourceCtx): Promise<string | null> {
+  if (source === "mock") {
+    await wait(MOCK_LATENCY_MS / 2);
+    return mockScheduler(mockCtx(ctx));
+  }
+  return apiSchedulerProvider(ctx);
 }
 
 /** The rows behind a clicked number (A9). */
