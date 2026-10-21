@@ -26,7 +26,9 @@ import { goCrossPage } from "@/components/reports/parentNav";
 import { OmAppointmentsModal } from "./OmAppointmentsModal";
 import { track } from "@/lib/analytics";
 import type { AppointmentListQuery } from "@/lib/serviceOm/contract";
-import { loadActionItemList, loadAppointmentList, resolveOmSource, type OmSource } from "@/lib/serviceOm/source";
+import { loadActionItemList, loadAppointmentList, loadScheduler, resolveOmSource, type OmSource } from "@/lib/serviceOm/source";
+import { notUpdatedLabel, schedulerName } from "@/lib/serviceOm/scheduler";
+import { schedulerLabelOn } from "@/lib/serviceOm/schedulerLabelSwitch";
 import { statusNowOn } from "@/lib/serviceOm/statusNowSwitch";
 import { agentLabel, buildExportSheets, buildPdfSections, type ExportInput } from "@/lib/serviceOm/reportsExport";
 import { useServiceReports } from "@/lib/serviceOm/useServiceOverview";
@@ -86,6 +88,23 @@ function ServiceReportsView() {
   const openAgent = (key: string) => { setPicked(key); setView("agent"); window.scrollTo({ top: 0, behavior: "smooth" }); };
 
   useEffect(() => { track("report_viewed", { tab: "agents", team_id: teamId }); }, [teamId]);
+
+  // The rooftop's scheduler by name, for the popup's "Status not updated in …". Once per rooftop: it doesn't
+  // depend on the window. Null until it arrives or when unknown; the popup then says "in the scheduler".
+  // Kept with the rooftop it was read for, so switching rooftops never shows the previous one's scheduler.
+  // Rollback switch (schedulerLabelSwitch.ts): off, no call and the popup reads "Status not available".
+  const schedulerLabel = schedulerLabelOn(teamId, search.get("sched_label"));
+  const schedulerKey = `${source}|${enterpriseId}|${teamId}`;
+  const [schedulerRead, setSchedulerRead] = useState<{ key: string; name: string | null } | null>(null);
+  useEffect(() => {
+    let on = true;
+    if (!teamId || !schedulerLabel) return;
+    loadScheduler(source, { teamId, enterpriseId, spyneToken, spyneEnv })
+      .then((p) => { if (on) setSchedulerRead({ key: schedulerKey, name: schedulerName(p) }); })
+      .catch(() => {});
+    return () => { on = false; };
+  }, [schedulerLabel, schedulerKey, source, teamId, enterpriseId, spyneToken, spyneEnv]);
+  const notUpdated = schedulerLabel ? notUpdatedLabel(schedulerRead?.key === schedulerKey ? schedulerRead.name : null) : null;
 
   /* The popup: open on a click, fill when the rows arrive. `expected` is the number that was clicked; if the
      rows ever disagree with it the popup says so instead of quietly showing a different count (A9). */
@@ -282,7 +301,7 @@ function ServiceReportsView() {
       {popup && popup.items === null && (
         <div className="fixed bottom-6 left-1/2 z-[80] -translate-x-1/2 rounded-full bg-[#15161d] px-4 py-2 text-[12px] font-medium text-white shadow-lg">Loading appointments…</div>
       )}
-      <OmAppointmentsModal open={popup !== null && popup.items !== null} onClose={() => setPopup(null)} title={popup?.title ?? ""} sub={popupSub} items={popup?.items ?? []} statusNow={statusNow} />
+      <OmAppointmentsModal open={popup !== null && popup.items !== null} onClose={() => setPopup(null)} title={popup?.title ?? ""} sub={popupSub} items={popup?.items ?? []} statusNow={statusNow} notUpdated={notUpdated} />
     </div>
   );
 }

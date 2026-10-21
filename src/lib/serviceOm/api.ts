@@ -1,4 +1,4 @@
-import type { ActionItemResponse, AppointmentList, AppointmentListQuery, AppointmentResponse, AppointmentRow, CallsReportResponse, CampaignResponse, ContactResponse, FollowUpResponse, WindowParams } from "./contract";
+import type { ActionItemResponse, AppointmentList, AppointmentListQuery, AppointmentResponse, AppointmentRow, CallsReportResponse, CampaignResponse, ContactResponse, FollowUpResponse, ShowRateResponse, WindowParams } from "./contract";
 
 /* The REAL source: Om's Service Metrics API v2 (Confluence 1193934864), called from the browser with the
  * console session token the console forwards on the iframe URL (`auth_key`), as `Authorization: Bearer`.
@@ -121,6 +121,14 @@ export function apiFollowUp(ctx: ApiCtx, w: WindowParams, list = "warmLeads", li
 /** 1.6 Inbound calls answered (business hours / after hours), transfers, reasons, and both heatmaps. */
 export function apiCallsReport(ctx: ApiCtx, w: WindowParams): Promise<CallsReportResponse | null> {
   return getMetric<CallsReportResponse>(ctx, "calls-report", windowQuery(w));
+}
+
+/** The rooftop's service scheduler (lowercase provider name, e.g. "xtime"), from the show-rate endpoint, the
+ * one Om endpoint that names it; null when the rooftop has none or the call fails. Its DTO declares no
+ * agentLine, and an undeclared param is a 400, so agentLine is unset here (undefined params aren't sent). */
+export async function apiSchedulerProvider(ctx: ApiCtx): Promise<string | null> {
+  const r = await getMetric<ShowRateResponse>(ctx, "appointment/show-rate", { agentLine: undefined });
+  return r?.provider ?? null;
 }
 
 const MAX_LIST_PAGES = 40; // a safety ceiling against a runaway cursor, not an expected size

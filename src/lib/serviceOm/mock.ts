@@ -951,5 +951,12 @@ export function mockAgents(ctx: MockCtx): AgentProfile[] {
   return r.agents.map((a) => ({ direction: a.direction, name: a.name, imageUrl: null }));
 }
 
+/* ── the rooftop's service scheduler (show-rate's `provider`) ───────────────────────────────────── */
+// Weighted like prod's service-scheduler integrations (21-Oct-2026); the empty slot is a rooftop without one.
+const SCHEDULERS = ["xtime", "xtime", "xtime", "tekion", "tekion", "tekion", "cdk", "dealerfx", "pbs", "updatePromise", "mykaarma", ""];
+export function mockScheduler(ctx: MockCtx): string | null {
+  return SCHEDULERS[hashStr(`${ctx.teamId}|scheduler`) % SCHEDULERS.length] || null;
+}
+
 /* Unused by the pages today, kept so a test can prove "not available" reads as a reason, never a 0. */
 export const MOCK_NOT_AVAILABLE = notAvailable("Not available in the sample.");
