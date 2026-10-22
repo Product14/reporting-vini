@@ -13,6 +13,7 @@ import Image from "next/image";
 import { fmtInt } from "@/components/reports/data";
 import { fmtWhenShort } from "@/components/reports/kitV3";
 import { CountUp } from "@/components/reports/anim";
+import { InfoTip } from "@/components/reports/kit";
 import { hour12, parseReportTs, storeDayKey, storeParts } from "@/lib/reports/storeTime";
 import type { ServiceOverviewModel, UpcomingRow } from "@/lib/serviceOm/overviewModel";
 
@@ -134,7 +135,7 @@ export function ServiceHero({ model, loading, nav }: { model: ServiceOverviewMod
                 {busy ? (
                   <span className="block h-[14px] w-[120px] animate-pulse rounded bg-[#eef0f3]" />
                 ) : (
-                  t.lines.map((l, j) => <p key={j} className="text-[12px] text-[#626f81]">{l}</p>)
+                  t.lines.map((l, j) => <p key={j} className="text-[12px] text-[#626f81]">{l}{l.endsWith("Spyne-assisted") && <InfoTip metric="spyneAssisted" />}</p>)
                 )}
               </div>
             </>

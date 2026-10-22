@@ -8,6 +8,7 @@
 import React from "react";
 import { fmtInt } from "@/components/reports/data";
 import { CountUp } from "@/components/reports/anim";
+import { InfoTip } from "@/components/reports/kit";
 import type { AgentReport, FunnelStage, InboundReport, OutboundReport, PeriodBooked, RateView } from "@/lib/serviceOm/reportsModel";
 import { AgentAvatar, AgentStat, VisitsBooked } from "../overview/cards";
 
@@ -77,7 +78,7 @@ function FunnelBars({ stages, loading, booked, split }: { stages: FunnelStage[];
                   <p className="text-[26px] font-extrabold leading-none tracking-[-0.03em] tabular-nums" style={{ color: BOOKED_INK }}>
                     <CountUp value={parts.bySpyne} />
                   </p>
-                  <p className="text-[12.5px] font-semibold" style={{ color: BOOKED_INK }}>Booked by Spyne</p>
+                  <p className="text-[12.5px] font-semibold" style={{ color: BOOKED_INK }}>Booked by Spyne<InfoTip metric="bookedBySpyne" /></p>
                 </div>
               ) : (
                 <p className="text-[26px] font-extrabold leading-none tracking-[-0.03em] tabular-nums" style={{ color: isBooked ? BOOKED_INK : INK }}>
@@ -86,8 +87,11 @@ function FunnelBars({ stages, loading, booked, split }: { stages: FunnelStage[];
               )}
               {!parts && <p className="mt-1 text-[12.5px] font-medium" style={{ color: isBooked ? BOOKED_INK : SUB }}>{s.label}</p>}
               {s.assisted || s.topUp ? (
-                <p className="text-[10.5px]" style={{ color: SUB }} title="Added so every booking below sits inside this stage: Spyne-assisted customers, and bookings from contacts outside this period.">
-                  {[s.assisted ? `incl. ${fmtInt(s.assisted)} Spyne-assisted` : "", s.topUp ? `+${fmtInt(s.topUp)} to cover all bookings` : ""].filter(Boolean).join(" · ")}
+                <p className="text-[10.5px]" style={{ color: SUB }}>
+                  {/* Spyne-assisted explains itself in its (i); the native title stays on the top-up, which has no glossary entry. */}
+                  {s.assisted ? <>incl. {fmtInt(s.assisted)} Spyne-assisted<InfoTip metric="spyneAssisted" /></> : null}
+                  {s.assisted && s.topUp ? " · " : null}
+                  {s.topUp ? <span title="Added so every booking below sits inside this stage: bookings from contacts outside this period.">+{fmtInt(s.topUp)} to cover all bookings</span> : null}
                 </p>
               ) : null}
               {isBooked && booked}

@@ -7,6 +7,7 @@ import {
   DateFilter,
   EmptyState,
   fmtInt,
+  InfoTip,
   MeetingsModal,
   ReportTopBar,
   SectionLabel,
@@ -18,6 +19,7 @@ import { useDateRange, useDept, reportNavQuery, useVariant } from "@/components/
 import { fetchAgents, agentsForAccount, aggregateFleet, unattributedApptsFor, assistedApptsFor, rooftopRungsFor, addDay, peekAgents, type FetchResult } from "@/components/reports/liveData";
 import type { NamedAppt } from "@/components/reports/data";
 import { track } from "@/lib/analytics";
+import type { MetricKey } from "@/lib/metricDefinitions";
 import { useServiceAppointmentsPageOverlay } from "@/lib/serviceMetrics";
 
 type Filter = "all" | "booked" | "assisted";
@@ -129,19 +131,19 @@ function AppointmentsView() {
         <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 sm:px-6 lg:px-10 pt-7 pb-36 flex flex-col gap-7">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {serviceMetricsOn ? (
-              <StatTile label="Booked by Spyne" value={svcMetrics.bookedBySpyne != null ? fmtInt(svcMetrics.bookedBySpyne) : "—"} sub="Spyne booked it" accent="#059669" />
+              <StatTile label="Booked by Spyne" info="bookedBySpyne" value={svcMetrics.bookedBySpyne != null ? fmtInt(svcMetrics.bookedBySpyne) : "—"} sub="Spyne booked it" accent="#059669" />
             ) : (
-              <StatTile label="AI-booked" value={fmtInt(fleet.appointments)} sub="the AI created the meeting" accent="#059669" onClick={fleet.appointments > 0 ? () => { setModalOpen(true); track("appointments_drilldown_opened", { tab: "appointments", team_id: teamId }); } : undefined} />
+              <StatTile label="AI-booked" info="aiBooked" value={fmtInt(fleet.appointments)} sub="the AI created the meeting" accent="#059669" onClick={fleet.appointments > 0 ? () => { setModalOpen(true); track("appointments_drilldown_opened", { tab: "appointments", team_id: teamId }); } : undefined} />
             )}
             {/* AI-assisted (CRM) — needs workedBySpyne, held pending the attribution backfill (see
                 serviceMetrics.ts). No twin today; hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <StatTile label="AI-assisted (CRM)" value={fmtInt(fleet.appointmentsAssisted)} sub="you booked it, on a lead the AI had spoken to" accent="#6d28d9" />
+              <StatTile label="AI-assisted (CRM)" info="aiAssistedCrm" value={fmtInt(fleet.appointmentsAssisted)} sub="you booked it, on a lead the AI had spoken to" accent="#6d28d9" />
             )}
             {/* Close rate — needs qualified leads, which Classification stays available:false for
                 (RETCONVAI-5010). No twin today; hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <StatTile label="Close rate" value={fleet.qualified > 0 ? `${Math.round((100 * fleet.appointments) / fleet.qualified)}%` : "—"} sub="AI-booked ÷ qualified leads" accent="#2563eb" />
+              <StatTile label="Close rate" info="closeRate" value={fleet.qualified > 0 ? `${Math.round((100 * fleet.appointments) / fleet.qualified)}%` : "—"} sub="AI-booked ÷ qualified leads" accent="#2563eb" />
             )}
           </div>
 
@@ -209,10 +211,10 @@ function AppointmentsView() {
   );
 }
 
-function StatTile({ label, value, sub, accent, onClick }: { label: string; value: string; sub: string; accent: string; onClick?: () => void }) {
+function StatTile({ label, value, sub, accent, onClick, info }: { label: string; value: string; sub: string; accent: string; onClick?: () => void; info?: MetricKey }) {
   const body = (
     <>
-      <p className="text-[10px] font-bold uppercase tracking-wider text-[#6b7280]">{label}</p>
+      <p className="text-[10px] font-bold uppercase tracking-wider text-[#6b7280]">{label}{info && <InfoTip metric={info} />}</p>
       <p className="mt-1 text-[26px] font-extrabold tabular-nums leading-none" style={{ color: accent }}>{value}</p>
       <p className="mt-1.5 text-[10.5px] leading-snug text-[#9ca3af]">{sub}</p>
     </>
