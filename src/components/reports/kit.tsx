@@ -107,7 +107,9 @@ export function InfoTip({ metric }: { metric: MetricKey | MetricKey[] }) {
         onMouseLeave={hideSoon}
         onFocus={show}
         onBlur={hideSoon}
-        onClick={(e) => { e.stopPropagation(); e.preventDefault(); if (pos) hideNow(); else show(); }}
+        // Open, never toggle: hover and focus have already opened it by the time a click lands, so a toggle
+        // closed the card on every desktop click and on an Android tap. It closes on leave, blur, Esc or scroll.
+        onClick={(e) => { e.stopPropagation(); e.preventDefault(); show(); }}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); if (e.key === "Escape") hideNow(); }}
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" aria-hidden="true">
