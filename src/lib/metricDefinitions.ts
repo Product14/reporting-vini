@@ -19,6 +19,7 @@ export interface MetricDefinition {
   example?: string;
   counts?: string[];
   notCounted?: string[];
+  salesOnly?: boolean; // hidden on the Service view, where the number is computed by a different rule
 }
 
 export const METRIC_DEFINITIONS = {
@@ -26,17 +27,20 @@ export const METRIC_DEFINITIONS = {
   leadsTouched: {
     title: "Leads reached",
     summary: "Customers who had any call or text with the AI, inbound or outbound.",
+    salesOnly: true,
   },
   realConversations: {
     title: "Real conversations",
     summary: "Customers who actually spoke to the AI or texted back.",
     notCounted: ["Voicemails and missed calls", "STOP replies", "Wrong numbers"],
+    salesOnly: true,
   },
   qualifiedLeads: {
     title: "Qualified leads",
     summary: "Customers who showed buying interest and gave us something concrete:",
     counts: ["Named a specific car", "Shared a budget", "Asked to visit, test drive, or speak to your team"],
     notCounted: ["A general question with no car, budget or visit"],
+    salesOnly: true,
   },
   // The tile is labelled "qualified, not yet booked", but since FD-24439 the number is the backend's
   // hot-leads count (current temperature = hot). The label is a product call; this describes the number.
@@ -78,6 +82,7 @@ export const METRIC_DEFINITIONS = {
   afterHours: {
     title: "Captured after-hours",
     summary: "Customers whose first contact came while your store was closed.",
+    salesOnly: true,
   },
 
   /* ── Service (Om /appointment contract) ── */

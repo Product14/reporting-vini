@@ -74,7 +74,11 @@ export function InfoTip({ metric }: { metric: MetricKey | MetricKey[] }) {
     return () => { window.removeEventListener("scroll", close, true); window.removeEventListener("resize", close); };
   }, [pos]);
   useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
-  const defs: MetricDefinition[] = (Array.isArray(metric) ? metric : [metric]).map((k) => METRIC_DEFINITIONS[k]);
+  const { dept } = useDept();
+  // On the Service view these numbers come from the older aggregate, not the rule a salesOnly card describes.
+  const defs: MetricDefinition[] = (Array.isArray(metric) ? metric : [metric])
+    .map((k): MetricDefinition => METRIC_DEFINITIONS[k])
+    .filter((d) => !(d.salesOnly && dept === "service"));
   if (defs.length === 0) return null;
   const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
   const show = () => {
