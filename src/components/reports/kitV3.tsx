@@ -9,7 +9,8 @@ import React from "react";
 import { fmtWhenShortIn } from "@/lib/reports/storeTime";
 import { fmtInt, type IntentOutcomeRow, type NamedAppt, type OutcomeSlice, type WarmLeadItem } from "./data";
 import type { ActionItem, ActionItemStats, ActionItemCloser, Conversation } from "./liveData";
-import { FunnelBars, Portal, Td, Th } from "./kit";
+import { FunnelBars, InfoTip, Portal, Td, Th } from "./kit";
+import type { MetricKey } from "@/lib/metricDefinitions";
 import { track } from "@/lib/analytics";
 
 /* Display label for an action-item assignee. Every rooftop we've seen auto-creates + auto-resolves via
@@ -88,6 +89,7 @@ export function ValueTile({
   subtext,
   accent = "purple",
   onClick,
+  info,
 }: {
   label: string;
   total: string;
@@ -107,11 +109,12 @@ export function ValueTile({
   subtext?: React.ReactNode;
   accent?: TileAccent;
   onClick?: () => void;
+  info?: MetricKey; // (i) next to the label with this metric's definition (lib/metricDefinitions.ts)
 }) {
   const color = ACCENTS[accent];
   const body = (
     <>
-      <p className="text-[10px] font-bold uppercase tracking-wider text-[#6b7280] leading-tight min-h-[26px]">{label}</p>
+      <p className="text-[10px] font-bold uppercase tracking-wider text-[#6b7280] leading-tight min-h-[26px]">{label}{info && <InfoTip metric={info} />}</p>
       <div className="flex items-baseline gap-2">
         <p className="text-[32px] font-extrabold tabular-nums leading-none" style={{ color }}>{total}</p>
         {delta === null && total !== "0" && <span className="text-[9.5px] font-semibold text-[#9ca3af]">New</span>}
@@ -167,6 +170,7 @@ export function MetricTile({
   accent = "#813fed",
   onClick,
   title,
+  info,
 }: {
   label: string;
   value: string;
@@ -174,10 +178,11 @@ export function MetricTile({
   accent?: string;
   onClick?: () => void;
   title?: string;
+  info?: MetricKey; // (i) next to the label with this metric's definition (lib/metricDefinitions.ts)
 }) {
   const body = (
     <>
-      <p className="text-[9.5px] font-bold uppercase tracking-wider text-[#6b7280] leading-tight min-h-[22px]">{label}</p>
+      <p className="text-[9.5px] font-bold uppercase tracking-wider text-[#6b7280] leading-tight min-h-[22px]">{label}{info && <InfoTip metric={info} />}</p>
       <p className="mt-0.5 text-[26px] font-extrabold tabular-nums leading-none" style={{ color: accent }}>{value}</p>
       {sub && <p className="mt-1.5 text-[10px] leading-snug text-[#9ca3af]">{sub}</p>}
     </>
@@ -382,7 +387,7 @@ export function NamedApptsTable({ items, teamId, tz }: { items: NamedAppt[]; tea
           <tr>
             <Th>Customer</Th>
             <Th>Channel</Th>
-            <Th>How booked</Th>
+            <Th>How booked<InfoTip metric={["aiBooked", "aiAssistedCrm"]} /></Th>
             <Th>When</Th>
             <Th>Status</Th>
           </tr>

@@ -9,6 +9,7 @@ import {
   Eyebrow,
   fmtInt,
   GhostPreview,
+  InfoTip,
   ReportTopBar,
   SectionLabel,
   StepList,
@@ -460,24 +461,24 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                 serviceMetrics.ts's NO_TWIN_ON_OLD_OVERVIEW (single source for this decision — not
                 re-decided here). Hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} overlap={overlapRow(fleet.leads, split.inbound.leads, split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
+              <Hideable id="tile.leads" ctrl={ctrl}><ValueTile label="Leads touched" info="leadsTouched" total={fmtInt(fleet.leads)} inbound={fmtInt(split.inbound.leads)} outbound={fmtInt(split.outbound.leads)} overlap={overlapRow(fleet.leads, split.inbound.leads, split.outbound.leads)} delta={fleet.deltas.leads} accent="blue" subtext={<>reached or dialed by the AI</>} /></Hideable>
             )}
             {/* Real conversations — NO TWIN. ov-prod's Service Overview never reads realConversations at
                 all (see NO_TWIN_ON_OLD_OVERVIEW). Hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} overlap={overlapRow(fleet.conversations, split.inbound.conversations, split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
+              <Hideable id="tile.conversations" ctrl={ctrl}><ValueTile label="Real conversations" info="realConversations" total={fmtInt(fleet.conversations)} inbound={fmtInt(split.inbound.conversations)} outbound={fmtInt(split.outbound.conversations)} overlap={overlapRow(fleet.conversations, split.inbound.conversations, split.outbound.conversations)} delta={fleet.deltas.conversations} accent="purple" subtext={<>customer spoke or replied — voicemail excluded</>} /></Hideable>
             )}
             {/* Qualified leads — no service-metrics twin (Classification stays available:false pending
                 RETCONVAI-5010). Hidden rather than shown from the old ClickHouse source once the flag is on,
                 so this page never shows a number the new page can't back. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.qualified" ctrl={ctrl}><ValueTile label="Qualified leads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} overlap={overlapRow(fleet.qualified, split.inbound.qualified, split.outbound.qualified)} delta={fleet.deltas.qualified} accent="violet" subtext={<>concrete buying intent</>} /></Hideable>
+              <Hideable id="tile.qualified" ctrl={ctrl}><ValueTile label="Qualified leads" info="qualifiedLeads" total={fmtInt(fleet.qualified)} inbound={fmtInt(split.inbound.qualified)} outbound={fmtInt(split.outbound.qualified)} overlap={overlapRow(fleet.qualified, split.inbound.qualified, split.outbound.qualified)} delta={fleet.deltas.qualified} accent="violet" subtext={<>concrete buying intent</>} /></Hideable>
             )}
             <Hideable id="tile.appts" ctrl={ctrl}>
               {serviceMetricsOn ? (
-                svcMetrics.appointments && <ValueTile label="Appointments — AI-booked" total={fmtInt(svcMetrics.appointments.total)} inbound={svcMetrics.appointments.inbound != null ? fmtInt(svcMetrics.appointments.inbound) : undefined} outbound={svcMetrics.appointments.outbound != null ? fmtInt(svcMetrics.appointments.outbound) : undefined} accent="green" subtext={svcMetrics.appointments.assisted != null && svcMetrics.appointments.assisted > 0 ? <>+{fmtInt(svcMetrics.appointments.assisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>} onClick={svcMetrics.appointments.total > 0 ? openApptModal : undefined} />
+                svcMetrics.appointments && <ValueTile label="Appointments — AI-booked" info="bookedBySpyne" total={fmtInt(svcMetrics.appointments.total)} inbound={svcMetrics.appointments.inbound != null ? fmtInt(svcMetrics.appointments.inbound) : undefined} outbound={svcMetrics.appointments.outbound != null ? fmtInt(svcMetrics.appointments.outbound) : undefined} accent="green" subtext={svcMetrics.appointments.assisted != null && svcMetrics.appointments.assisted > 0 ? <>+{fmtInt(svcMetrics.appointments.assisted)} AI-assisted (CRM)<InfoTip metric="spyneAssisted" /></> : <>meeting created by the AI</>} onClick={svcMetrics.appointments.total > 0 ? openApptModal : undefined} />
               ) : (
-                <ValueTile label="Appointments — AI-booked" total={fmtInt(fleet.appointments)} inbound={fmtInt(split.inbound.appointments)} outbound={fmtInt(split.outbound.appointments)} unassigned={fleet.appointmentsNoAgent > 0 ? fmtInt(fleet.appointmentsNoAgent) : undefined} delta={fleet.deltas.appointments} accent="green" subtext={fleet.appointmentsAssisted > 0 ? <>+{fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)</> : <>meeting created by the AI</>} onClick={fleet.appointments > 0 ? openApptModal : undefined} />
+                <ValueTile label="Appointments — AI-booked" info="aiBooked" total={fmtInt(fleet.appointments)} inbound={fmtInt(split.inbound.appointments)} outbound={fmtInt(split.outbound.appointments)} unassigned={fleet.appointmentsNoAgent > 0 ? fmtInt(fleet.appointmentsNoAgent) : undefined} delta={fleet.deltas.appointments} accent="green" subtext={fleet.appointmentsAssisted > 0 ? <>+{fmtInt(fleet.appointmentsAssisted)} AI-assisted (CRM)<InfoTip metric="aiAssistedCrm" /></> : <>meeting created by the AI</>} onClick={fleet.appointments > 0 ? openApptModal : undefined} />
               )}
             </Hideable>
           </div>
@@ -486,12 +487,12 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
             {/* Hand-offs to team — no service-metrics twin (no transfer/callback field on any of the four
                 endpoints this page reads). Hidden when the flag is on. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.handoffs" ctrl={ctrl}><MetricTile label="Hand-offs to team" value={fmtInt(fleet.handoffs)} accent="#2563eb" sub={<>{fmtInt(fleet.transfers)} transfers · {fmtInt(fleet.callbacks)} callbacks</>} title="Completed transfers + requested callbacks. Failed transfers are reported separately." /></Hideable>
+              <Hideable id="tile.handoffs" ctrl={ctrl}><MetricTile label="Hand-offs to team" info="handoffs" value={fmtInt(fleet.handoffs)} accent="#2563eb" sub={<>{fmtInt(fleet.transfers)} transfers · {fmtInt(fleet.callbacks)} callbacks</>} /></Hideable>
             )}
             {/* Response time is a Sales construct (speed-to-lead, Sales Inbound STL) — never shown on
                 Service, flag or no flag. */}
             {!serviceMetricsOn && fleet.responseTimeSec != null && (
-              <Hideable id="tile.response" ctrl={ctrl}><MetricTile label="Response time" value={fmtSecs(fleet.responseTimeSec)} accent="#0ea5e9" sub={<>avg first response · speed-to-lead</>} title="Average time from a new lead arriving to the AI's first touch (speed-to-lead, Sales Inbound)." /></Hideable>
+              <Hideable id="tile.response" ctrl={ctrl}><MetricTile label="Response time" info="responseTime" value={fmtSecs(fleet.responseTimeSec)} accent="#0ea5e9" sub={<>avg first response · speed-to-lead</>} /></Hideable>
             )}
             {/* Customers with follow-ups — the headline number (created-in-window) has no service-metrics
                 twin; action-item only carries openNow/cleared, not created. Hidden rather than show a
@@ -504,17 +505,17 @@ function OverviewReportView({ agentLinkMode }: { agentLinkMode: AgentLinkMode })
                 Web chat is folded in as a third channel on rooftops that run it — irrelevant here, this
                 whole tile is hidden on Service once the flag is on (NO_TWIN_ON_OLD_OVERVIEW). */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label={(fleet.chats ?? 0) > 0 ? "Calls, texts & chats" : "Calls & texts"} value={fmtInt(fleet.calls + fleet.smsThreads + (fleet.chats ?? 0))} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts{(fleet.chats ?? 0) > 0 ? <> · {fmtInt(fleet.chats)} web chats</> : null}</>} title="AI conversations handled across voice, SMS and web chat — voice calls + SMS threads + chat sessions (conversations, not individual messages)." /></Hideable>
+              <Hideable id="tile.callstexts" ctrl={ctrl}><MetricTile label={(fleet.chats ?? 0) > 0 ? "Calls, texts & chats" : "Calls & texts"} info="callsTexts" value={fmtInt(fleet.calls + fleet.smsThreads + (fleet.chats ?? 0))} accent="#14b8a6" sub={<>{fmtInt(fleet.calls)} calls · {fmtInt(fleet.smsThreads)} texts{(fleet.chats ?? 0) > 0 ? <> · {fmtInt(fleet.chats)} web chats</> : null}</>} /></Hideable>
             )}
             {/* Talk time — NO TWIN. ov-prod's Service Overview never reads talkTimeMinutes. Hidden on
                 Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
+              <Hideable id="tile.talk" ctrl={ctrl}><MetricTile label="Talk time" info="talkTime" value={fmtDuration(fleet.talkMinutes)} accent="#6b7280" sub={<>zero staff minutes spent</>} /></Hideable>
             )}
             {/* After-hours captured — NO TWIN. ov-prod's Service Overview never reads afterHoursLeads.
                 Hidden on Service once the flag is on. */}
             {!serviceMetricsOn && (
-              <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
+              <Hideable id="tile.afterhours" ctrl={ctrl}><MetricTile label="After-hours captured" info="afterHours" value={fmtInt(fleet.afterHours)} accent="#10b981" sub={<>engaged outside working hours</>} /></Hideable>
             )}
           </div>
         </div>

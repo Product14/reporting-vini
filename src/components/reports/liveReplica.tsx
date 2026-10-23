@@ -28,6 +28,15 @@ import { dayKeyFields, hour12, parseReportTs, shiftDayKey, storeDayKey, storePar
 import { UnlockPotentialBanner } from "./valueStory";
 import { InterestForm } from "./upsell";
 import { CountUp, useInView } from "./anim";
+import { InfoTip } from "./kit";
+import type { MetricKey } from "@/lib/metricDefinitions";
+
+// The hero sub-lines carry the assisted count as text; this puts its definition beside it.
+function assistedTip(sub: string): React.ReactNode {
+  if (sub.includes("Spyne-assisted")) return <InfoTip metric="spyneAssisted" />;
+  if (sub.includes("AI-assisted (CRM)")) return <InfoTip metric="aiAssistedCrm" />;
+  return null;
+}
 import type { CustomizeCtrl } from "./customize";
 import type { ReportVariant } from "./dateRange";
 import type { ServiceOverviewOverlay } from "@/lib/serviceMetrics";
@@ -91,7 +100,7 @@ interface HeroNav { onAppointments?: () => void; onActionItems?: () => void; onC
 /** A number still in flight renders as a shimmer bar, never as 0. A zero is a FINDING — "nobody booked
  *  anything this period" — and showing one while the query is still running tells the dealer something
  *  untrue, then silently corrects itself a few seconds later. */
-function HeroTile({ icon, value, label, sub, missing, loading, onClick }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; loading?: boolean; onClick?: () => void }) {
+function HeroTile({ icon, value, label, sub, missing, loading, onClick, info }: { icon: string; value: React.ReactNode; label: string; sub: string; missing?: boolean; loading?: boolean; onClick?: () => void; info?: MetricKey }) {
   // A metric with no data isn't a dead "—" — it's a feature that isn't switched on. Turn it into an
   // upsell that hands the dealer to Training to enable it.
   if (missing) {
@@ -101,7 +110,7 @@ function HeroTile({ icon, value, label, sub, missing, loading, onClick }: { icon
       <div className="flex flex-1 basis-0 min-w-[170px] flex-col items-start gap-[15px] rounded-lg border border-dashed border-[#d8caff] bg-[#faf8ff] p-[15px] text-left">
         <Image src={icon} alt="" width={28} height={28} className="opacity-40" />
         <div className="flex flex-col items-start gap-1">
-          <p className="text-[12px] font-semibold text-[#030712]">{label}</p>
+          <p className="text-[12px] font-semibold text-[#030712]">{label}{info && <InfoTip metric={info} />}</p>
           <p className="text-[11.5px] text-[#9aa1ac]">Not switched on yet</p>
           <span className="mt-0.5 inline-flex items-center gap-1 text-[11.5px] font-bold text-[#4600f2]">Ask your Spyne team to enable</span>
         </div>
@@ -127,6 +136,7 @@ function HeroTile({ icon, value, label, sub, missing, loading, onClick }: { icon
             ? <Image src={icon} alt="" width={15} height={15} className="flex-none" />
             : <span className="text-[13px] leading-none">{icon}</span>}
           {label}
+          {info && <InfoTip metric={info} />}
           {onClick && <span className="text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}
         </p>
         <p className="text-[11.5px] leading-snug text-[#626f81]">{sub}</p>
@@ -194,7 +204,7 @@ function ServiceHeroTiles({ fleet, actionStats, hotLeads, nav }: { fleet: FleetL
             </span>
             <div className="flex flex-col gap-1">
               <p className="flex items-center gap-1 text-[18px] font-bold leading-[22px] text-[#030712]">{t.headline}{t.onClick && <span className="text-[14px] text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
-              <p className="text-[12px] text-[#626f81]">{t.sub}</p>
+              <p className="text-[12px] text-[#626f81]">{t.sub}{assistedTip(t.sub)}</p>
             </div>
           </>
         );
@@ -242,7 +252,7 @@ function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOve
             </span>
             <div className="flex flex-col gap-1">
               <p className="flex items-center gap-1 text-[18px] font-bold leading-[22px] text-[#030712]">{t.headline}{t.onClick && <span className="text-[14px] text-[#b4a1e8] transition-transform group-hover:translate-x-0.5">→</span>}</p>
-              <p className="text-[12px] text-[#626f81]">{t.sub}</p>
+              <p className="text-[12px] text-[#626f81]">{t.sub}{assistedTip(t.sub)}</p>
             </div>
           </>
         );
@@ -257,22 +267,22 @@ function ServiceMetricsHeroTiles({ overlay, nav }: { overlay: ServiceOverviewOve
 
 export function LiveHero({ fleet, actionStats, controls, serviceMode, hotLeads = 0, qualifiedNotBooked, variant = "old", nav, loading, serviceMetricsOverlay }: { fleet: FleetLive; actionStats: ActionItemStats | null; controls?: React.ReactNode; serviceMode?: boolean; hotLeads?: number; qualifiedNotBooked?: number; variant?: ReportVariant; nav?: HeroNav; loading?: boolean; serviceMetricsOverlay?: ServiceOverviewOverlay | null }) {
   // Speed-to-lead leads both sets and is identical in both — only tiles 2-4 differ.
-  const stlTile = { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled };
+  const stlTile = { icon: "/live-overview/icon-speed.svg", value: fmtSecs(fleet.responseTimeSec), label: "Speed-to-lead", sub: fleet.responseTimeSec == null ? "no new-lead sample in this window" : "avg first response", missing: !fleet.stlEnabled, info: "responseTime" as MetricKey };
   // OLD — production today. Keep this arm byte-for-byte as it shipped: it is the control the New arm is
   // being compared against, so "improving" it here would quietly invalidate the comparison.
   const oldTiles = [
     stlTile,
     { icon: "/live-overview/icon-actionitems.svg", value: actionStats ? <CountUp value={actionStats.created} /> : "—", label: "Action Items created", sub: actionStats ? `${fmtInt(actionStats.open)} of which are open` : "syncing…", onClick: nav?.onActionItems },
-    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSub(fleet), onClick: nav?.onAppointments },
-    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed", onClick: nav?.onConversations },
+    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSub(fleet), onClick: nav?.onAppointments, info: "aiBooked" as MetricKey },
+    { icon: "/live-overview/icon-afterhours.svg", value: <><CountUp value={fleet.afterHours} /> leads</>, label: "Captured after-hours", sub: "while the floor was closed", onClick: nav?.onConversations, info: "afterHours" as MetricKey },
   ];
   // NEW — appointment-led: what got booked, what the CRM credits to the AI, and the qualified leads still
   // on the table. apptSubSales drops the "+N AI-assisted" sub-line because tile 3 now carries that number.
   const newTiles = [
     stlTile,
-    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSubSales(fleet), onClick: nav?.onAppointments },
-    { icon: "/live-overview/icon-resolved.svg", value: <CountUp value={fleet.appointmentsAssisted} />, label: "AI-assisted appointments", sub: "you booked, after the AI worked the lead", onClick: nav?.onAppointments },
-    { icon: "/live-overview/icon-actionitems.svg", value: <CountUp value={extraQualified(fleet, qualifiedNotBooked)} />, label: "Additional qualified leads", sub: "qualified, not yet booked", onClick: nav?.onConversations },
+    { icon: "/live-overview/icon-appointments.svg", value: <CountUp value={fleet.appointments} />, label: "Appointments Booked", sub: apptSubSales(fleet), onClick: nav?.onAppointments, info: "aiBooked" as MetricKey },
+    { icon: "/live-overview/icon-resolved.svg", value: <CountUp value={fleet.appointmentsAssisted} />, label: "AI-assisted appointments", sub: "you booked, after the AI worked the lead", onClick: nav?.onAppointments, info: "aiAssistedCrm" as MetricKey },
+    { icon: "/live-overview/icon-actionitems.svg", value: <CountUp value={extraQualified(fleet, qualifiedNotBooked)} />, label: "Additional qualified leads", sub: "qualified, not yet booked", onClick: nav?.onConversations, info: "qualifiedNotBooked" as MetricKey },
   ];
   const tiles = variant === "new" ? newTiles : oldTiles;
   return (
@@ -320,10 +330,10 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
     { pct: reached > 0 ? (appts / reached) * 100 : 0, color: tones[3] },
   ];
   const legend = [
-    { value: reached, label: "Leads Reached", color: tones[0] },
-    { value: connected, label: "Real Conversations", color: tones[1] },
-    { value: qualified, label: "Qualified Leads", color: tones[2] },
-    { value: appts, label: "Appointments Booked", color: tones[3] },
+    { value: reached, label: "Leads Reached", color: tones[0], info: "leadsTouched" as MetricKey },
+    { value: connected, label: "Real Conversations", color: tones[1], info: "realConversations" as MetricKey },
+    { value: qualified, label: "Qualified Leads", color: tones[2], info: "qualifiedLeads" as MetricKey },
+    { value: appts, label: "Appointments Booked", color: tones[3], info: "aiBooked" as MetricKey },
   ];
   const ministats: [string, string][] = [
     ["Calls", fmtInt(agent.metrics.calls)],
@@ -358,7 +368,7 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
         </div>
         <div className="flex flex-col items-end gap-0.5">
           <p className="text-[32px] font-semibold leading-none tracking-[-1px] text-[#030712]">{fmtRate(appts, qualified)}</p>
-          <p className="text-[12px] font-medium text-[#626f81]">Close Rate</p>
+          <p className="text-[12px] font-medium text-[#626f81]">Close Rate<InfoTip metric="closeRate" /></p>
         </div>
       </div>
 
@@ -381,7 +391,7 @@ export function LiveAgentCard({ agent, onClick }: { agent: AgentData; onClick?: 
             <div key={l.label} className={`flex w-full items-center justify-between py-2.5 ${i > 0 ? "border-t border-[#f0f1f3]" : ""}`}>
               <div className="flex items-center gap-2.5">
                 <span className="h-3 w-3 flex-none rounded-sm" style={{ background: l.color }} />
-                <span className="text-[13px] tracking-[-0.24px] text-[#626f81]">{l.label}</span>
+                <span className="text-[13px] tracking-[-0.24px] text-[#626f81]">{l.label}<InfoTip metric={l.info} /></span>
               </div>
               <span className="text-[15px] font-semibold tracking-[-0.28px] text-[#030712]"><CountUp value={l.value} /></span>
             </div>

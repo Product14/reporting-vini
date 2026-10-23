@@ -8,6 +8,7 @@ import { Bucket, BUCKET_LABELS, RAG, type Meeting } from "./data";
 import { fetchMeetings, type MeetingFetchOpts } from "./liveData";
 import { useDept, type Dept, type ReportVariant } from "./dateRange";
 import { track } from "@/lib/analytics";
+import { METRIC_DEFINITIONS, type MetricDefinition, type MetricKey } from "@/lib/metricDefinitions";
 
 export * from "./data";
 
@@ -22,6 +23,131 @@ export function Portal({ children }: { children: React.ReactNode }) {
   useEffect(() => { setMounted(true); }, []);
   if (!mounted || typeof document === "undefined") return null;
   return createPortal(children, document.body);
+}
+
+/* ── (i) metric definition card: hover, keyboard focus or tap. A <span role="button">, not a <button>,
+ * because clickable tiles are themselves <button>s and buttons can't nest. Stops the click so tapping (i)
+ * on a clickable tile doesn't also open the tile's modal. Portaled so overflow-hidden cards don't clip it.
+ * The card stays open while the pointer is on it (a short grace period covers the gap from the icon), sits
+ * below the icon unless there's more room above, and closes on scroll since it's fixed-positioned.
+ * Pass several metrics to explain them side by side (e.g. a "How booked" column). ── */
+const TIP_W = 300;
+const TIP_EST_H = 230; // rough card height, only used to decide above vs below
+
+function TipSection({ def }: { def: MetricDefinition }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="flex items-center gap-1.5 text-[13px] font-bold text-[#111]">
+        <span className="h-1.5 w-1.5 flex-none rounded-full bg-[#813fed]" />
+        {def.title}
+      </p>
+      <p className="text-[12.5px] leading-snug text-[#374151]">{def.summary}</p>
+      {def.example && (
+        <div className="rounded-lg bg-[#f6f2ff] px-2.5 py-2">
+          <p className="text-[9.5px] font-bold uppercase tracking-wider text-[#813fed]">For example</p>
+          <p className="mt-0.5 text-[11.5px] leading-snug text-[#4b5563]">{def.example}</p>
+        </div>
+      )}
+      {(def.counts || def.notCounted) && (
+        <ul className="flex flex-col gap-1 text-[11.5px] leading-snug">
+          {def.counts?.map((c) => (
+            <li key={c} className="flex gap-1.5 text-[#374151]"><span className="flex-none font-bold text-[#16a34a]">✓</span>{c}</li>
+          ))}
+          {def.notCounted?.map((c) => (
+            <li key={c} className="flex gap-1.5 text-[#6b7280]"><span className="flex-none font-bold text-[#dc2626]">✕</span>{c}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export function InfoTip({ metric }: { metric: MetricKey | MetricKey[] }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [pos, setPos] = useState<{ x: number; y: number; arrowX: number; above: boolean } | null>(null);
+  useEffect(() => {
+    if (!pos) return;
+    const close = () => setPos(null);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => { window.removeEventListener("scroll", close, true); window.removeEventListener("resize", close); };
+  }, [pos]);
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
+  const { dept } = useDept();
+  // On the Service view these numbers come from the older aggregate, not the rule a salesOnly card describes.
+  const defs: MetricDefinition[] = (Array.isArray(metric) ? metric : [metric])
+    .map((k): MetricDefinition => METRIC_DEFINITIONS[k])
+    .filter((d) => !(d.salesOnly && dept === "service"));
+  if (defs.length === 0) return null;
+  const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
+  const show = () => {
+    cancelClose();
+    const r = ref.current?.getBoundingClientRect();
+    if (!r) return;
+    const iconX = r.left + r.width / 2;
+    // keep the card on screen: clamp its centre 12px + half its width in from either edge
+    const x = Math.min(Math.max(iconX, TIP_W / 2 + 12), window.innerWidth - TIP_W / 2 - 12);
+    const above = window.innerHeight - r.bottom < TIP_EST_H && r.top > window.innerHeight - r.bottom;
+    setPos({ x, y: above ? r.top - 8 : r.bottom + 8, arrowX: iconX - (x - TIP_W / 2), above });
+  };
+  const hideSoon = () => { cancelClose(); closeTimer.current = setTimeout(() => setPos(null), 120); };
+  const hideNow = () => { cancelClose(); setPos(null); };
+  const label = defs.map((d) => `${d.title}: ${d.summary}`).join(" ");
+  return (
+    <>
+      <span
+        ref={ref}
+        role="button"
+        tabIndex={0}
+        aria-label={label}
+        aria-expanded={pos !== null}
+        className={`print:hidden ml-1 inline-flex h-4 w-4 flex-none items-center justify-center rounded-full align-middle cursor-help outline-none transition-colors ${pos ? "bg-[#ede5ff] text-[#813fed]" : "text-[#9ca3af] hover:bg-[#f3eeff] hover:text-[#813fed] focus-visible:bg-[#f3eeff] focus-visible:text-[#813fed]"}`}
+        onMouseEnter={show}
+        onMouseLeave={hideSoon}
+        onFocus={show}
+        onBlur={hideSoon}
+        // Open, never toggle: hover and focus have already opened it by the time a click lands, so a toggle
+        // closed the card on every desktop click and on an Android tap. It closes on leave, blur, Esc or scroll.
+        onClick={(e) => { e.stopPropagation(); e.preventDefault(); show(); }}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); if (e.key === "Escape") hideNow(); }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" />
+        </svg>
+      </span>
+      {pos && (
+        <Portal>
+          <div
+            role="tooltip"
+            onMouseEnter={cancelClose}
+            onMouseLeave={hideSoon}
+            onClick={(e) => e.stopPropagation()}
+            className={`fixed z-[1000] -translate-x-1/2 ${pos.above ? "-translate-y-full" : ""} text-left normal-case tracking-normal font-normal`}
+            style={{ left: pos.x, top: pos.y, width: TIP_W }}
+          >
+            <div
+              className="relative rounded-xl border border-[#e9e2fb] bg-white p-3.5 shadow-[0_12px_32px_-8px_rgba(58,29,110,0.28)]"
+              style={{ animation: "dropdown-in 160ms ease-out" }}
+            >
+              {/* arrow pointing back at the (i) */}
+              <span
+                className={`absolute h-2.5 w-2.5 rotate-45 border-[#e9e2fb] bg-white ${pos.above ? "-bottom-[6px] border-b border-r" : "-top-[6px] border-l border-t"}`}
+                style={{ left: Math.min(Math.max(pos.arrowX - 5, 14), TIP_W - 24) }}
+              />
+              <div className="flex flex-col gap-3">
+                {defs.map((d, i) => (
+                  <div key={d.title} className={i > 0 ? "border-t border-[#f0ecfa] pt-3" : ""}>
+                    <TipSection def={d} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </Portal>
+      )}
+    </>
+  );
 }
 
 /* ── tabs ── */
